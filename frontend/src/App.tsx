@@ -19,6 +19,7 @@ import {
   type HealthReportData,
   type TourLandmark,
 } from "./data/cityDataClient";
+import { CitySimulationEngine, type SimStateSnapshot } from "./game/simEngine";
 import type {
   Annotation,
   BlastRadiusResult,
@@ -37,6 +38,13 @@ export function App() {
   }
   const client = clientRef.current;
 
+  const simRef = useRef<CitySimulationEngine | null>(null);
+  if (!simRef.current) {
+    simRef.current = new CitySimulationEngine();
+  }
+  const sim = simRef.current;
+  const [simState, setSimState] = useState<SimStateSnapshot>(() => sim.getSnapshot());
+
   const [isStaticMode, setIsStaticMode] = useState(false);
   const [repos, setRepos] = useState<RepoRef[]>([]);
   const [activeRepo, setActiveRepo] = useState<{ owner: string; repo: string } | null>(null);
@@ -52,7 +60,7 @@ export function App() {
 
   useUnifiedCameraHotkeys(viewMode);
 
-  // Cinematic turntable orbit (Preset 5)
+  // Cinematic turntable orbit (Preset 5) + Follow Vehicle Cam (Preset 4)
   useEffect(() => {
     let raf = 0;
     let last = performance.now();
@@ -62,12 +70,42 @@ export function App() {
       const st = cameraStore.getState();
       if (st.cinematicOrbit) {
         cameraStore.setState({ yaw: st.yaw + 0.18 * dt }, { cancelTween: false });
+      } else if (st.followVehicleId) {
+        const veh = sim.getFollowedVehicle(st.followVehicleId);
+        if (veh) {
+          cameraStore.setState(
+            {
+              targetX: st.targetX + (veh.x - st.targetX) * 0.22,
+              targetZ: st.targetZ + (veh.z - st.targetZ) * 0.22,
+            },
+            { cancelTween: false },
+          );
+        }
       }
       raf = requestAnimationFrame(tick);
     };
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-  }, []);
+  }, [sim]);
+
+  // Decoupled 10Hz traffic & city-health simulation loop
+  useEffect(() => {
+    if (!bundle) return;
+    setSimState(sim.step(bundle));
+    const timer = setInterval(() => {
+      const spd = sim.getSpeed();
+      if (spd === 0) {
+        setSimState(sim.getSnapshot());
+        return;
+      }
+      let next = sim.step(bundle);
+      for (let extra = 1; extra < spd; extra++) {
+        next = sim.step(bundle);
+      }
+      setSimState(next);
+    }, 100);
+    return () => clearInterval(timer);
+  }, [bundle, sim]);
   const [blastRadius, setBlastRadius] = useState<BlastRadiusResult | null>(null);
   const [fileDiagnostics, setFileDiagnostics] = useState<LintDiagnostic[]>([]);
   const [fileHistory, setFileHistory] = useState<
@@ -411,6 +449,10 @@ export function App() {
             removedLots={removedLots}
             focusTarget={focusTarget}
             showTraffic={showTraffic}
+            vehicles={simState.vehicles}
+            fireFiles={simState.fireFiles}
+            blackoutFiles={simState.blackoutFiles}
+            floatingPopups={simState.floatingPopups}
             plazas={streetGrid.plazas}
             streetLines={{ xLines: streetGrid.xLines, zLines: streetGrid.zLines }}
             onSelectFile={setSelectedFile}
@@ -433,6 +475,9 @@ export function App() {
               selectedFile={selectedFile}
               blastRadius={blastRadius}
               focusTarget={focusTarget}
+              vehicles={simState.vehicles}
+              fireFiles={simState.fireFiles}
+              blackoutFiles={simState.blackoutFiles}
               plazas={streetGrid.plazas}
               streetLines={{ xLines: streetGrid.xLines, zLines: streetGrid.zLines }}
               onSelectFile={setSelectedFile}
@@ -635,7 +680,13 @@ export function App() {
               onTogglePlay={() => setIsPlayingTime((p) => !p)}
             />
           </div>
-          <Minimap2D districts={bundle.districts} files={bundle.files} />
+          <Minimap2D
+            districts={bundle.districts}
+            files={bundle.files}
+            vehicles={simState.vehicles}
+            fireFiles={simState.fireFiles}
+            blackoutFiles={simState.blackoutFiles}
+          />
         </footer>
       )}
 
