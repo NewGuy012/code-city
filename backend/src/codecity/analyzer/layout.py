@@ -217,25 +217,7 @@ def _pack_urban_parcels(
                     )
                 return out
 
-    # Ultimate uniform grid fallback (always succeeds)
-    n = len(sorted_items)
-    cols = max(1, math.ceil(math.sqrt(n * aspect)))
-    rows = max(1, math.ceil(n / cols))
-    cell_w = inner.w / cols
-    cell_d = inner.d / rows
-    gap_x = min(PARCEL_GAP, cell_w * 0.14)
-    gap_z = min(PARCEL_GAP, cell_d * 0.14)
-    out = {}
-    for idx, (fpath, _) in enumerate(sorted_items):
-        r = idx // cols
-        c = idx % cols
-        out[fpath] = Rect(
-            x=round(inner.x + c * cell_w + gap_x * 0.5, 3),
-            z=round(inner.z + r * cell_d + gap_z * 0.5, 3),
-            w=round(max(0.7, cell_w - gap_x), 3),
-            d=round(max(0.7, cell_d - gap_z), 3),
-        )
-    return out
+    return {}
 
 
 def compute_stable_city_layout(

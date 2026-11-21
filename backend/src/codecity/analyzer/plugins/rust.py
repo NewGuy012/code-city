@@ -9,6 +9,8 @@ from codecity.analyzer.plugins.base import (
     DepCollector,
     PluginResult,
     edges_to_imports,
+    parse_toml_lockfile,
+    safe_read_text,
     structural_diagnostics_to_lint,
 )
 from codecity.analyzer.treesitter_core import AstFileInfo
@@ -21,8 +23,11 @@ def _parse_cargo_deps(worktree_root: Path, snapshot_idx: int) -> list[ExternalDe
     for cargo_toml in sorted(worktree_root.glob("**/Cargo.toml")):
         if "target" in cargo_toml.parts:
             continue
+        raw = safe_read_text(worktree_root, cargo_toml)
+        if not raw:
+            continue
         try:
-            data = tomllib.loads(cargo_toml.read_text(encoding="utf-8", errors="ignore"))
+            data = tomllib.loads(raw)
         except Exception:
             continue
         for section in ("dependencies", "dev-dependencies", "build-dependencies"):
@@ -32,17 +37,7 @@ def _parse_cargo_deps(worktree_root: Path, snapshot_idx: int) -> list[ExternalDe
                     ver = str(spec.get("version", "*")) if isinstance(spec, dict) else str(spec)
                     deps.add(str(name), ver, is_direct=True)
 
-    cargo_lock = worktree_root / "Cargo.lock"
-    if cargo_lock.exists():
-        try:
-            lock_data = tomllib.loads(cargo_lock.read_text(encoding="utf-8", errors="ignore"))
-            for pkg in lock_data.get("package", []):
-                name = str(pkg.get("name", "")).strip()
-                if name:
-                    deps.add(name, str(pkg.get("version", "")), is_direct=deps.is_direct(name))
-        except Exception:
-            pass
-
+    parse_toml_lockfile(worktree_root, "Cargo.lock", deps)
     return deps.items
 
 
@@ -116,3 +111,6 @@ class RustPlugin:
 
     def preview_fix(self, repo_root: Path, file_path: str) -> FixDiffResult | None:
         return None
+
+    def apply_fix(self, repo_root: Path, file_path: str) -> bool:
+        return False

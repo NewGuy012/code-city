@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import functools
 import shutil
+import subprocess
 import sys
+import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
@@ -39,6 +42,8 @@ class LanguagePlugin(Protocol):
 
     def preview_fix(self, repo_root: Path, file_path: str) -> FixDiffResult | None: ...
 
+    def apply_fix(self, repo_root: Path, file_path: str) -> bool: ...
+
 
 def safe_repo_target(repo_root: Path, rel_path: str) -> Path:
     """Validate that `rel_path` stays inside `repo_root` and outside `.git`."""
@@ -54,6 +59,38 @@ def safe_repo_target(repo_root: Path, rel_path: str) -> Path:
     if ".git" in cand.relative_to(root).parts:
         raise ValueError(f"Refusing path inside .git: {rel_path}")
     return cand
+
+
+def safe_read_text(root: Path, path: Path) -> str | None:
+    """Read UTF-8 text only if `path` is a non-symlink file inside `root`."""
+    try:
+        if path.is_symlink():
+            return None
+        root_res = root.resolve()
+        resolved = path.resolve()
+        if not resolved.is_relative_to(root_res) or not resolved.is_file():
+            return None
+        return resolved.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return None
+
+
+def run_tool(
+    cmd: list[str],
+    cwd: Path,
+    *,
+    timeout: int = 20,
+) -> subprocess.CompletedProcess[str]:
+    """Run an external analyzer/formatter CLI with UTF-8 output capture and timeout."""
+    return subprocess.run(
+        cmd,
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=timeout,
+    )
 
 
 def ruff_cmd() -> list[str]:
@@ -74,6 +111,15 @@ def find_bun() -> str | None:
     return str(home_bun) if home_bun.exists() else None
 
 
+@functools.lru_cache(maxsize=4)
+def bun_supports_native_lint(bun_bin: str) -> bool:
+    try:
+        proc = run_tool([bun_bin, "lint", "--no-script", "--help"], Path.cwd(), timeout=5)
+        return proc.returncode == 0 and 'Script not found "lint"' not in (proc.stdout + proc.stderr)
+    except Exception:
+        return False
+
+
 def find_local_oxlint() -> str | None:
     """Locate `oxlint` in workspace `frontend/node_modules` or PATH."""
     candidates = [
@@ -84,6 +130,20 @@ def find_local_oxlint() -> str | None:
         if cand.exists():
             return str(cand)
     return shutil.which("oxlint")
+
+
+def parse_toml_lockfile(worktree_root: Path, filename: str, deps: DepCollector) -> None:
+    """Extract `[[package]]` entries from `uv.lock` or `Cargo.lock` into `deps`."""
+    raw = safe_read_text(worktree_root, worktree_root / filename)
+    if not raw:
+        return
+    try:
+        for pkg in tomllib.loads(raw).get("package", []):
+            name = str(pkg.get("name", "")).strip()
+            if name:
+                deps.add(name, str(pkg.get("version", "")), is_direct=deps.is_direct(name))
+    except Exception:
+        pass
 
 
 class DepCollector:

@@ -60,3 +60,13 @@ def preview_file_fix(
         diff="",
         message="Auto-fix diff preview is currently supported for Python (ruff) and TS/JS (bun).",
     )
+
+
+def apply_file_fix(
+    repo_root: Path,
+    file_path: str,
+    plugins: tuple[LanguagePlugin, ...] = DEFAULT_PLUGINS,
+) -> bool:
+    """Apply in-place lint & format fixes using the first matching LanguagePlugin."""
+    safe_repo_target(repo_root, file_path)
+    return any(plugin.apply_fix(repo_root, file_path) for plugin in plugins)

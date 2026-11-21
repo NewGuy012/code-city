@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from codecity.analyzer.plugins.base import safe_read_text
 from codecity.models import District
 
 
@@ -21,13 +22,15 @@ def enrich_head_districts(repo_path: Path, districts: list[District]) -> None:
     """Enrich district blurbs on HEAD from README/docs markdown when `--semantic` is enabled."""
     doc_chunks: list[str] = []
     for cand in ("README.md", "README.rst", "README.txt", "ARCHITECTURE.md"):
-        p = repo_path / cand
-        if p.is_file():
-            doc_chunks.append(p.read_text(encoding="utf-8", errors="ignore"))
+        txt = safe_read_text(repo_path, repo_path / cand)
+        if txt:
+            doc_chunks.append(txt)
     docs_dir = repo_path / "docs"
-    if docs_dir.is_dir():
+    if docs_dir.is_dir() and not docs_dir.is_symlink():
         for doc_file in sorted(docs_dir.glob("*.md"))[:5]:
-            doc_chunks.append(doc_file.read_text(encoding="utf-8", errors="ignore"))
+            txt = safe_read_text(repo_path, doc_file)
+            if txt:
+                doc_chunks.append(txt)
 
     combined = "\n".join(doc_chunks)
     if not combined.strip():

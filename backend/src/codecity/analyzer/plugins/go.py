@@ -9,6 +9,7 @@ from codecity.analyzer.plugins.base import (
     DepCollector,
     PluginResult,
     edges_to_imports,
+    safe_read_text,
     structural_diagnostics_to_lint,
 )
 from codecity.analyzer.treesitter_core import AstFileInfo
@@ -22,10 +23,10 @@ def _parse_go_mod(worktree_root: Path, snapshot_idx: int) -> tuple[str | None, l
     module_prefix: str | None = None
     deps = DepCollector(snapshot_idx, "go")
 
-    go_mod = worktree_root / "go.mod"
-    if go_mod.exists():
+    raw = safe_read_text(worktree_root, worktree_root / "go.mod")
+    if raw:
         in_require = False
-        for raw_line in go_mod.read_text(encoding="utf-8", errors="ignore").splitlines():
+        for raw_line in raw.splitlines():
             line = raw_line.split("//", 1)[0].strip()
             if not line:
                 continue
@@ -93,3 +94,6 @@ class GoPlugin:
 
     def preview_fix(self, repo_root: Path, file_path: str) -> FixDiffResult | None:
         return None
+
+    def apply_fix(self, repo_root: Path, file_path: str) -> bool:
+        return False

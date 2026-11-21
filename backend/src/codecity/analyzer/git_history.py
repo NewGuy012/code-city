@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import os
 import re
 import subprocess
@@ -10,6 +11,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from codecity.models import CochangePair
 
@@ -17,6 +19,14 @@ BUGFIX_RE = re.compile(r"\b(fix|fixes|fixed|bug|hotfix|patch|crash|revert|error|
 MAX_COCHANGE_FILES_PER_COMMIT = 35
 ROLLING_WINDOW_DAYS = 90
 _REMOTE_PREFIXES = ("http://", "https://", "git@", "ssh://")
+_SAFE_GIT_FLAGS = (
+    "-c",
+    "core.hooksPath=/dev/null",
+    "-c",
+    "core.fsmonitor=false",
+    "-c",
+    "protocol.file.allow=never",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,9 +91,8 @@ class GitHistoryAnalysis:
         stats: dict[str, FileHistoryStats] = {}
         for fpath, (commits, lines, bugfixes, authors) in acc.items():
             n_commits = len(commits)
-            churn = n_commits + min(50, lines // 40)
             stats[fpath] = FileHistoryStats(
-                churn_90d=max(n_commits, churn),
+                churn_90d=n_commits + min(50, lines // 40),
                 bugfix_commits_90d=bugfixes,
                 distinct_authors_90d=len(authors),
             )
@@ -146,6 +155,19 @@ class GitHistoryAnalysis:
         return pairs[:limit]
 
 
+def _validate_remote_url(url: str) -> None:
+    if url.startswith(("http://", "https://", "ssh://")):
+        host = (urlparse(url).hostname or "").strip().lower()
+        if not host or host == "localhost" or host.endswith(".localhost"):
+            raise ValueError(f"Refusing non-public remote host: {url}")
+        try:
+            ip = ipaddress.ip_address(host)
+        except ValueError:
+            ip = None
+        if ip is not None and not ip.is_global:
+            raise ValueError(f"Refusing non-public remote IP: {url}")
+
+
 def run_git(
     repo_path: Path,
     args: list[str],
@@ -154,13 +176,13 @@ def run_git(
     extra_env: dict[str, str] | None = None,
     timeout: int = 60,
 ) -> subprocess.CompletedProcess[str]:
-    """Run a git subcommand inside `repo_path` with non-interactive prompt suppression."""
+    """Run a git subcommand inside `repo_path` with hooks/prompts disabled."""
     env = os.environ.copy()
     env.setdefault("GIT_TERMINAL_PROMPT", "0")
     if extra_env:
         env.update(extra_env)
     return subprocess.run(
-        ["git", "-C", str(repo_path), *args],
+        ["git", *_SAFE_GIT_FLAGS, "-C", str(repo_path), *args],
         env=env,
         capture_output=True,
         text=True,
@@ -188,6 +210,7 @@ def resolve_git_repo(source: str, clones_dir: Path) -> Path:
         and not cleaned.startswith("-")
         and not any(ch.isspace() for ch in cleaned)
     ):
+        _validate_remote_url(cleaned)
         clones_root = clones_dir.resolve()
         clones_root.mkdir(parents=True, exist_ok=True)
         slug = (
@@ -203,7 +226,16 @@ def resolve_git_repo(source: str, clones_dir: Path) -> Path:
         env = os.environ.copy()
         env.setdefault("GIT_TERMINAL_PROMPT", "0")
         subprocess.run(
-            ["git", "clone", "--quiet", "--", cleaned, str(dest)],
+            [
+                "git",
+                *_SAFE_GIT_FLAGS,
+                "clone",
+                "--quiet",
+                "--no-recurse-submodules",
+                "--",
+                cleaned,
+                str(dest),
+            ],
             env=env,
             check=True,
             capture_output=True,

@@ -11,10 +11,10 @@ from typing import Any
 from codecity.analyzer.git_history import KeyframeSpec, parse_git_history, resolve_git_repo
 from codecity.analyzer.layout import compute_stable_city_layout
 from codecity.analyzer.plugins import run_all_plugins
-from codecity.analyzer.role_classifier import build_snapshot_metrics, classify_building_archetype
-from codecity.analyzer.treesitter_core import AstFileInfo, detect_language, scan_worktree_ast
+from codecity.analyzer.role_classifier import build_snapshot_metrics, classify_district_zone
+from codecity.analyzer.treesitter_core import scan_worktree_ast
 from codecity.analyzer.worktree import WorktreeManager, list_keyframe_file_sizes
-from codecity.models import RepoRef, ZoneType
+from codecity.models import RepoRef
 from codecity.storage.lakehouse import LakehouseManager, infer_owner_repo
 from codecity.storage.quack_server import QuackServerManager
 
@@ -30,21 +30,6 @@ class AnalyzeSummary:
     total_files_latest: int
 
 
-def _hint_zone_from_path(rel_path: str) -> ZoneType:
-    lang, _ = detect_language(rel_path)
-    dummy = AstFileInfo(
-        file_path=rel_path,
-        language=lang,
-        sloc=20,
-        symbol_count=1,
-        max_complexity=1,
-        type_or_doc_ratio=0.5,
-        signals={"is_test": "test" in rel_path.lower()},
-    )
-    _, zone, _, _ = classify_building_archetype(dummy, fan_in=0, fan_out=0, pagerank=0.0)
-    return zone
-
-
 def analyze_repository(
     source: str,
     *,
@@ -57,7 +42,7 @@ def analyze_repository(
     semantic: bool = False,
     on_progress: ProgressCallback | None = None,
 ) -> AnalyzeSummary:
-    """Run Pass 1 (Git/Polars) and Pass 2 (parallel worktrees -> Quack -> DuckLake)."""
+    """Run Pass 1 (Git history) and Pass 2 (parallel worktrees -> Quack -> DuckLake)."""
     lake = lakehouse or LakehouseManager()
     resolved_owner, resolved_repo = infer_owner_repo(source, owner=owner, repo=repo)
 
@@ -77,7 +62,7 @@ def analyze_repository(
     emit("resolve", f"Resolving repository `{source}`...", 5.0)
     repo_path = resolve_git_repo(source, lake.data_dir / "clones")
 
-    emit("git_history", "Pass 1: Streaming `git log --numstat` into Polars...", 15.0)
+    emit("git_history", "Pass 1: Streaming `git log --numstat` history...", 15.0)
     history = parse_git_history(repo_path, max_keyframes=max_keyframes)
     if not history.keyframes:
         raise ValueError(f"Repository has no commits: {repo_path}")
@@ -89,7 +74,7 @@ def analyze_repository(
         total_keyframes=len(history.keyframes),
     )
     union_weights = list_keyframe_file_sizes(repo_path, history.keyframes)
-    zone_hints = {p: [_hint_zone_from_path(p)] for p in union_weights}
+    zone_hints = {p: [classify_district_zone(p, [])] for p in union_weights}
     file_layout, district_layout = compute_stable_city_layout(union_weights, zone_hints)
 
     wt_mgr = WorktreeManager(repo_path)

@@ -4,8 +4,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
+from codecity.analyzer.git_history import resolve_git_repo
 from codecity.analyzer.layout import CITY_CANVAS_D, CITY_CANVAS_W, compute_stable_city_layout
 from codecity.analyzer.pipeline import analyze_repository
+from codecity.analyzer.treesitter_core import scan_worktree_ast
 from codecity.models import BuildingArchetype, ZoneType
 from codecity.storage.lakehouse import LakehouseManager
 from tests.conftest import create_polyglot_fixture_repo
@@ -125,3 +129,23 @@ def test_quantized_parcels_non_overlapping_and_within_canvas() -> None:
             overlap_x = min(ax + aw, bx + bw) - max(ax, bx)
             overlap_z = min(az + ad, bz + bd) - max(az, bz)
             assert overlap_x <= 0.01 or overlap_z <= 0.01, f"Overlap between {pa} and {pb}"
+
+
+def test_worktree_scanner_skips_symlinks_and_remote_rejects_local_urls(tmp_path: Path) -> None:
+    outside = tmp_path / "secret.py"
+    outside.write_text("SECRET = 'leak'\n")
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    (wt / "ok.py").write_text("def ok() -> int:\n    return 1\n")
+    (wt / "leak.py").symlink_to(outside)
+
+    scanned = scan_worktree_ast(wt)
+    assert list(scanned.keys()) == ["ok.py"]
+
+    for url in (
+        "http://127.0.0.1:8787/repo.git",
+        "https://localhost/a/b.git",
+        "http://169.254.169.254/x",
+    ):
+        with pytest.raises(ValueError):
+            resolve_git_repo(url, tmp_path / "clones")

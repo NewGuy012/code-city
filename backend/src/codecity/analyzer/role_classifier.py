@@ -35,50 +35,51 @@ def district_for_file(file_path: str) -> str:
     return "/".join(parts[:2])
 
 
+_DISTRICT_ZONE_RULES: tuple[tuple[tuple[str, ...], ZoneType], ...] = (
+    (("test", "spec", "bench", "fixture", "e2e"), ZoneType.GREENBELT_PARKS),
+    (
+        ("api", "route", "controller", "handler", "endpoint", "cli", "cmd", "gateway"),
+        ZoneType.HARBOR_GATES,
+    ),
+    (
+        ("db", "storage", "sql", "schema", "model", "migration", "repo", "lake", "cache"),
+        ZoneType.VAULTS_RESERVOIR,
+    ),
+    (
+        ("ui", "component", "page", "view", "frontend", "web", "style", "city", "studio"),
+        ZoneType.GALLERY_STOREFRONT,
+    ),
+    (
+        ("worker", "pipeline", "etl", "parser", "compiler", "analyzer", "compute", "engine"),
+        ZoneType.INDUSTRIAL_QUARTER,
+    ),
+    (
+        ("auth", "middleware", "config", "util", "helper", "telemetry", "log", "common"),
+        ZoneType.CIVIC_UTILITIES,
+    ),
+    (("core", "domain", "service", "kernel", "server"), ZoneType.DOWNTOWN_CORE),
+)
+
+_GRADE_THRESHOLDS: tuple[tuple[float, str], ...] = (
+    (92, "A+"),
+    (85, "A"),
+    (80, "A-"),
+    (74, "B+"),
+    (68, "B"),
+    (60, "C+"),
+    (50, "C"),
+)
+
+
 def classify_district_zone(
     district_path: str,
     file_zones: list[ZoneType],
 ) -> ZoneType:
     """Assign one of the 8 SimCity District Zones to a directory neighborhood."""
     low = district_path.lower()
-    if any(k in low for k in ("test", "spec", "bench", "fixture", "e2e")):
-        return ZoneType.GREENBELT_PARKS
-    if any(
-        k in low
-        for k in ("api", "route", "controller", "handler", "endpoint", "cli", "cmd", "gateway")
-    ):
-        return ZoneType.HARBOR_GATES
-    if any(
-        k in low
-        for k in ("db", "storage", "sql", "schema", "model", "migration", "repo", "lake", "cache")
-    ):
-        return ZoneType.VAULTS_RESERVOIR
-    if any(
-        k in low
-        for k in ("ui", "component", "page", "view", "frontend", "web", "style", "city", "studio")
-    ):
-        return ZoneType.GALLERY_STOREFRONT
-    if any(
-        k in low
-        for k in (
-            "worker",
-            "pipeline",
-            "etl",
-            "parser",
-            "compiler",
-            "analyzer",
-            "compute",
-            "engine",
-        )
-    ):
-        return ZoneType.INDUSTRIAL_QUARTER
-    if any(
-        k in low
-        for k in ("auth", "middleware", "config", "util", "helper", "telemetry", "log", "common")
-    ):
-        return ZoneType.CIVIC_UTILITIES
-    if any(k in low for k in ("core", "domain", "service", "kernel", "server")):
-        return ZoneType.DOWNTOWN_CORE
+    for keywords, zone in _DISTRICT_ZONE_RULES:
+        if any(k in low for k in keywords):
+            return zone
     if file_zones:
         return Counter(file_zones).most_common(1)[0][0]
     return ZoneType.DOWNTOWN_CORE
@@ -268,23 +269,7 @@ def classify_building_archetype(
 
 def grade_and_title(health_score: float, total_lint: int, max_churn: int) -> tuple[str, str]:
     """Map numeric health score into SimCity Repo Grade & Persona title."""
-    if health_score >= 92:
-        grade = "A+"
-    elif health_score >= 85:
-        grade = "A"
-    elif health_score >= 80:
-        grade = "A-"
-    elif health_score >= 74:
-        grade = "B+"
-    elif health_score >= 68:
-        grade = "B"
-    elif health_score >= 60:
-        grade = "C+"
-    elif health_score >= 50:
-        grade = "C"
-    else:
-        grade = "D"
-
+    grade = next((g for floor, g in _GRADE_THRESHOLDS if health_score >= floor), "D")
     if health_score >= 84 and total_lint <= 15:
         title = "Sunlit Civic Metropolis"
     elif max_churn >= 15 and health_score >= 70:

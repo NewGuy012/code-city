@@ -5,7 +5,6 @@ from __future__ import annotations
 import difflib
 import json
 import re
-import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -14,34 +13,17 @@ from codecity.analyzer.plugins.base import (
     TS_EXTS,
     DepCollector,
     PluginResult,
+    bun_supports_native_lint,
     edges_to_imports,
     find_bun,
     find_local_oxlint,
+    run_tool,
+    safe_read_text,
     safe_repo_target,
     structural_diagnostics_to_lint,
 )
 from codecity.analyzer.treesitter_core import AstFileInfo
 from codecity.models import ExternalDep, FileImport, FixDiffResult, LintDiagnostic
-
-_BUN_LINT_SUPPORTED: bool | None = None
-
-
-def _bun_supports_native_lint(bun_bin: str) -> bool:
-    global _BUN_LINT_SUPPORTED
-    if _BUN_LINT_SUPPORTED is not None:
-        return _BUN_LINT_SUPPORTED
-    try:
-        proc = subprocess.run(
-            [bun_bin, "lint", "--no-script", "--help"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        combined = proc.stdout + proc.stderr
-        _BUN_LINT_SUPPORTED = proc.returncode == 0 and 'Script not found "lint"' not in combined
-    except Exception:
-        _BUN_LINT_SUPPORTED = False
-    return _BUN_LINT_SUPPORTED
 
 
 def _strip_jsonc(raw: str) -> str:
@@ -50,14 +32,42 @@ def _strip_jsonc(raw: str) -> str:
     return re.sub(r",(\s*[}\]])", r"\1", "\n".join(lines))
 
 
+def _find_nearest_bun_cfg_dir(root: Path, target: Path) -> Path:
+    root_res = root.resolve()
+    cur = target.resolve().parent
+    while cur != root_res.parent:
+        if (cur / "bunfig.toml").exists() or (cur / "package.json").exists():
+            return cur
+        if cur == root_res:
+            break
+        cur = cur.parent
+    return root_res
+
+
+def _run_ts_fixes(target: Path, cwd: Path, bun_bin: str) -> str:
+    linter_label = "bun lint --fix"
+    if bun_supports_native_lint(bun_bin):
+        run_tool([bun_bin, "lint", "--no-script", "--fix", "--", str(target)], cwd, timeout=15)
+    else:
+        oxlint_bin = find_local_oxlint()
+        if oxlint_bin:
+            linter_label = "oxlint --fix + bun fmt"
+            run_tool([bun_bin, "run", oxlint_bin, "--fix", "--", str(target)], cwd, timeout=15)
+    run_tool([bun_bin, "fmt", "--no-script", "--", str(target)], cwd, timeout=15)
+    return linter_label
+
+
 def _parse_npm_deps(worktree_root: Path, snapshot_idx: int) -> list[ExternalDep]:
     deps = DepCollector(snapshot_idx, "npm")
 
     for pkg_json in sorted(worktree_root.glob("**/package.json")):
         if "node_modules" in pkg_json.parts:
             continue
+        raw = safe_read_text(worktree_root, pkg_json)
+        if not raw:
+            continue
         try:
-            data = json.loads(pkg_json.read_text(encoding="utf-8", errors="ignore"))
+            data = json.loads(raw)
         except Exception:
             continue
         for section in ("dependencies", "devDependencies", "peerDependencies"):
@@ -69,8 +79,11 @@ def _parse_npm_deps(worktree_root: Path, snapshot_idx: int) -> list[ExternalDep]
     for bun_lock in sorted(worktree_root.glob("**/bun.lock")):
         if "node_modules" in bun_lock.parts:
             continue
+        raw = safe_read_text(worktree_root, bun_lock)
+        if not raw:
+            continue
         try:
-            data = json.loads(_strip_jsonc(bun_lock.read_text(encoding="utf-8", errors="ignore")))
+            data = json.loads(_strip_jsonc(raw))
             packages = data.get("packages", {})
             if isinstance(packages, dict):
                 for pkg_name, tuple_val in packages.items():
@@ -86,8 +99,11 @@ def _parse_npm_deps(worktree_root: Path, snapshot_idx: int) -> list[ExternalDep]
     for pkg_lock in sorted(worktree_root.glob("**/package-lock.json")):
         if "node_modules" in pkg_lock.parts:
             continue
+        raw = safe_read_text(worktree_root, pkg_lock)
+        if not raw:
+            continue
         try:
-            data = json.loads(pkg_lock.read_text(encoding="utf-8", errors="ignore"))
+            data = json.loads(raw)
             packages = data.get("packages", {})
             if isinstance(packages, dict):
                 for key_path, meta in packages.items():
@@ -107,8 +123,11 @@ def _load_tsconfig_aliases(worktree_root: Path) -> list[tuple[str, str, Path]]:
     for cfg in sorted(worktree_root.glob("**/tsconfig*.json")):
         if "node_modules" in cfg.parts:
             continue
+        raw = safe_read_text(worktree_root, cfg)
+        if not raw:
+            continue
         try:
-            data = json.loads(_strip_jsonc(cfg.read_text(encoding="utf-8", errors="ignore")))
+            data = json.loads(_strip_jsonc(raw))
         except Exception:
             continue
         co = data.get("compilerOptions", {})
@@ -275,7 +294,7 @@ class TypeScriptPlugin:
         if bun_bin:
             lint_cmd: list[str] | None = None
             linter_name = "bun-lint"
-            if _bun_supports_native_lint(bun_bin):
+            if bun_supports_native_lint(bun_bin):
                 lint_cmd = [bun_bin, "lint", "--no-script", "-f", "json", "--", *ts_paths[:200]]
             else:
                 oxlint_bin = find_local_oxlint()
@@ -285,15 +304,7 @@ class TypeScriptPlugin:
 
             if lint_cmd is not None:
                 try:
-                    proc = subprocess.run(
-                        lint_cmd,
-                        cwd=worktree_root,
-                        capture_output=True,
-                        text=True,
-                        encoding="utf-8",
-                        errors="replace",
-                        timeout=30,
-                    )
+                    proc = run_tool(lint_cmd, worktree_root, timeout=30)
                     diagnostics.extend(
                         _parse_lint_json(
                             proc.stdout, worktree_root, snapshot_idx, ast_files, linter_name
@@ -316,28 +327,16 @@ class TypeScriptPlugin:
             by_cfg_dir: dict[Path, list[str]] = {}
             wt_res = worktree_root.resolve()
             for rel in ts_paths[:200]:
-                cur = (wt_res / rel).parent
-                cfg_dir = wt_res
-                while cur != wt_res.parent:
-                    if (cur / "bunfig.toml").exists() or (cur / "package.json").exists():
-                        cfg_dir = cur
-                        break
-                    if cur == wt_res:
-                        break
-                    cur = cur.parent
+                cfg_dir = _find_nearest_bun_cfg_dir(wt_res, wt_res / rel)
                 by_cfg_dir.setdefault(cfg_dir, []).append(
                     (wt_res / rel).relative_to(cfg_dir).as_posix()
                 )
 
             for cfg_dir, sub_paths in by_cfg_dir.items():
                 try:
-                    fmt_proc = subprocess.run(
+                    fmt_proc = run_tool(
                         [bun_bin, "fmt", "--no-script", "--check", "--", *sub_paths],
-                        cwd=cfg_dir,
-                        capture_output=True,
-                        text=True,
-                        encoding="utf-8",
-                        errors="replace",
+                        cfg_dir,
                         timeout=20,
                     )
                     if fmt_proc.returncode != 0:
@@ -377,33 +376,15 @@ class TypeScriptPlugin:
 
         rel = target.relative_to(repo_root.resolve()).as_posix()
         original = target.read_text(encoding="utf-8", errors="replace")
+        cfg_dir = _find_nearest_bun_cfg_dir(repo_root, target)
+        bunfig_raw = safe_read_text(repo_root, cfg_dir / "bunfig.toml")
         with tempfile.TemporaryDirectory() as td:
-            tmp_file = Path(td) / target.name
+            td_path = Path(td)
+            if bunfig_raw is not None:
+                (td_path / "bunfig.toml").write_text(bunfig_raw, encoding="utf-8")
+            tmp_file = td_path / target.name
             tmp_file.write_text(original, encoding="utf-8")
-            linter_label = "bun lint --fix"
-            if _bun_supports_native_lint(bun_bin):
-                subprocess.run(
-                    [bun_bin, "lint", "--no-script", "--fix", "--", str(tmp_file)],
-                    cwd=td,
-                    capture_output=True,
-                    timeout=15,
-                )
-            else:
-                oxlint_bin = find_local_oxlint()
-                if oxlint_bin:
-                    linter_label = "oxlint --fix + bun fmt"
-                    subprocess.run(
-                        [bun_bin, "run", oxlint_bin, "--fix", "--", str(tmp_file)],
-                        cwd=td,
-                        capture_output=True,
-                        timeout=15,
-                    )
-            subprocess.run(
-                [bun_bin, "fmt", "--no-script", "--", str(tmp_file)],
-                cwd=td,
-                capture_output=True,
-                timeout=15,
-            )
+            linter_label = _run_ts_fixes(tmp_file, td_path, bun_bin)
             fixed = tmp_file.read_text(encoding="utf-8", errors="replace")
 
         diff_txt = "".join(
@@ -421,3 +402,15 @@ class TypeScriptPlugin:
             diff=diff_txt,
             message="Bun auto-fix preview ready" if diff_txt.strip() else "File already clean.",
         )
+
+    def apply_fix(self, repo_root: Path, file_path: str) -> bool:
+        if not file_path.endswith(TS_EXTS):
+            return False
+        target = safe_repo_target(repo_root, file_path)
+        if not target.is_file():
+            return False
+        bun_bin = find_bun()
+        if not bun_bin:
+            return False
+        _run_ts_fixes(target, _find_nearest_bun_cfg_dir(repo_root, target), bun_bin)
+        return True

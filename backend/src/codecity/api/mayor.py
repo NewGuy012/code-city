@@ -10,13 +10,8 @@ from pathlib import Path
 from typing import Any
 
 from codecity.analyzer.git_history import run_git
-from codecity.analyzer.plugins.base import (
-    TS_EXTS,
-    find_bun,
-    find_local_oxlint,
-    ruff_cmd,
-    safe_repo_target,
-)
+from codecity.analyzer.plugins import apply_file_fix
+from codecity.analyzer.plugins.base import TS_EXTS, safe_repo_target
 
 MAYOR_BRANCH = "codecity/mayor-session"
 _MAYOR_ENV = {
@@ -160,37 +155,7 @@ def execute_live_mayor_tool(
     if tool == "sweeper":
         if not target.is_file():
             raise FileNotFoundError(f"Target file not found: {target_path}")
-        if rel_target.endswith((".py", ".pyi")):
-            ruff = ruff_cmd()
-            subprocess.run(
-                [*ruff, "check", "--no-cache", "--fix", "--", rel_target],
-                cwd=repo_path,
-                capture_output=True,
-                timeout=15,
-            )
-            subprocess.run(
-                [*ruff, "format", "--no-cache", "--", rel_target],
-                cwd=repo_path,
-                capture_output=True,
-                timeout=15,
-            )
-        elif rel_target.endswith(TS_EXTS):
-            oxlint_bin = find_local_oxlint()
-            bun_bin = find_bun()
-            if bun_bin and oxlint_bin:
-                subprocess.run(
-                    [bun_bin, "run", oxlint_bin, "--fix", "--", str(target)],
-                    cwd=repo_path,
-                    capture_output=True,
-                    timeout=15,
-                )
-            if bun_bin:
-                subprocess.run(
-                    [bun_bin, "fmt", "--no-script", "--", str(target)],
-                    cwd=repo_path,
-                    capture_output=True,
-                    timeout=15,
-                )
+        apply_file_fix(repo_path, rel_target)
         committed, sha, diff = _commit_if_dirty(
             repo_path,
             [rel_target],
@@ -203,7 +168,7 @@ def execute_live_mayor_tool(
 
     if tool == "proving_park":
         stem = re.sub(r"[^a-zA-Z0-9_]+", "_", Path(rel_target).stem).strip("_") or "module"
-        if rel_target.endswith((".ts", ".tsx", ".js", ".jsx")):
+        if rel_target.endswith(TS_EXTS):
             parent_dir = Path(rel_target).parent.as_posix()
             rel_test = (
                 f"{stem}.mayor.test.ts"

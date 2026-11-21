@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import functools
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -78,20 +80,18 @@ SKIP_FILENAMES = frozenset(
 
 MAX_ANALYZED_FILE_BYTES = 512 * 1024
 
-_LANG_CACHE: dict[str, Language] = {}
+_LANG_LOADERS = {
+    "python": tree_sitter_python.language,
+    "typescript": tree_sitter_typescript.language_typescript,
+    "tsx": tree_sitter_typescript.language_tsx,
+    "rust": tree_sitter_rust.language,
+    "go": tree_sitter_go.language,
+}
 
 
+@functools.lru_cache(maxsize=8)
 def _get_language(lang_key: str) -> Language:
-    if lang_key not in _LANG_CACHE:
-        loaders = {
-            "python": tree_sitter_python.language,
-            "typescript": tree_sitter_typescript.language_typescript,
-            "tsx": tree_sitter_typescript.language_tsx,
-            "rust": tree_sitter_rust.language,
-            "go": tree_sitter_go.language,
-        }
-        _LANG_CACHE[lang_key] = Language(loaders[lang_key]())
-    return _LANG_CACHE[lang_key]
+    return Language(_LANG_LOADERS[lang_key]())
 
 
 EXT_TO_LANG: dict[str, tuple[str, str | None]] = {
@@ -308,119 +308,82 @@ def _compute_function_complexity(func_node: Node, source_bytes: bytes) -> int:
     return complexity
 
 
-def _extract_imports(
-    root: Node,
+_STRING_LITERAL_RE = re.compile(
+    r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|`(?:\\.|[^`\\])*`',
+    re.S,
+)
+
+
+def _collect_node_imports(
+    node: Node,
     source_bytes: bytes,
     grammar_key: str,
-) -> list[str]:
-    """Extract raw import targets directly from the Tree-sitter AST."""
-    imports: list[str] = []
-    stack = [root]
-    while stack:
-        node = stack.pop()
-        ntype = node.type
-
-        if grammar_key == "python":
-            if ntype == "import_statement":
-                for child in node.children:
-                    if child.type in {"dotted_name", "aliased_import"}:
-                        name_node = child.child_by_field_name("name") or child
-                        imports.append(_node_text(name_node, source_bytes).strip())
-            elif ntype == "import_from_statement":
-                mod_node = node.child_by_field_name("module_name")
-                prefix = ""
-                for child in node.children:
-                    if child.type == "relative_import":
-                        prefix = _node_text(child, source_bytes).strip()
-                        break
-                if prefix:
-                    imports.append(prefix)
-                elif mod_node is not None:
-                    imports.append(_node_text(mod_node, source_bytes).strip())
-
-        elif grammar_key in {"typescript", "tsx", "javascript"}:
-            if ntype in {"import_statement", "export_statement"}:
-                src_node = node.child_by_field_name("source")
-                if src_node is not None:
-                    raw = _node_text(src_node, source_bytes).strip().strip("\"'")
-                    if raw:
-                        imports.append(raw)
-            elif ntype == "call_expression":
-                fn_node = node.child_by_field_name("function")
-                args_node = node.child_by_field_name("arguments")
-                if fn_node is not None and args_node is not None:
-                    fn_txt = _node_text(fn_node, source_bytes).strip()
-                    if fn_txt in {"require", "import"}:
-                        for arg in args_node.named_children:
-                            if arg.type == "string":
-                                raw = _node_text(arg, source_bytes).strip().strip("\"'")
-                                if raw:
-                                    imports.append(raw)
-
-        elif grammar_key == "rust":
-            if ntype == "use_declaration":
-                txt = _node_text(node, source_bytes)
-                txt = txt.removeprefix("pub ").removeprefix("use ").rstrip(";").strip()
-                if txt:
-                    imports.append(txt)
-            elif ntype == "mod_item":
-                # External module declaration `mod foo;` (no block body)
-                has_body = any(c.type == "declaration_list" for c in node.children)
-                if not has_body:
-                    name_node = node.child_by_field_name("name")
-                    if name_node is not None:
-                        imports.append(f"mod::{_node_text(name_node, source_bytes).strip()}")
-
-        elif grammar_key == "go" and ntype == "import_spec":
-            path_node = node.child_by_field_name("path")
-            if path_node is not None:
-                raw = _node_text(path_node, source_bytes).strip().strip('"')
+    imports: list[str],
+) -> None:
+    ntype = node.type
+    if grammar_key == "python":
+        if ntype == "import_statement":
+            for child in node.children:
+                if child.type in {"dotted_name", "aliased_import"}:
+                    name_node = child.child_by_field_name("name") or child
+                    imports.append(_node_text(name_node, source_bytes).strip())
+        elif ntype == "import_from_statement":
+            prefix = next(
+                (
+                    _node_text(c, source_bytes).strip()
+                    for c in node.children
+                    if c.type == "relative_import"
+                ),
+                "",
+            )
+            mod_node = node.child_by_field_name("module_name")
+            if prefix:
+                imports.append(prefix)
+            elif mod_node is not None:
+                imports.append(_node_text(mod_node, source_bytes).strip())
+    elif grammar_key in {"typescript", "tsx", "javascript"}:
+        if ntype in {"import_statement", "export_statement"}:
+            src_node = node.child_by_field_name("source")
+            if src_node is not None:
+                raw = _node_text(src_node, source_bytes).strip().strip("\"'")
                 if raw:
                     imports.append(raw)
-
-        stack.extend(node.children)
-
-    # Deduplicate preserving order
-    seen: set[str] = set()
-    uniq: list[str] = []
-    for imp in imports:
-        if imp and imp not in seen:
-            seen.add(imp)
-            uniq.append(imp)
-    return uniq
-
-
-def _strip_strings_and_comments_for_hints(text: str) -> str:
-    """Blank quoted string literals in a single linear pass for conservative hint checks."""
-    out: list[str] = []
-    i = 0
-    n = len(text)
-    while i < n:
-        ch = text[i]
-        if ch in {"'", '"', "`"}:
-            out.append('""')
-            quote = ch
-            i += 1
-            while i < n:
-                cur = text[i]
-                if cur == "\\":
-                    i += 2
-                    continue
-                if cur == quote:
-                    i += 1
-                    break
-                i += 1
-            continue
-        out.append(ch)
-        i += 1
-    return "".join(out)
+        elif ntype == "call_expression":
+            fn_node = node.child_by_field_name("function")
+            args_node = node.child_by_field_name("arguments")
+            if (
+                fn_node is not None
+                and args_node is not None
+                and _node_text(fn_node, source_bytes).strip() in {"require", "import"}
+            ):
+                for arg in args_node.named_children:
+                    if arg.type == "string":
+                        raw = _node_text(arg, source_bytes).strip().strip("\"'")
+                        if raw:
+                            imports.append(raw)
+    elif grammar_key == "rust":
+        if ntype == "use_declaration":
+            txt = _node_text(node, source_bytes).removeprefix("pub ").removeprefix("use ")
+            txt = txt.rstrip(";").strip()
+            if txt:
+                imports.append(txt)
+        elif ntype == "mod_item" and not any(c.type == "declaration_list" for c in node.children):
+            name_node = node.child_by_field_name("name")
+            if name_node is not None:
+                imports.append(f"mod::{_node_text(name_node, source_bytes).strip()}")
+    elif grammar_key == "go" and ntype == "import_spec":
+        path_node = node.child_by_field_name("path")
+        if path_node is not None:
+            raw = _node_text(path_node, source_bytes).strip().strip('"')
+            if raw:
+                imports.append(raw)
 
 
 def analyze_file_ast(rel_path: str, text: str) -> AstFileInfo:
     """Parse one source file with Tree-sitter (or line fallback) and return structural metrics."""
     language, grammar_key = detect_language(rel_path)
     sloc, comment_lines = _count_sloc_and_comments(text, language)
-    code_surface = _strip_strings_and_comments_for_hints(text)
+    code_surface = _STRING_LITERAL_RE.sub('""', text)
 
     if grammar_key is None:
         return AstFileInfo(
@@ -446,9 +409,7 @@ def analyze_file_ast(rel_path: str, text: str) -> AstFileInfo:
         )
 
     source_bytes = text.encode("utf-8", errors="replace")
-    parser = Parser(_get_language(grammar_key))
-    tree = parser.parse(source_bytes)
-    root = tree.root_node
+    root = Parser(_get_language(grammar_key)).parse(source_bytes).root_node
 
     func_count = 0
     type_def_count = 0
@@ -460,11 +421,13 @@ def analyze_file_ast(rel_path: str, text: str) -> AstFileInfo:
     ast_test_symbol = False
     ast_main_symbol = False
     structural_diags: list[StructuralDiagnostic] = []
+    raw_imports_all: list[str] = []
 
     stack = [root]
     while stack:
         node = stack.pop()
         ntype = node.type
+        _collect_node_imports(node, source_bytes, grammar_key, raw_imports_all)
 
         if ntype in _FUNC_NODE_TYPES:
             func_count += 1
@@ -527,7 +490,6 @@ def analyze_file_ast(rel_path: str, text: str) -> AstFileInfo:
         if ntype in {"jsx_element", "jsx_self_closing_element", "jsx_fragment"}:
             jsx_nodes += 1
 
-        # Empty error handler detection across languages
         if ntype in {"except_clause", "catch_clause"}:
             body = node.child_by_field_name("body") or node
             body_txt = _node_text(body, source_bytes).strip()
@@ -572,9 +534,9 @@ def analyze_file_ast(rel_path: str, text: str) -> AstFileInfo:
                 if len(structural_diags) >= 12:
                     break
 
-    raw_imports = _extract_imports(root, source_bytes, grammar_key)
+    raw_imports = list(dict.fromkeys(imp for imp in raw_imports_all if imp))
     symbol_count = func_count + type_def_count
-    denom = max(1, func_count + type_def_count + 2)
+    denom = max(1, symbol_count + 2)
     doc_signal = min(
         1.0, (typed_nodes * 0.25 + comment_lines * 0.4 + docstring_nodes * 0.4) / denom
     )
@@ -624,21 +586,26 @@ def _is_test_path(rel_path: str) -> bool:
 
 
 def scan_worktree_ast(worktree_root: Path) -> dict[str, AstFileInfo]:
-    """Walk a checked-out worktree and analyze all source files via Tree-sitter."""
+    """Walk a checked-out worktree (without following symlinks) and analyze all source files."""
+    root = worktree_root.resolve()
     results: dict[str, AstFileInfo] = {}
-    for path in sorted(worktree_root.rglob("*")):
-        if not path.is_file():
-            continue
-        rel = path.relative_to(worktree_root).as_posix()
-        if should_skip_path(rel):
-            continue
-        try:
-            if path.stat().st_size > MAX_ANALYZED_FILE_BYTES:
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS and not d.startswith(".git"))
+        base = Path(dirpath)
+        for fname in sorted(filenames):
+            path = base / fname
+            if path.is_symlink():
                 continue
-            text = path.read_text(encoding="utf-8", errors="ignore")
-        except OSError:
-            continue
-        if "\x00" in text[:1024]:
-            continue
-        results[rel] = analyze_file_ast(rel, text)
+            rel = path.relative_to(root).as_posix()
+            if should_skip_path(rel):
+                continue
+            try:
+                if path.stat().st_size > MAX_ANALYZED_FILE_BYTES:
+                    continue
+                text = path.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            if "\x00" in text[:1024]:
+                continue
+            results[rel] = analyze_file_ast(rel, text)
     return results
