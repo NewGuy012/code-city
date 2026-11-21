@@ -16,6 +16,13 @@ import {
   WORLD_CENTER_X,
   WORLD_CENTER_Z,
 } from "./cameraStore";
+import {
+  ATLAS_ANCHOR_X,
+  ATLAS_ANCHOR_Y,
+  ATLAS_CELL_H,
+  ATLAS_CELL_W,
+  spriteAtlas,
+} from "./spriteAtlas2D";
 
 export interface Camera2D {
   panX: number;
@@ -429,6 +436,91 @@ function drawCastShadow(
   ctx.restore();
 }
 
+function drawConditionSignals(
+  ctx: CanvasRenderingContext2D,
+  file: FileMetric,
+  bx: number,
+  bz: number,
+  zoom: number,
+  timeSec: number,
+  roofCenter: { x: number; y: number },
+  isBurning: boolean,
+  isBlackout: boolean,
+): void {
+  if (file.condition_flags?.crane) {
+    const mastTop = { x: roofCenter.x, y: roofCenter.y - 16 * zoom };
+    const angle = Math.sin(timeSec * 1.1 + bx) * 0.55;
+    const jibLen = 17 * zoom;
+    ctx.save();
+    ctx.strokeStyle = "#facc15";
+    ctx.lineWidth = Math.max(1.5, 2 * zoom);
+    ctx.beginPath();
+    ctx.moveTo(roofCenter.x, roofCenter.y);
+    ctx.lineTo(mastTop.x, mastTop.y);
+    ctx.lineTo(mastTop.x + Math.cos(angle) * jibLen, mastTop.y + Math.sin(angle) * 5 * zoom);
+    ctx.moveTo(mastTop.x, mastTop.y);
+    ctx.lineTo(mastTop.x - Math.cos(angle) * jibLen * 0.4, mastTop.y - Math.sin(angle) * 2 * zoom);
+    ctx.stroke();
+    const hookX = mastTop.x + Math.cos(angle) * jibLen * 0.78;
+    const hookY = mastTop.y + Math.sin(angle) * 3.8 * zoom;
+    ctx.beginPath();
+    ctx.moveTo(hookX, hookY);
+    ctx.lineTo(hookX, hookY + 7 * zoom);
+    ctx.strokeStyle = "#fef08a";
+    ctx.lineWidth = Math.max(1, 1.2 * zoom);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  if (file.condition_flags?.smog || file.lint_issue_count >= 3) {
+    ctx.save();
+    for (let i = 0; i < 3; i++) {
+      const phase = timeSec * 0.9 + i * 2.1 + bz;
+      const sx = roofCenter.x + Math.sin(phase) * 7 * zoom;
+      const sy = roofCenter.y - (8 + ((phase * 6) % 16)) * zoom;
+      ctx.beginPath();
+      ctx.arc(sx, sy, Math.max(2.5, (4.8 - i * 0.8) * zoom), 0, Math.PI * 2);
+      ctx.fillStyle = "rgba(168, 85, 247, 0.34)";
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  if (file.condition_flags?.lone_keeper || isBlackout) {
+    const pulse = 0.5 + 0.5 * Math.sin(timeSec * 3.4);
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(roofCenter.x, roofCenter.y - 4 * zoom, (5 + pulse * 6) * zoom, 0, Math.PI * 2);
+    ctx.strokeStyle = `rgba(251, 113, 133, ${0.85 - pulse * 0.55})`;
+    ctx.lineWidth = Math.max(1.2, 1.8 * zoom);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(roofCenter.x, roofCenter.y - 4 * zoom, Math.max(2, 2.5 * zoom), 0, Math.PI * 2);
+    ctx.fillStyle = "#fb7185";
+    ctx.fill();
+    ctx.restore();
+  }
+
+  if (isBurning) {
+    ctx.save();
+    for (let i = 0; i < 4; i++) {
+      const flicker = Math.sin(timeSec * 9 + i * 1.9 + bx) * 3.2 * zoom;
+      const fy = roofCenter.y - (4 + ((timeSec * 14 + i * 5) % 14)) * zoom;
+      ctx.beginPath();
+      ctx.arc(
+        roofCenter.x + flicker,
+        fy,
+        Math.max(2.2, (5 - i * 0.8) * zoom),
+        0,
+        Math.PI * 2,
+      );
+      ctx.fillStyle = i % 2 === 0 ? "rgba(249, 115, 22, 0.86)" : "rgba(250, 204, 21, 0.78)";
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+}
+
 function drawBuildingDetails(
   ctx: CanvasRenderingContext2D,
   file: FileMetric,
@@ -438,6 +530,7 @@ function drawBuildingDetails(
   bd: number,
   height: number,
   palette: ShadePalette,
+  dataMap: DataMapMode,
   timeSec: number,
   timeOfDay: TimeOfDay,
   wScreen: number,
@@ -449,6 +542,87 @@ function drawBuildingDetails(
 ): void {
   const arch = file.building_archetype;
   const zoom = cam.zoom;
+  const pitch = cam.pitch ?? DEFAULT_PITCH;
+
+  // Try pre-rendered 30-sprite isometric atlas when ready & in isometric pitch range
+  const atlas = spriteAtlas.ensureLoaded();
+  const compassStep = ((((Math.round(((cam.yaw ?? DEFAULT_YAW) - DEFAULT_YAW) / (Math.PI / 2)) % 4) + 4) % 4) as
+    | 0
+    | 1
+    | 2
+    | 3);
+  const canUseSprite =
+    atlas.ready &&
+    atlas.buildings !== null &&
+    pitch <= 58 &&
+    !isBlackout &&
+    Math.max(bw / Math.max(0.4, bd), bd / Math.max(0.4, bw)) <= 1.85;
+
+  if (canUseSprite && atlas.buildings) {
+    // Ground lot pad + cast shadow
+    if (arch !== "park_stadium") {
+      drawCastShadow(ctx, bx, bz, bw, bd, height, timeOfDay, wScreen, hScreen, cam);
+    }
+    drawGroundQuad(
+      ctx,
+      bx,
+      bz,
+      bw,
+      bd,
+      0.38,
+      arch === "park_stadium" ? "#14532d" : "#1e293b",
+      stroke,
+      wScreen,
+      hScreen,
+      cam,
+      stroke.startsWith("#") ? 1.6 : 0.8,
+    );
+
+    const rect = spriteAtlas.getBuildingSpriteRect(arch, height, compassStep);
+    const baseScreen = worldToScreen(bx + bw * 0.5, bz + bd * 0.5, 0, wScreen, hScreen, cam);
+    const { heightScale } = getTiltFactors(pitch);
+    const lotSpanPx = (bw + bd) * ISO_X * zoom;
+    const scaleX = Math.max(0.28, lotSpanPx / 64.8);
+    const scaleY = Math.max(0.24, scaleX * (0.72 + 0.28 * heightScale));
+    const dw = ATLAS_CELL_W * scaleX;
+    const dh = ATLAS_CELL_H * scaleY;
+    const dx = baseScreen.x - ATLAS_ANCHOR_X * scaleX;
+    const dy = baseScreen.y - ATLAS_ANCHOR_Y * scaleY;
+
+    const tintHex = dataMap === "living" ? null : palette.left;
+    spriteAtlas.drawTintedSprite(
+      ctx,
+      atlas.buildings,
+      rect.sx,
+      rect.sy,
+      rect.sw,
+      rect.sh,
+      dx,
+      dy,
+      dw,
+      dh,
+      tintHex,
+    );
+
+    if (atlas.emissive && timeOfDay !== "day") {
+      ctx.save();
+      ctx.globalAlpha *= timeOfDay === "night" ? 0.95 : 0.45;
+      ctx.drawImage(atlas.emissive, rect.sx, rect.sy, rect.sw, rect.sh, dx, dy, dw, dh);
+      ctx.restore();
+    }
+
+    // Condition overlays (crane, smog, lone-keeper, fire) on top of sprite
+    const roofCenter = worldToScreen(
+      bx + bw * 0.5,
+      bz + bd * 0.5,
+      (height * 0.78 + 6) * zoom,
+      wScreen,
+      hScreen,
+      cam,
+    );
+    drawConditionSignals(ctx, file, bx, bz, zoom, timeSec, roofCenter, isBurning, false);
+    return;
+  }
 
   if (arch === "park_stadium") {
     drawGroundQuad(ctx, bx, bz, bw, bd, 1, "#14532d", "#4ade80", wScreen, hScreen, cam, 1.1);
@@ -723,79 +897,7 @@ function drawBuildingDetails(
     hScreen,
     cam,
   );
-
-  if (file.condition_flags?.crane) {
-    const mastTop = { x: roofCenter.x, y: roofCenter.y - 16 * zoom };
-    const angle = Math.sin(timeSec * 1.1 + bx) * 0.55;
-    const jibLen = 17 * zoom;
-    ctx.save();
-    ctx.strokeStyle = "#facc15";
-    ctx.lineWidth = Math.max(1.5, 2 * zoom);
-    ctx.beginPath();
-    ctx.moveTo(roofCenter.x, roofCenter.y);
-    ctx.lineTo(mastTop.x, mastTop.y);
-    ctx.lineTo(mastTop.x + Math.cos(angle) * jibLen, mastTop.y + Math.sin(angle) * 5 * zoom);
-    ctx.moveTo(mastTop.x, mastTop.y);
-    ctx.lineTo(mastTop.x - Math.cos(angle) * jibLen * 0.4, mastTop.y - Math.sin(angle) * 2 * zoom);
-    ctx.stroke();
-    const hookX = mastTop.x + Math.cos(angle) * jibLen * 0.78;
-    const hookY = mastTop.y + Math.sin(angle) * 3.8 * zoom;
-    ctx.beginPath();
-    ctx.moveTo(hookX, hookY);
-    ctx.lineTo(hookX, hookY + 7 * zoom);
-    ctx.strokeStyle = "#fef08a";
-    ctx.lineWidth = Math.max(1, 1.2 * zoom);
-    ctx.stroke();
-    ctx.restore();
-  }
-
-  if (file.condition_flags?.smog || file.lint_issue_count >= 3) {
-    ctx.save();
-    for (let i = 0; i < 3; i++) {
-      const phase = timeSec * 0.9 + i * 2.1 + bz;
-      const sx = roofCenter.x + Math.sin(phase) * 7 * zoom;
-      const sy = roofCenter.y - (8 + ((phase * 6) % 16)) * zoom;
-      ctx.beginPath();
-      ctx.arc(sx, sy, Math.max(2.5, (4.8 - i * 0.8) * zoom), 0, Math.PI * 2);
-      ctx.fillStyle = "rgba(168, 85, 247, 0.34)";
-      ctx.fill();
-    }
-    ctx.restore();
-  }
-
-  if (file.condition_flags?.lone_keeper || isBlackout) {
-    const pulse = 0.5 + 0.5 * Math.sin(timeSec * 3.4);
-    ctx.save();
-    ctx.beginPath();
-    ctx.arc(roofCenter.x, roofCenter.y - 4 * zoom, (5 + pulse * 6) * zoom, 0, Math.PI * 2);
-    ctx.strokeStyle = `rgba(251, 113, 133, ${0.85 - pulse * 0.55})`;
-    ctx.lineWidth = Math.max(1.2, 1.8 * zoom);
-    ctx.stroke();
-    ctx.beginPath();
-    ctx.arc(roofCenter.x, roofCenter.y - 4 * zoom, Math.max(2, 2.5 * zoom), 0, Math.PI * 2);
-    ctx.fillStyle = "#fb7185";
-    ctx.fill();
-    ctx.restore();
-  }
-
-  if (isBurning) {
-    ctx.save();
-    for (let i = 0; i < 4; i++) {
-      const flicker = Math.sin(timeSec * 9 + i * 1.9 + bx) * 3.2 * zoom;
-      const fy = roofCenter.y - (4 + ((timeSec * 14 + i * 5) % 14)) * zoom;
-      ctx.beginPath();
-      ctx.arc(
-        roofCenter.x + flicker,
-        fy,
-        Math.max(2.2, (5 - i * 0.8) * zoom),
-        0,
-        Math.PI * 2,
-      );
-      ctx.fillStyle = i % 2 === 0 ? "rgba(249, 115, 22, 0.86)" : "rgba(250, 204, 21, 0.78)";
-      ctx.fill();
-    }
-    ctx.restore();
-  }
+  drawConditionSignals(ctx, file, bx, bz, zoom, timeSec, roofCenter, isBurning, isBlackout);
 }
 
 export function renderCityScene(args: RenderCitySceneArgs): HitBuilding[] {
@@ -897,10 +999,10 @@ export function renderCityScene(args: RenderCitySceneArgs): HitBuilding[] {
     1,
   );
 
-  // Explicit avenue/street centerlines & intersection crosswalks
+  // Explicit avenue/street centerlines, crosswalks & corner traffic signals
   if (streetLines && (streetLines.xLines.length > 0 || streetLines.zLines.length > 0)) {
     ctx.save();
-    ctx.strokeStyle = "rgba(250, 204, 21, 0.22)";
+    ctx.strokeStyle = "rgba(250, 204, 21, 0.28)";
     ctx.lineWidth = Math.max(0.8, 1.1 * camera.zoom);
     ctx.setLineDash([4 * camera.zoom, 4 * camera.zoom]);
     for (const xl of streetLines.xLines) {
@@ -918,6 +1020,35 @@ export function renderCityScene(args: RenderCitySceneArgs): HitBuilding[] {
       ctx.moveTo(a.x, a.y);
       ctx.lineTo(b.x, b.y);
       ctx.stroke();
+    }
+    ctx.setLineDash([]);
+
+    // Zebra crosswalk ticks & traffic signal beacons at intersections when zoomed in
+    if (camera.zoom >= 0.72) {
+      const phase = Math.floor(timeSec * 0.5) % 2 === 0;
+      for (let xi = 0; xi < streetLines.xLines.length; xi++) {
+        for (let zi = 0; zi < streetLines.zLines.length; zi++) {
+          const ix = streetLines.xLines[xi];
+          const iz = streetLines.zLines[zi];
+          // Zebra stripes
+          ctx.strokeStyle = "rgba(226, 232, 240, 0.36)";
+          ctx.lineWidth = Math.max(0.8, 1.2 * camera.zoom);
+          for (const d of [-0.6, 0, 0.6]) {
+            const c0 = worldToScreen(ix + d, iz - 1.25, 0.18, width, height, camera);
+            const c1 = worldToScreen(ix + d, iz - 0.85, 0.18, width, height, camera);
+            ctx.beginPath();
+            ctx.moveTo(c0.x, c0.y);
+            ctx.lineTo(c1.x, c1.y);
+            ctx.stroke();
+          }
+          // Traffic signal corner dot
+          const sig = worldToScreen(ix + 1.2, iz + 1.2, 2.2 * camera.zoom, width, height, camera);
+          ctx.beginPath();
+          ctx.arc(sig.x, sig.y, Math.max(1.2, 1.8 * camera.zoom), 0, Math.PI * 2);
+          ctx.fillStyle = (phase ? (xi + zi) % 2 === 0 : (xi + zi) % 2 === 1) ? "#4ade80" : "#ef4444";
+          ctx.fill();
+        }
+      }
     }
     ctx.restore();
   }
@@ -942,6 +1073,23 @@ export function renderCityScene(args: RenderCitySceneArgs): HitBuilding[] {
         camera,
         "rgba(251, 191, 36, 0.45)",
         0.9,
+      );
+      // Bobbing cargo barge moored beside the timber pier
+      const bobY = Math.sin(timeSec * 1.6 + idx * 1.1) * 0.7 * camera.zoom;
+      drawIsoPrism(
+        ctx,
+        dockX + 2.2,
+        dockZ + 6.4,
+        6.5,
+        2.6,
+        (-1.2 + bobY) * camera.zoom,
+        2.6 * camera.zoom,
+        { roof: "#38bdf8", left: "#0284c7", right: "#075985", accent: "#fde047" },
+        width,
+        height,
+        camera,
+        "rgba(226, 232, 240, 0.4)",
+        0.7,
       );
       if (camera.zoom >= 0.7) {
         const lbl = worldToScreen(dockX + 5.5, dockZ + 3, 5 * camera.zoom, width, height, camera);
@@ -1202,6 +1350,7 @@ export function renderCityScene(args: RenderCitySceneArgs): HitBuilding[] {
       bd,
       heightVal,
       palette,
+      dataMap,
       timeSec,
       timeOfDay,
       width,

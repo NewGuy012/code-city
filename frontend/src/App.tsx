@@ -428,10 +428,13 @@ export function App() {
               districts={bundle.districts}
               files={bundle.files}
               cochanges={bundle.cochanges}
+              deps={bundle.deps}
               dataMap={dataMap}
               selectedFile={selectedFile}
               blastRadius={blastRadius}
               focusTarget={focusTarget}
+              plazas={streetGrid.plazas}
+              streetLines={{ xLines: streetGrid.xLines, zLines: streetGrid.zLines }}
               onSelectFile={setSelectedFile}
             />
           </Suspense>
