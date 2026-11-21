@@ -877,7 +877,7 @@ export function App() {
       {!zenMode && (
         <div className="pointer-events-none fixed inset-0 z-20 grid grid-rows-[auto_1fr_auto] gap-2.5 p-3">
           {/* Row 1: Unified Single-Row Top Bar + Optional Transient Centered Chips */}
-          <header className="flex flex-col gap-2">
+          <header className="relative z-30 flex flex-col gap-2">
             <div className="flex items-center justify-between gap-2">
               <RepoAnalyzePopover
                 repos={repos}
@@ -1034,7 +1034,7 @@ export function App() {
           </header>
 
           {/* Row 2: 1fr Middle Zone — 44px Left Rail | Open Canvas | 320px Right Inspector */}
-          <div className="relative flex min-h-0 items-center justify-between gap-3">
+          <div className="relative z-20 flex min-h-0 items-center justify-between gap-3">
             {effectiveBundle ? (
               <MayorToolbar
                 activeTool={activeTool}
@@ -1075,10 +1075,22 @@ export function App() {
                   }
                 }}
                 onToggleCoopSync={() => setCoopSyncEnabled((v) => !v)}
-                className="self-center"
+                className="relative z-30 self-center"
               />
             ) : (
               <span />
+            )}
+
+            {tourActive && (
+              <OnboardingTour
+                stops={tourStops}
+                stepIndex={tourStep}
+                autoPlaying={tourAutoPlay}
+                onSelectStep={handleSelectTourStep}
+                onToggleAuto={() => setTourAutoPlay((a) => !a)}
+                onClose={() => setTourActive(false)}
+                className="absolute bottom-0 left-14 z-20"
+              />
             )}
 
             <InspectorDrawer
@@ -1111,38 +1123,25 @@ export function App() {
               }}
               onSelectFile={handleFocusFile}
               onClose={() => setSelectedFile(null)}
-              className="h-full max-h-full shrink-0"
+              className="max-h-full shrink-0 self-start"
             />
           </div>
 
           {/* Row 3: Compact Bottom Dock */}
           {bundle && snapshots.length > 0 ? (
-            <footer className="flex items-end justify-between gap-3">
-              <div className="flex flex-col items-start gap-2">
-                {tourActive && (
-                  <OnboardingTour
-                    stops={tourStops}
-                    stepIndex={tourStep}
-                    autoPlaying={tourAutoPlay}
-                    onSelectStep={handleSelectTourStep}
-                    onToggleAuto={() => setTourAutoPlay((a) => !a)}
-                    onClose={() => setTourActive(false)}
-                    className="sm:ml-14"
-                  />
-                )}
-                <TimeScrubber
-                  snapshots={snapshots}
-                  snapshotIdx={snapshotIdx}
-                  isPlaying={isPlayingTime}
-                  addedCount={addedFiles.size}
-                  removedCount={removedLots.length}
-                  onSelectSnapshot={(idx) => {
-                    setIsPlayingTime(false);
-                    setSnapshotIdx(idx);
-                  }}
-                  onTogglePlay={() => setIsPlayingTime((p) => !p)}
-                />
-              </div>
+            <footer className="relative z-30 flex items-end justify-between gap-3">
+              <TimeScrubber
+                snapshots={snapshots}
+                snapshotIdx={snapshotIdx}
+                isPlaying={isPlayingTime}
+                addedCount={addedFiles.size}
+                removedCount={removedLots.length}
+                onSelectSnapshot={(idx) => {
+                  setIsPlayingTime(false);
+                  setSnapshotIdx(idx);
+                }}
+                onTogglePlay={() => setIsPlayingTime((p) => !p)}
+              />
 
               <div className="flex flex-col items-end gap-2">
                 {radarOpen && (

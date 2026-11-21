@@ -96,7 +96,10 @@ export function DataMapBar({
 
   if (!isWide) {
     return (
-      <div data-popover-id="datamap" className="pointer-events-auto relative">
+      <div
+        data-popover-id="datamap"
+        className={`pointer-events-auto relative ${isPopoverOpen ? "z-40" : ""}`}
+      >
         <button
           type="button"
           data-testid="datamap-dropdown-btn"

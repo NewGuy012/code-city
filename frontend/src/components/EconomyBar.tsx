@@ -70,7 +70,9 @@ export function EconomyBar({
   return (
     <div
       data-testid="economy-bar"
-      className="sim-panel pointer-events-auto flex h-10 items-center gap-2 rounded-xl px-2.5 text-xs"
+      className={`sim-panel pointer-events-auto relative flex h-10 items-center gap-2 rounded-xl px-2.5 text-xs ${
+        advisorsOpen || utilitiesOpen ? "z-40" : ""
+      }`}
     >
       {/* Sprint Progress & Speed Stepper */}
       <div className="flex items-center gap-2">

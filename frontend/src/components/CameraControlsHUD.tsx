@@ -92,7 +92,9 @@ export function CameraControlsHUD({
   return (
     <div
       data-testid="camera-controls-hud"
-      className="sim-panel pointer-events-auto relative flex h-9 items-center gap-1 rounded-xl px-1.5 text-[11px]"
+      className={`sim-panel pointer-events-auto relative flex h-9 items-center gap-1 rounded-xl px-1.5 text-[11px] ${
+        isViewPopoverOpen ? "z-40" : ""
+      }`}
     >
       {/* 2D | 3D Segmented Switch */}
       <button

@@ -155,7 +155,9 @@ export function MayorToolbar({
     <>
       <aside
         data-testid="mayor-toolbar"
-        className={`sim-panel pointer-events-auto flex w-11 flex-col items-center gap-1 rounded-2xl p-1.5 text-xs ${className}`}
+        className={`sim-panel pointer-events-auto flex w-11 flex-col items-center gap-1 rounded-2xl p-1.5 text-xs ${
+          isModePopoverOpen ? "z-40" : ""
+        } ${className}`}
       >
         {/* Sandbox / Live Git Mode & Co-Op Popover */}
         <div data-popover-id="mayorMode" className="relative">
@@ -281,7 +283,7 @@ export function MayorToolbar({
               </button>
 
               {/* Floating Side Tooltip */}
-              <div className="sim-popover pointer-events-none invisible absolute top-1/2 left-full z-30 ml-2.5 w-52 -translate-y-1/2 rounded-xl px-2.5 py-2 text-left opacity-0 transition-opacity duration-100 group-hover:visible group-hover:opacity-100">
+              <div className="sim-popover pointer-events-none invisible absolute top-1/2 left-full z-40 ml-2.5 w-52 -translate-y-1/2 rounded-xl px-2.5 py-2 text-left opacity-0 transition-opacity duration-100 group-hover:visible group-hover:opacity-100">
                 <div className="flex items-center justify-between gap-2">
                   <span className="font-semibold text-white">{t.label}</span>
                   {cost !== null && (

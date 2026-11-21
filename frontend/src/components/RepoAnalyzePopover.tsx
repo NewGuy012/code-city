@@ -30,6 +30,11 @@ function gradeBadgeTone(grade: string): string {
   return "bg-rose-500/15 text-rose-300 ring-rose-400/35 hover:bg-rose-500/25";
 }
 
+function formatCompactSloc(sloc: number): string {
+  if (sloc >= 1000) return `${(sloc / 1000).toFixed(1)}k`;
+  return String(sloc);
+}
+
 export function RepoAnalyzePopover({
   repos,
   activeRepo,
@@ -49,7 +54,11 @@ export function RepoAnalyzePopover({
   const repoTitle = activeRepo ? `${activeRepo.owner}/${activeRepo.repo}` : "CodeCity";
 
   return (
-    <div className="sim-panel pointer-events-auto relative flex h-10 items-center gap-1.5 rounded-xl px-2">
+    <div
+      className={`sim-panel pointer-events-auto relative flex h-10 items-center gap-1.5 rounded-xl px-2 ${
+        isOpen ? "z-40" : ""
+      }`}
+    >
       <div data-popover-id="repo" className="relative flex items-center">
         <button
           type="button"
@@ -171,7 +180,10 @@ export function RepoAnalyzePopover({
             >
               {snapshot.health_grade}
             </span>
-            <span className="sim-pixel-badge hidden text-[11px] text-slate-400 md:inline">
+            <span className="sim-pixel-badge hidden whitespace-nowrap text-[11px] text-slate-400 sm:inline xl:hidden">
+              {snapshot.total_files}f · {formatCompactSloc(snapshot.total_sloc)}
+            </span>
+            <span className="sim-pixel-badge hidden whitespace-nowrap text-[11px] text-slate-400 xl:inline">
               {snapshot.total_files} files · {snapshot.total_sloc.toLocaleString()} SLOC
             </span>
           </button>
