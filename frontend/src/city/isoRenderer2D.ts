@@ -832,10 +832,14 @@ export function renderCityScene(args: RenderCitySceneArgs): HitBuilding[] {
   const hits: HitBuilding[] = [];
   for (const file of sortedFiles) {
     const pad = Math.min(0.45, Math.min(file.layout_w, file.layout_d) * 0.14);
-    const bx = file.layout_x + pad;
-    const bz = file.layout_z + pad;
-    const bw = Math.max(0.9, file.layout_w - pad * 2);
-    const bd = Math.max(0.9, file.layout_d - pad * 2);
+    const rawW = Math.max(0.9, file.layout_w - pad * 2);
+    const rawD = Math.max(0.9, file.layout_d - pad * 2);
+    // Clamp extreme sliver aspect ratios (> 3.2:1) so buildings keep handsome architectural proportions
+    const maxRatio = 3.2;
+    const bw = rawW > rawD * maxRatio ? rawD * maxRatio : rawW;
+    const bd = rawD > rawW * maxRatio ? rawW * maxRatio : rawD;
+    const bx = file.layout_x + (file.layout_w - bw) * 0.5;
+    const bz = file.layout_z + (file.layout_d - bd) * 0.5;
     const heightVal = computeBuildingHeight(file);
 
     const isSelected = selectedFile === file.file_path;

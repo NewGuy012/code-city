@@ -396,25 +396,46 @@ class TypeScriptPlugin:
                     )
                 )
 
-        # 2. Format drift via `bun fmt --no-script --check`
+        # 2. Format drift via `bun fmt --no-script --check` grouped by nearest bunfig.toml/pkg.json
         if bun_bin:
-            try:
-                fmt_proc = subprocess.run(
-                    [bun_bin, "fmt", "--no-script", "--check", *ts_paths[:200]],
-                    cwd=worktree_root,
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    timeout=20,
+            by_cfg_dir: dict[Path, list[str]] = {}
+            wt_res = worktree_root.resolve()
+            for rel in ts_paths[:200]:
+                cur = (wt_res / rel).parent
+                cfg_dir = wt_res
+                while cur != wt_res.parent:
+                    if (cur / "bunfig.toml").exists() or (cur / "package.json").exists():
+                        cfg_dir = cur
+                        break
+                    if cur == wt_res:
+                        break
+                    cur = cur.parent
+                by_cfg_dir.setdefault(cfg_dir, []).append(
+                    (wt_res / rel).relative_to(cfg_dir).as_posix()
                 )
-                if fmt_proc.returncode != 0:
-                    for raw_line in fmt_proc.stdout.splitlines():
-                        cleaned = Path(raw_line.strip()).as_posix().lstrip("./")
-                        if cleaned in ast_files:
-                            format_drift.add(cleaned)
-            except Exception:
-                pass
+
+            for cfg_dir, sub_paths in by_cfg_dir.items():
+                try:
+                    fmt_proc = subprocess.run(
+                        [bun_bin, "fmt", "--no-script", "--check", *sub_paths],
+                        cwd=cfg_dir,
+                        capture_output=True,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        timeout=20,
+                    )
+                    if fmt_proc.returncode != 0:
+                        for raw_line in fmt_proc.stdout.splitlines():
+                            cand = (cfg_dir / raw_line.strip()).resolve()
+                            try:
+                                cleaned = cand.relative_to(wt_res).as_posix()
+                            except ValueError:
+                                continue
+                            if cleaned in ast_files:
+                                format_drift.add(cleaned)
+                except Exception:
+                    pass
 
         return PluginResult(
             imports=imports,

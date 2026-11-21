@@ -63,6 +63,20 @@ SKIP_EXTENSIONS = frozenset(
     }
 )
 
+SKIP_FILENAMES = frozenset(
+    {
+        "uv.lock",
+        "bun.lock",
+        "bun.lockb",
+        "package-lock.json",
+        "pnpm-lock.yaml",
+        "yarn.lock",
+        "Cargo.lock",
+        "go.sum",
+        "poetry.lock",
+    }
+)
+
 MAX_ANALYZED_FILE_BYTES = 512 * 1024
 
 _LANG_CACHE: dict[str, Language] = {}
@@ -213,11 +227,7 @@ _AUTH_RE = re.compile(
     re.I,
 )
 _CLI_RE = re.compile(
-    r"\b(argparse|ArgumentParser|typer|click\.command|cobra\.Command|clap::Parser)\b|"
-    r"if __name__ == [\"']__main__[\"']"
-)
-_TEST_RE = re.compile(
-    r"\b(def test_|describe\(|it\(|test\(|expect\(|#\[test\]|func Test[A-Z]|pytest\.|bun:test)\b"
+    r"\b(argparse|ArgumentParser|typer|click\.command|cobra\.Command|clap::Parser)\b"
 )
 
 
@@ -230,6 +240,8 @@ def should_skip_path(rel_path: str) -> bool:
     if suffix in SKIP_EXTENSIONS:
         return True
     name = parts[-1] if parts else ""
+    if name in SKIP_FILENAMES:
+        return True
     return name.endswith(".min.js") or name.endswith(".min.css")
 
 
@@ -380,10 +392,16 @@ def _extract_imports(
     return uniq
 
 
+def _strip_strings_and_comments_for_hints(text: str) -> str:
+    """Blank quoted string/regex literals for conservative keyword hint checks."""
+    return re.sub(r"(['\"`])(?:\\.|(?!\1).)*\1", '""', text)
+
+
 def analyze_file_ast(rel_path: str, text: str) -> AstFileInfo:
     """Parse one source file with Tree-sitter (or line fallback) and return structural metrics."""
     language, grammar_key = detect_language(rel_path)
     sloc, comment_lines = _count_sloc_and_comments(text, language)
+    code_surface = _strip_strings_and_comments_for_hints(text)
 
     if grammar_key is None:
         return AstFileInfo(
@@ -401,8 +419,8 @@ def analyze_file_ast(rel_path: str, text: str) -> AstFileInfo:
                 "has_main": False,
                 "is_test": _is_test_path(rel_path),
                 "route_hints": False,
-                "db_hints": bool(_DB_RE.search(text)) or language == "sql",
-                "auth_hints": bool(_AUTH_RE.search(text)),
+                "db_hints": language == "sql" or bool(_DB_RE.search(code_surface)),
+                "auth_hints": bool(_AUTH_RE.search(code_surface)),
                 "cli_hints": False,
                 "ui_hints": language in {"css", "html"},
             },
@@ -420,6 +438,8 @@ def analyze_file_ast(rel_path: str, text: str) -> AstFileInfo:
     docstring_nodes = 0
     jsx_nodes = 0
     max_complexity = 1
+    ast_test_symbol = False
+    ast_main_symbol = False
     structural_diags: list[StructuralDiagnostic] = []
 
     stack = [root]
@@ -429,10 +449,18 @@ def analyze_file_ast(rel_path: str, text: str) -> AstFileInfo:
 
         if ntype in _FUNC_NODE_TYPES:
             func_count += 1
+            name_node = node.child_by_field_name("name")
+            if name_node is not None:
+                fname = _node_text(name_node, source_bytes).strip()
+                if fname.startswith("test_") or (grammar_key == "go" and fname.startswith("Test")):
+                    ast_test_symbol = True
+                if fname == "main" and grammar_key in {"go", "rust"}:
+                    ast_main_symbol = True
+
             comp = _compute_function_complexity(node, source_bytes)
             if comp > max_complexity:
                 max_complexity = comp
-            if comp > 15 and grammar_key in {"go", "rust", "typescript", "tsx", "javascript"}:
+            if comp > 22 and grammar_key in {"go", "rust", "typescript", "tsx", "javascript"}:
                 row, col = node.start_point
                 structural_diags.append(
                     StructuralDiagnostic(
@@ -443,6 +471,13 @@ def analyze_file_ast(rel_path: str, text: str) -> AstFileInfo:
                         message=f"High cyclomatic complexity ({comp} branches) — split function.",
                     )
                 )
+
+        if (
+            ntype == "attribute_item"
+            and grammar_key == "rust"
+            and "#[test]" in _node_text(node, source_bytes)
+        ):
+            ast_test_symbol = True
 
         if ntype in _TYPE_NODE_TYPES:
             type_def_count += 1
@@ -491,7 +526,7 @@ def analyze_file_ast(rel_path: str, text: str) -> AstFileInfo:
 
         stack.extend(node.children)
 
-    if sloc > 600 and grammar_key in {"go", "rust", "typescript", "tsx", "javascript"}:
+    if sloc > 750 and grammar_key in {"go", "rust", "typescript", "tsx", "javascript"}:
         structural_diags.append(
             StructuralDiagnostic(
                 line=1,
@@ -502,7 +537,7 @@ def analyze_file_ast(rel_path: str, text: str) -> AstFileInfo:
             )
         )
 
-    is_test = _is_test_path(rel_path) or bool(_TEST_RE.search(text))
+    is_test = _is_test_path(rel_path) or ast_test_symbol
     if grammar_key == "rust" and not is_test:
         for idx, line_txt in enumerate(text.splitlines(), start=1):
             if ".unwrap()" in line_txt or "panic!(" in line_txt:
@@ -525,16 +560,17 @@ def analyze_file_ast(rel_path: str, text: str) -> AstFileInfo:
         1.0, (typed_nodes * 0.25 + comment_lines * 0.4 + docstring_nodes * 0.4) / denom
     )
 
+    has_py_main = 'if __name__ == "__main__"' in text or "if __name__ == '__main__'" in text
     signals = {
         "func_count": func_count,
         "type_def_count": type_def_count,
         "loop_count": loop_count,
-        "has_main": "fn main(" in text or "func main(" in text or "__main__" in text,
+        "has_main": ast_main_symbol or has_py_main,
         "is_test": is_test,
-        "route_hints": bool(_ROUTE_RE.search(text)),
-        "db_hints": bool(_DB_RE.search(text)),
-        "auth_hints": bool(_AUTH_RE.search(text)),
-        "cli_hints": bool(_CLI_RE.search(text)),
+        "route_hints": bool(_ROUTE_RE.search(code_surface)),
+        "db_hints": bool(_DB_RE.search(code_surface)),
+        "auth_hints": bool(_AUTH_RE.search(code_surface)),
+        "cli_hints": bool(_CLI_RE.search(code_surface)),
         "ui_hints": jsx_nodes > 0 or rel_path.endswith((".tsx", ".jsx", ".vue", ".svelte")),
         "jsx_nodes": jsx_nodes,
     }

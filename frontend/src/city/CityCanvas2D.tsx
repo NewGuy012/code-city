@@ -40,6 +40,15 @@ interface CityCanvas2DProps {
   onSelectFile: (filePath: string | null) => void;
 }
 
+function computeFitCamera(width: number, height: number): Camera2D {
+  const fitZoom = Math.max(0.45, Math.min(1.05, Math.min(width / 1900, height / 1120) * 1.0));
+  return {
+    panX: 0,
+    panY: 16,
+    zoom: Number(fitZoom.toFixed(2)),
+  };
+}
+
 export function CityCanvas2D({
   districts,
   files,
@@ -57,8 +66,14 @@ export function CityCanvas2D({
   const containerRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const hitsRef = useRef<HitBuilding[]>([]);
-  const cameraRef = useRef<Camera2D>({ panX: 0, panY: -10, zoom: 0.92 });
+  const cameraRef = useRef<Camera2D>(
+    computeFitCamera(
+      typeof window !== "undefined" ? window.innerWidth : 1280,
+      typeof window !== "undefined" ? window.innerHeight : 760,
+    ),
+  );
   const targetCameraRef = useRef<Camera2D | null>(null);
+  const hasAutoFitRef = useRef(false);
   const dragRef = useRef<{
     active: boolean;
     moved: boolean;
@@ -81,7 +96,17 @@ export function CityCanvas2D({
     y: number;
   } | null>(null);
   const [showTraffic, setShowTraffic] = useState(true);
-  const [zoomLabel, setZoomLabel] = useState(92);
+  const [zoomLabel, setZoomLabel] = useState(() => Math.round(cameraRef.current.zoom * 100));
+
+  useEffect(() => {
+    if (hasAutoFitRef.current || !containerRef.current) return;
+    const { clientWidth, clientHeight } = containerRef.current;
+    if (clientWidth > 0 && clientHeight > 0) {
+      hasAutoFitRef.current = true;
+      cameraRef.current = computeFitCamera(clientWidth, clientHeight);
+      setZoomLabel(Math.round(cameraRef.current.zoom * 100));
+    }
+  }, []);
 
   // Fly smoothly to guided tour / advisor target
   useEffect(() => {
@@ -282,7 +307,8 @@ export function CityCanvas2D({
   }
 
   function fitCity() {
-    targetCameraRef.current = { panX: 0, panY: -10, zoom: 0.92 };
+    const box = containerRef.current;
+    targetCameraRef.current = computeFitCamera(box?.clientWidth || 1280, box?.clientHeight || 760);
   }
 
   return (

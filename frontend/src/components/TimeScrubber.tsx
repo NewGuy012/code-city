@@ -12,6 +12,20 @@ interface TimeScrubberProps {
   onTogglePlay: () => void;
 }
 
+function formatSnapshotDate(raw: string): string {
+  const num = Number(raw);
+  if (Number.isFinite(num) && num > 1_000_000_000) {
+    // Handle DuckDB-Wasm timestamp epoch ms (or microseconds if huge)
+    const ms = num > 1e14 ? Math.floor(num / 1000) : num;
+    return new Date(ms).toISOString().slice(0, 10);
+  }
+  const parsed = Date.parse(raw);
+  if (!Number.isNaN(parsed)) {
+    return new Date(parsed).toISOString().slice(0, 10);
+  }
+  return raw.slice(0, 10);
+}
+
 export function TimeScrubber({
   snapshots,
   snapshotIdx,
@@ -28,7 +42,7 @@ export function TimeScrubber({
     snapshots.findIndex((s) => s.snapshot_idx === snapshotIdx),
   );
   const current = snapshots[curPos] ?? snapshots[0];
-  const dateLabel = current.committed_at.slice(0, 10);
+  const dateLabel = formatSnapshotDate(current.committed_at);
 
   return (
     <div
