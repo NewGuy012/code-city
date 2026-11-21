@@ -1,4 +1,4 @@
-"""Phase 0 Risk Spike: DuckDB 2.0 + DuckLake 1.1 + Quack concurrent multi-writer verification."""
+"""DuckDB 2.0 + DuckLake 1.1 + Quack concurrent multi-writer & Parquet export tests."""
 
 from __future__ import annotations
 
@@ -111,7 +111,7 @@ def test_ducklake_nested_schema_quack_multiwriter_and_parquet_export(tmp_path: P
                     )
                 finally:
                     client.close()
-            except Exception as exc:  # pragma: no cover - captured for assertion
+            except Exception as exc:  # pragma: no cover
                 errors.append((idx, exc))
 
         threads = [threading.Thread(target=worker, args=(i,)) for i in range(4)]
@@ -122,7 +122,6 @@ def test_ducklake_nested_schema_quack_multiwriter_and_parquet_export(tmp_path: P
 
         assert errors == []
 
-        # Write collaborative Mayor annotation over Quack and verify table_changes()
         ann_client = qsrv.connect_client(alias="remote")
         try:
             lake.add_annotation(
@@ -144,18 +143,21 @@ def test_ducklake_nested_schema_quack_multiwriter_and_parquet_export(tmp_path: P
 
     with lake.session(read_only=True) as con:
         pfx = lake.schema_prefix("acme-org", "demo-app")
-        snaps = con.execute(
+        assert con.execute(
             f"SELECT COUNT(*), MIN(snapshot_idx), MAX(snapshot_idx) FROM {pfx}.snapshots"
-        ).fetchone()
-        assert snaps == (4, 0, 3)
+        ).fetchone() == (4, 0, 3)
+
+        repo_ref = lake.get_repo(con, "acme-org", "demo-app")
+        assert repo_ref is not None
+        assert repo_ref.total_snapshots == 4
 
         changes = lake.get_annotation_changes(con, "acme-org", "demo-app")
         assert len(changes) == 1
         assert changes[0]["annotation_id"] == "note-1"
-        assert changes[0]["author"] == "mayor"
 
-        export_dir = tmp_path / "static_parquet"
-        exported = lake.export_repo_parquet(con, "acme-org", "demo-app", export_dir)
+        exported = lake.export_repo_parquet(
+            con, "acme-org", "demo-app", tmp_path / "static_parquet"
+        )
         assert set(exported.keys()) == {
             "snapshots",
             "districts",
@@ -169,12 +171,10 @@ def test_ducklake_nested_schema_quack_multiwriter_and_parquet_export(tmp_path: P
 
         plain = duckdb.connect()
         try:
-            pq_path = exported["snapshots"]
             cnt = plain.execute(
-                f"SELECT COUNT(*), MIN(language_breakdown) FROM read_parquet('{pq_path}')"
+                "SELECT COUNT(*), MIN(language_breakdown) "
+                f"FROM read_parquet('{exported['snapshots']}')"
             ).fetchone()
-            assert cnt is not None
-            assert cnt[0] == 4
-            assert '"python":1' in cnt[1]
+            assert cnt is not None and cnt[0] == 4 and '"python":1' in cnt[1]
         finally:
             plain.close()

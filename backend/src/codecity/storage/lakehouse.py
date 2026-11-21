@@ -104,7 +104,6 @@ _TABLE_SCHEMAS: dict[str, list[_ColumnSpec]] = {
         ("package_name", "VARCHAR"),
         ("version", "VARCHAR"),
         ("is_direct", "BOOLEAN"),
-        ("parent_package", "VARCHAR"),
     ],
     "lint_diagnostics": [
         ("snapshot_idx", "INTEGER"),
@@ -491,14 +490,7 @@ class LakehouseManager:
                 pfx,
                 "external_deps",
                 [
-                    (
-                        d.snapshot_idx,
-                        d.ecosystem,
-                        d.package_name,
-                        d.version,
-                        bool(d.is_direct),
-                        d.parent_package,
-                    )
+                    (d.snapshot_idx, d.ecosystem, d.package_name, d.version, bool(d.is_direct))
                     for d in deps
                 ],
             )
@@ -554,16 +546,14 @@ class LakehouseManager:
             ],
         )
 
-    def _query_table_changes(
+    def get_annotation_changes(
         self,
         con: duckdb.DuckDBPyConnection,
         owner: str,
         repo: str,
-        table_name: str,
-        cols: list[str],
-        order_by: str,
         start_snapshot: int = 0,
     ) -> list[dict[str, Any]]:
+        """Query DuckLake `ducklake_table_changes()` for the live Mayor Notes changelog."""
         schema_dot = self.schema_dot_path(owner, repo)
         cat = escape_sql_literal(self.catalog_name)
         cur = con.execute(f"SELECT * FROM ducklake_current_snapshot('{cat}')").fetchone()
@@ -572,13 +562,24 @@ class LakehouseManager:
         end_snap = int(cur[0])
         if start_snapshot > end_snap:
             return []
+        cols = [
+            "snapshot_id",
+            "rowid",
+            "change_type",
+            "annotation_id",
+            "file_path",
+            "author",
+            "tag",
+            "body",
+            "created_at",
+        ]
         rows = con.execute(
             f"""
             SELECT {", ".join(cols)}
             FROM ducklake_table_changes(
-                '{cat}', '{schema_dot}', '{table_name}', {int(start_snapshot)}, {end_snap}
+                '{cat}', '{schema_dot}', 'annotations', {int(start_snapshot)}, {end_snap}
             )
-            ORDER BY {order_by};
+            ORDER BY snapshot_id DESC, created_at DESC;
             """
         ).fetchall()
         results = []
@@ -588,34 +589,6 @@ class LakehouseManager:
                 item["created_at"] = item["created_at"].isoformat()
             results.append(item)
         return results
-
-    def get_annotation_changes(
-        self,
-        con: duckdb.DuckDBPyConnection,
-        owner: str,
-        repo: str,
-        start_snapshot: int = 0,
-    ) -> list[dict[str, Any]]:
-        """Query DuckLake `ducklake_table_changes()` for the live Mayor Notes changelog."""
-        return self._query_table_changes(
-            con,
-            owner,
-            repo,
-            "annotations",
-            [
-                "snapshot_id",
-                "rowid",
-                "change_type",
-                "annotation_id",
-                "file_path",
-                "author",
-                "tag",
-                "body",
-                "created_at",
-            ],
-            "snapshot_id DESC, created_at DESC",
-            start_snapshot,
-        )
 
     def add_sandbox_action(
         self,
@@ -721,35 +694,6 @@ class LakehouseManager:
     ) -> None:
         pfx = self.schema_prefix(owner, repo, catalog_prefix=catalog_prefix)
         con.execute(f"DELETE FROM {pfx}.sandbox_actions;")
-
-    def get_sandbox_action_changes(
-        self,
-        con: duckdb.DuckDBPyConnection,
-        owner: str,
-        repo: str,
-        start_snapshot: int = 0,
-    ) -> list[dict[str, Any]]:
-        """Query DuckLake `ducklake_table_changes()` for collaborative sandbox sync."""
-        return self._query_table_changes(
-            con,
-            owner,
-            repo,
-            "sandbox_actions",
-            [
-                "snapshot_id",
-                "change_type",
-                "action_id",
-                "action_seq",
-                "author",
-                "tool",
-                "target_path",
-                "summary",
-                "active",
-                "created_at",
-            ],
-            "snapshot_id DESC, action_seq DESC",
-            start_snapshot,
-        )
 
     def _build_repo_ref(
         self,

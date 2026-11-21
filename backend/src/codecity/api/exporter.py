@@ -16,8 +16,8 @@ from pathlib import Path
 
 import duckdb
 
+from codecity.analyzer.plugins.base import find_bun
 from codecity.storage.lakehouse import LakehouseManager
-from codecity.storage.queries import query_health_report, query_snapshots
 
 
 @dataclass
@@ -38,14 +38,15 @@ def _ensure_frontend_dist(frontend_dist: Path | None) -> Path:
     dist_dir = (frontend_dist or _default_frontend_dist()).resolve()
     if (dist_dir / "index.html").exists():
         return dist_dir
-    frontend_root = dist_dir.parent
-    bun_bin = shutil.which("bun") or str(Path.home() / ".bun" / "bin" / "bun")
-    subprocess.run([bun_bin, "run", "build"], cwd=frontend_root, check=True)
+    bun_bin = find_bun()
+    if not bun_bin:
+        raise FileNotFoundError("Bun executable not found to build frontend dist")
+    subprocess.run([bun_bin, "run", "build"], cwd=dist_dir.parent, check=True)
     return dist_dir
 
 
 def render_grade_badge_svg(grade: str, title: str, owner: str, repo: str) -> str:
-    """Render a crisp Shields-style SVG README badge for the repository's City Grade."""
+    """Render a Shields-style SVG README badge for the repository's City Grade."""
     grade_color = (
         "#10b981" if grade.startswith("A") else "#f59e0b" if grade.startswith("B") else "#ef4444"
     )
@@ -115,8 +116,11 @@ def export_static_site(
 ) -> ExportResult:
     """Package React studio + DuckDB-Wasm + Parquet data into a zero-backend static bundle."""
     out = output_dir.resolve()
-    dist_dir = _ensure_frontend_dist(frontend_dist)
+    protected = {Path("/"), Path.home().resolve(), Path.cwd().resolve(), lake.data_dir.resolve()}
+    if out in protected:
+        raise ValueError(f"Refusing to overwrite protected directory: {out}")
 
+    dist_dir = _ensure_frontend_dist(frontend_dist)
     if out.exists():
         shutil.rmtree(out)
     shutil.copytree(dist_dir, out)
@@ -124,49 +128,33 @@ def export_static_site(
     data_dir = out / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
 
-    def _run_with_con(db_con: duckdb.DuckDBPyConnection) -> dict[str, object]:
+    def _run_with_con(db_con: duckdb.DuckDBPyConnection) -> tuple[str, str, str]:
         lake.export_repo_parquet(db_con, owner, repo, data_dir)
-        snaps = query_snapshots(db_con, lake, owner, repo)
-        latest_idx = snaps[-1].snapshot_idx if snaps else 0
-        report = query_health_report(db_con, lake, owner, repo, latest_idx)
-        repos = lake.list_repos(db_con)
-        matched = next((r for r in repos if r.owner == owner and r.repo == repo), None)
-        return {
-            "report": report,
-            "source": matched.repo_url_or_path if matched else f"{owner}/{repo}",
-        }
+        matched = lake.get_repo(db_con, owner, repo)
+        if matched is None:
+            return "A", "Sunlit Civic Metropolis", f"{owner}/{repo}"
+        return matched.latest_grade, matched.latest_title, matched.repo_url_or_path
 
     if con is not None:
-        info = _run_with_con(con)
+        grade, title, source = _run_with_con(con)
     else:
         with lake.session(read_only=True) as local_con:
-            info = _run_with_con(local_con)
+            grade, title, source = _run_with_con(local_con)
 
     manifest = {
         "mode": "static",
         "owner": owner,
         "repo": repo,
-        "source": info["source"],
+        "source": source,
         "generated_at": datetime.now(UTC).isoformat(),
     }
     manifest_path = data_dir / "manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 
-    report = info["report"]
-    assert isinstance(report, dict)
-    badge_svg = render_grade_badge_svg(
-        str(report["health_grade"]),
-        str(report["city_archetype_title"]),
-        owner,
-        repo,
-    )
     badge_path = out / "badge.svg"
-    badge_path.write_text(badge_svg, encoding="utf-8")
+    badge_path.write_text(render_grade_badge_svg(grade, title, owner, repo), encoding="utf-8")
 
-    postcard_path: Path | None = None
-    if with_postcard:
-        postcard_path = capture_postcard_png(out, out / "city-postcard.png")
-
+    postcard_path = capture_postcard_png(out, out / "city-postcard.png") if with_postcard else None
     return ExportResult(
         output_dir=out,
         manifest_path=manifest_path,

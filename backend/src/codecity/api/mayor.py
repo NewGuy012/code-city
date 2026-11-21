@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-import os
+import json
 import re
 import subprocess
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
+from codecity.analyzer.git_history import run_git
 from codecity.analyzer.plugins.base import (
     TS_EXTS,
     find_bun,
@@ -18,57 +19,46 @@ from codecity.analyzer.plugins.base import (
 )
 
 MAYOR_BRANCH = "codecity/mayor-session"
+_MAYOR_ENV = {
+    "GIT_AUTHOR_NAME": "CodeCity Mayor",
+    "GIT_AUTHOR_EMAIL": "mayor@codecity.local",
+    "GIT_COMMITTER_NAME": "CodeCity Mayor",
+    "GIT_COMMITTER_EMAIL": "mayor@codecity.local",
+}
 
 
-def _run_git(
+def _mayor_git(
     repo_path: Path, args: list[str], *, check: bool = True
 ) -> subprocess.CompletedProcess[str]:
-    env = os.environ.copy()
-    env.setdefault("GIT_AUTHOR_NAME", "CodeCity Mayor")
-    env.setdefault("GIT_AUTHOR_EMAIL", "mayor@codecity.local")
-    env.setdefault("GIT_COMMITTER_NAME", "CodeCity Mayor")
-    env.setdefault("GIT_COMMITTER_EMAIL", "mayor@codecity.local")
-    return subprocess.run(
-        ["git", "-C", str(repo_path), *args],
-        env=env,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        check=check,
-    )
+    return run_git(repo_path, args, check=check, extra_env=_MAYOR_ENV)
 
 
 def _current_branch(repo_path: Path) -> str:
-    proc = _run_git(repo_path, ["rev-parse", "--abbrev-ref", "HEAD"])
-    return proc.stdout.strip()
+    return _mayor_git(repo_path, ["rev-parse", "--abbrev-ref", "HEAD"]).stdout.strip()
 
 
 def ensure_mayor_branch(repo_path: Path) -> dict[str, Any]:
     """Ensure the repository is safely positioned on `codecity/mayor-session`."""
     cur = _current_branch(repo_path)
     if cur != MAYOR_BRANCH:
-        # Check if working tree has uncommitted user modifications before switching
-        status_proc = _run_git(repo_path, ["status", "--porcelain"])
-        if status_proc.stdout.strip():
+        if _mayor_git(repo_path, ["status", "--porcelain"]).stdout.strip():
             raise ValueError(
                 f"Working tree on `{cur}` has uncommitted changes. "
                 "Commit or stash before starting Live Mayor Mode."
             )
         exists = (
-            _run_git(
+            _mayor_git(
                 repo_path,
                 ["show-ref", "--verify", "--quiet", f"refs/heads/{MAYOR_BRANCH}"],
                 check=False,
             ).returncode
             == 0
         )
-        if exists:
-            _run_git(repo_path, ["checkout", MAYOR_BRANCH])
-        else:
-            _run_git(repo_path, ["checkout", "-b", MAYOR_BRANCH])
+        _mayor_git(
+            repo_path, ["checkout", MAYOR_BRANCH] if exists else ["checkout", "-b", MAYOR_BRANCH]
+        )
 
-    log_proc = _run_git(repo_path, ["log", "-n", "5", "--oneline"], check=False)
+    log_proc = _mayor_git(repo_path, ["log", "-n", "5", "--oneline"], check=False)
     return {
         "branch": MAYOR_BRANCH,
         "previous_branch": cur,
@@ -76,28 +66,15 @@ def ensure_mayor_branch(repo_path: Path) -> dict[str, Any]:
     }
 
 
-def get_mayor_status(repo_path: Path) -> dict[str, Any]:
-    cur = _current_branch(repo_path)
-    diff_stat = _run_git(repo_path, ["status", "--short"], check=False).stdout.strip()
-    log_proc = _run_git(repo_path, ["log", "-n", "8", "--oneline"], check=False)
-    return {
-        "branch": cur,
-        "is_mayor_branch": cur == MAYOR_BRANCH,
-        "status_short": diff_stat,
-        "recent_commits": [ln for ln in log_proc.stdout.splitlines() if ln.strip()],
-    }
-
-
 def list_repo_authors_90d(repo_path: Path) -> list[dict[str, Any]]:
     """Aggregate 90-day Git authors and files where each was the sole contributor."""
-    proc = _run_git(
+    proc = _mayor_git(
         repo_path,
         ["log", "--since=90 days ago", "--name-only", "--format=__AUTHOR__%an <%ae>"],
         check=False,
     )
     if not proc.stdout.strip():
-        # Fallback to full log if repo commits are older than 90 days
-        proc = _run_git(
+        proc = _mayor_git(
             repo_path,
             ["log", "-n", "200", "--name-only", "--format=__AUTHOR__%an <%ae>"],
             check=False,
@@ -114,43 +91,55 @@ def list_repo_authors_90d(repo_path: Path) -> list[dict[str, Any]]:
             file_authors[fpath].add(cur_author)
             author_files[cur_author].add(fpath)
 
-    results = []
-    for author, touched in author_files.items():
-        sole = sorted(f for f in touched if len(file_authors[f]) == 1)
-        results.append(
-            {
-                "author": author,
-                "sole_files": sole,
-                "total_files": len(touched),
-            }
-        )
+    results = [
+        {
+            "author": author,
+            "sole_files": sorted(f for f in touched if len(file_authors[f]) == 1),
+            "total_files": len(touched),
+        }
+        for author, touched in author_files.items()
+    ]
     results.sort(key=lambda r: (-len(r["sole_files"]), -r["total_files"], r["author"]))
     return results
+
+
+def _commit_staged(repo_path: Path, paths: list[str], message: str) -> tuple[str, str]:
+    diff_cached = _mayor_git(repo_path, ["diff", "--cached", "--", *paths], check=False).stdout
+    _mayor_git(repo_path, ["commit", "-m", message])
+    sha = _mayor_git(repo_path, ["rev-parse", "--short", "HEAD"]).stdout.strip()
+    return sha, diff_cached
 
 
 def _commit_if_dirty(
     repo_path: Path, paths: list[str], message: str
 ) -> tuple[bool, str | None, str]:
-    diff_proc = _run_git(repo_path, ["diff", "--", *paths], check=False)
-    status_proc = _run_git(repo_path, ["status", "--porcelain", "--", *paths], check=False)
-    if not status_proc.stdout.strip():
+    if not _mayor_git(
+        repo_path, ["status", "--porcelain", "--", *paths], check=False
+    ).stdout.strip():
         return False, None, ""
-    _run_git(repo_path, ["add", "--", *paths])
-    diff_cached = _run_git(repo_path, ["diff", "--cached", "--", *paths], check=False).stdout
-    _run_git(
-        repo_path,
-        [
-            "-c",
-            "user.name=CodeCity Mayor",
-            "-c",
-            "user.email=mayor@codecity.local",
-            "commit",
-            "-m",
-            message,
-        ],
-    )
-    sha = _run_git(repo_path, ["rev-parse", "--short", "HEAD"]).stdout.strip()
-    return True, sha, diff_cached or diff_proc.stdout
+    _mayor_git(repo_path, ["add", "--", *paths])
+    sha, diff = _commit_staged(repo_path, paths, message)
+    return True, sha, diff
+
+
+def _tool_result(
+    tool: str,
+    target_path: str,
+    committed: bool,
+    sha: str | None,
+    diff: str,
+    message: str,
+) -> dict[str, Any]:
+    return {
+        "ok": True,
+        "branch": MAYOR_BRANCH,
+        "tool": tool,
+        "target_path": target_path,
+        "committed": committed,
+        "commit_sha": sha,
+        "diff": diff,
+        "message": message,
+    }
 
 
 def execute_live_mayor_tool(
@@ -166,25 +155,26 @@ def execute_live_mayor_tool(
     """Execute a Mayor tool safely on the `codecity/mayor-session` branch."""
     ensure_mayor_branch(repo_path)
     target = safe_repo_target(repo_path, target_path)
+    rel_target = target.relative_to(repo_path.resolve()).as_posix()
 
     if tool == "sweeper":
-        if not target.exists():
+        if not target.is_file():
             raise FileNotFoundError(f"Target file not found: {target_path}")
-        if target_path.endswith((".py", ".pyi")):
+        if rel_target.endswith((".py", ".pyi")):
             ruff = ruff_cmd()
             subprocess.run(
-                [*ruff, "check", "--no-cache", "--fix", "--", target_path],
+                [*ruff, "check", "--no-cache", "--fix", "--", rel_target],
                 cwd=repo_path,
                 capture_output=True,
                 timeout=15,
             )
             subprocess.run(
-                [*ruff, "format", "--no-cache", "--", target_path],
+                [*ruff, "format", "--no-cache", "--", rel_target],
                 cwd=repo_path,
                 capture_output=True,
                 timeout=15,
             )
-        elif target_path.endswith(TS_EXTS):
+        elif rel_target.endswith(TS_EXTS):
             oxlint_bin = find_local_oxlint()
             bun_bin = find_bun()
             if bun_bin and oxlint_bin:
@@ -203,34 +193,29 @@ def execute_live_mayor_tool(
                 )
         committed, sha, diff = _commit_if_dirty(
             repo_path,
-            [target_path],
-            f"style(mayor): sweep lints and formatting in {target_path}",
+            [rel_target],
+            f"style(mayor): sweep lints and formatting in {rel_target}",
         )
-        return {
-            "ok": True,
-            "branch": MAYOR_BRANCH,
-            "tool": tool,
-            "target_path": target_path,
-            "committed": committed,
-            "commit_sha": sha,
-            "diff": diff,
-            "message": f"Swept {target_path} on {MAYOR_BRANCH}"
-            if committed
-            else f"{target_path} already clean.",
-        }
+        msg = (
+            f"Swept {rel_target} on {MAYOR_BRANCH}" if committed else f"{rel_target} already clean."
+        )
+        return _tool_result(tool, rel_target, committed, sha, diff, msg)
 
     if tool == "proving_park":
-        stem = re.sub(r"[^a-zA-Z0-9_]+", "_", Path(target_path).stem).strip("_") or "module"
-        if target_path.endswith((".ts", ".tsx", ".js", ".jsx")):
-            rel_test = f"{Path(target_path).parent.as_posix()}/{stem}.mayor.test.ts".removeprefix(
-                "./"
+        stem = re.sub(r"[^a-zA-Z0-9_]+", "_", Path(rel_target).stem).strip("_") or "module"
+        if rel_target.endswith((".ts", ".tsx", ".js", ".jsx")):
+            parent_dir = Path(rel_target).parent.as_posix()
+            rel_test = (
+                f"{stem}.mayor.test.ts"
+                if parent_dir == "."
+                else f"{parent_dir}/{stem}.mayor.test.ts"
             )
             test_file = safe_repo_target(repo_path, rel_test)
             test_file.parent.mkdir(parents=True, exist_ok=True)
             if not test_file.exists():
                 test_file.write_text(
                     'import { describe, expect, test } from "bun:test";\n\n'
-                    f'describe("{target_path}", () => {{\n'
+                    f"describe({json.dumps(rel_target)}, () => {{\n"
                     '  test("scaffolded proving park test", () => {\n'
                     "    expect(true).toBe(true);\n"
                     "  });\n"
@@ -243,7 +228,7 @@ def execute_live_mayor_tool(
             test_file.parent.mkdir(parents=True, exist_ok=True)
             if not test_file.exists():
                 test_file.write_text(
-                    f'"""Proving Park starter tests for `{target_path}`."""\n\n'
+                    f'"""Proving Park starter tests for {rel_target!r}."""\n\n'
                     f"def test_{stem}_proving_park_smoke() -> None:\n"
                     "    assert True\n",
                     encoding="utf-8",
@@ -253,107 +238,96 @@ def execute_live_mayor_tool(
             [rel_test],
             f"test(mayor): plant Proving Park {rel_test}",
         )
-        return {
-            "ok": True,
-            "branch": MAYOR_BRANCH,
-            "tool": tool,
-            "target_path": rel_test,
-            "committed": committed,
-            "commit_sha": sha,
-            "diff": diff,
-            "message": f"Scaffolded starter test `{rel_test}` on {MAYOR_BRANCH}",
-        }
+        return _tool_result(
+            tool,
+            rel_test,
+            committed,
+            sha,
+            diff,
+            f"Scaffolded starter test `{rel_test}` on {MAYOR_BRANCH}",
+        )
 
     if tool == "co_maintainer":
+        if any(ch.isspace() for ch in rel_target):
+            raise ValueError("Target path cannot contain whitespace for CODEOWNERS entry")
         owners_rel = ".github/CODEOWNERS"
         owners_file = safe_repo_target(repo_path, owners_rel)
         owners_file.parent.mkdir(parents=True, exist_ok=True)
         existing = owners_file.read_text(encoding="utf-8") if owners_file.exists() else ""
-        entry = f"/{target_path} @core-maintainers @co-maintainer"
-        if entry not in existing:
-            new_text = (existing.rstrip() + "\n" + entry + "\n").lstrip("\n")
-            owners_file.write_text(new_text, encoding="utf-8")
+        entry = f"/{rel_target} @core-maintainers @co-maintainer"
+        if entry not in existing.splitlines():
+            owners_file.write_text(
+                (existing.rstrip() + "\n" + entry + "\n").lstrip("\n"),
+                encoding="utf-8",
+            )
         committed, sha, diff = _commit_if_dirty(
             repo_path,
             [owners_rel],
-            f"chore(mayor): assign co-maintainer for {target_path}",
+            f"chore(mayor): assign co-maintainer for {rel_target}",
         )
-        return {
-            "ok": True,
-            "branch": MAYOR_BRANCH,
-            "tool": tool,
-            "target_path": owners_rel,
-            "committed": committed,
-            "commit_sha": sha,
-            "diff": diff,
-            "message": f"Updated {owners_rel} for {target_path} on {MAYOR_BRANCH}",
-        }
+        return _tool_result(
+            tool,
+            owners_rel,
+            committed,
+            sha,
+            diff,
+            f"Updated {owners_rel} for {rel_target} on {MAYOR_BRANCH}",
+        )
 
     if tool in {"splitter", "transit_hub"}:
-        slug = re.sub(r"[^a-zA-Z0-9_]+", "_", target_path).strip("_")
-        spec_rel = f".codecity/blueprints/{tool}_{slug}.md"
+        slug = re.sub(r"[^a-zA-Z0-9_]+", "_", rel_target).strip("_")
+        spec_rel = f".github/codecity-blueprints/{tool}_{slug}.md"
         spec_file = safe_repo_target(repo_path, spec_rel)
         spec_file.parent.mkdir(parents=True, exist_ok=True)
+        checklist = (
+            "- [ ] Extract cohesive domain submodules (`_core`, `_service`, `_adapter`)\n"
+            "- [ ] Preserve re-exports for zero-breakage callers\n"
+            if tool == "splitter"
+            else "- [ ] Introduce interface/protocol adapter breaking direct cycle\n"
+            "- [ ] Route imports cleanly through interface hub\n"
+        )
         body = (
-            f"# Mayor Live Spec ({tool}): `{target_path}`\n\n"
-            f"- District: `{district_path or Path(target_path).parent.as_posix()}`\n"
+            f"# Mayor Live Spec ({tool}): `{rel_target}`\n\n"
+            f"- District: `{district_path or Path(rel_target).parent.as_posix()}`\n"
             + (f"- Coupled Partner: `{secondary_path}`\n" if secondary_path else "")
             + "\n## Recommended Refactor Checklist\n"
-            + (
-                "- [ ] Extract cohesive domain submodules (`_core`, `_service`, `_adapter`)\n"
-                "- [ ] Preserve re-exports for zero-breakage callers\n"
-                if tool == "splitter"
-                else "- [ ] Introduce interface/protocol adapter breaking direct cycle\n"
-                "- [ ] Route imports cleanly through interface hub\n"
-            )
+            + checklist
         )
         spec_file.write_text(body, encoding="utf-8")
         committed, sha, diff = _commit_if_dirty(
             repo_path,
             [spec_rel],
-            f"docs(mayor): emit {tool} refactor blueprint for {target_path}",
+            f"docs(mayor): emit {tool} refactor blueprint for {rel_target}",
         )
-        return {
-            "ok": True,
-            "branch": MAYOR_BRANCH,
-            "tool": tool,
-            "target_path": spec_rel,
-            "committed": committed,
-            "commit_sha": sha,
-            "diff": diff,
-            "message": f"Generated refactor spec `{spec_rel}` on {MAYOR_BRANCH}",
-        }
+        return _tool_result(
+            tool,
+            spec_rel,
+            committed,
+            sha,
+            diff,
+            f"Generated refactor spec `{spec_rel}` on {MAYOR_BRANCH}",
+        )
 
     if tool == "bulldozer":
         if fan_in > 0:
-            raise ValueError(f"Refusing live git rm: `{target_path}` still has fan_in={fan_in}.")
+            raise ValueError(f"Refusing live git rm: `{rel_target}` still has fan_in={fan_in}.")
         if not confirm:
             raise ValueError("Live Bulldozer requires explicit confirmation (`confirm=true`).")
-        if not target.exists():
+        if not target.is_file():
             raise FileNotFoundError(f"Target file not found: {target_path}")
-        _run_git(repo_path, ["rm", "--", target_path])
-        _run_git(
+        _mayor_git(repo_path, ["rm", "--", rel_target])
+        sha, _ = _commit_staged(
             repo_path,
-            [
-                "-c",
-                "user.name=CodeCity Mayor",
-                "-c",
-                "user.email=mayor@codecity.local",
-                "commit",
-                "-m",
-                f"chore(mayor): remove dead module {target_path}",
-            ],
+            [rel_target],
+            f"chore(mayor): remove dead module {rel_target}",
         )
-        sha = _run_git(repo_path, ["rev-parse", "--short", "HEAD"]).stdout.strip()
-        return {
-            "ok": True,
-            "branch": MAYOR_BRANCH,
-            "tool": tool,
-            "target_path": target_path,
-            "committed": True,
-            "commit_sha": sha,
-            "diff": f"--- a/{target_path}\n+++ /dev/null\n",
-            "message": f"Removed `{target_path}` via git rm on {MAYOR_BRANCH}",
-        }
+        return _tool_result(
+            tool,
+            rel_target,
+            True,
+            sha,
+            f"--- a/{rel_target}\n+++ /dev/null\n",
+            f"Removed `{rel_target}` via git rm on {MAYOR_BRANCH}",
+        )
 
     raise ValueError(f"Unsupported Mayor tool: {tool}")

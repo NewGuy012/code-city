@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from codecity.analyzer.plugins.base import LanguagePlugin, PluginResult
+from codecity.analyzer.plugins.base import LanguagePlugin, PluginResult, safe_repo_target
 from codecity.analyzer.plugins.go import GoPlugin
 from codecity.analyzer.plugins.python import PythonPlugin
 from codecity.analyzer.plugins.rust import RustPlugin
@@ -48,6 +48,7 @@ def preview_file_fix(
     plugins: tuple[LanguagePlugin, ...] = DEFAULT_PLUGINS,
 ) -> FixDiffResult:
     """Preview an auto-fix diff using the first matching LanguagePlugin."""
+    safe_repo_target(repo_root, file_path)
     for plugin in plugins:
         res = plugin.preview_fix(repo_root, file_path)
         if res is not None:
