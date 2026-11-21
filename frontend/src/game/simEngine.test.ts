@@ -1,8 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import type { CitySnapshotBundle } from "../data/cityDataClient";
+import type { CityDataClient, CitySnapshotBundle } from "../data/cityDataClient";
 import type { District, FileMetric } from "../types/city";
+import { evaluateAdvisorMissions } from "./missions";
 import { buildRoadGraph, detectImportCycles, findStreetPath } from "./roadGraph";
 import { CitySimulationEngine } from "./simEngine";
+import { soundEngine } from "./soundEngine";
 
 function makeTestBundle(): CitySnapshotBundle {
   const districts: District[] = [
@@ -227,5 +229,38 @@ describe("roadGraph & simEngine", () => {
 
     engine.dispatchServiceUnit("sweeper", bundle.files[1], bundle);
     expect(engine.getSnapshot().vehicles.some((v) => v.type === "sweeper")).toBe(true);
+  });
+
+  test("Chaos disasters & SQL advisor missions evaluate cleanly", async () => {
+    const bundle = makeTestBundle();
+    const engine = new CitySimulationEngine();
+    engine.step(bundle);
+
+    engine.triggerPowerOutage("core/hub.py", ["api/routes.py"], new Set());
+    expect(engine.getSnapshot().blackoutFiles.has("api/routes.py")).toBe(true);
+
+    engine.triggerCrunchStorm(bundle);
+    expect(engine.getSnapshot().fireFiles.size).toBeGreaterThan(0);
+
+    engine.triggerBusFactorVacation("alice", ["core/hub.py"]);
+    expect(engine.getSnapshot().activeDisaster?.kind).toBe("bus_factor_vacation");
+
+    engine.triggerSupplyDockStorm("fastapi", bundle);
+    expect(engine.getSnapshot().activeDisaster?.kind).toBe("supply_dock_storm");
+
+    engine.clearDisaster();
+    expect(engine.getSnapshot().activeDisaster).toBeNull();
+
+    // Verify mission evaluation & sound engine resilience in headless runner
+    const dummyClient = {
+      runReadSql: async () => [],
+    } as unknown as CityDataClient;
+    const missions = await evaluateAdvisorMissions(dummyClient, bundle);
+    expect(missions.length).toBe(4);
+    expect(missions.some((m) => m.id === "transit" && !m.completed)).toBe(true);
+
+    soundEngine.playTool("sweeper");
+    soundEngine.playMilestone();
+    soundEngine.playDisaster();
   });
 });

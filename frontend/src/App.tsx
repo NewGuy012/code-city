@@ -1,13 +1,16 @@
-import { Building2, FolderGit2, Loader2, Search } from "lucide-react";
+import { Building2, FolderGit2, Loader2, Search, ShieldAlert } from "lucide-react";
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { CityCanvas2D, type FocusTarget } from "./city/CityCanvas2D";
 import { cameraStore, useUnifiedCameraHotkeys } from "./city/cameraStore";
 import type { GhostLot } from "./city/isoRenderer2D";
 import { deriveStreetLinesAndPlazas } from "./city/streetGrid";
+import { AdvisorCouncilModal } from "./components/AdvisorCouncilModal";
 import { AdvisorTicker } from "./components/AdvisorTicker";
 import { CameraControlsHUD } from "./components/CameraControlsHUD";
 import { DataMapBar } from "./components/DataMapBar";
+import { type AuthorSummary, DisastersMenu } from "./components/DisastersMenu";
+import { EconomyBar } from "./components/EconomyBar";
 import { HealthCardModal } from "./components/HealthCardModal";
 import { InspectorDrawer } from "./components/InspectorDrawer";
 import { MayorToolbar } from "./components/MayorToolbar";
@@ -20,13 +23,15 @@ import {
   type HealthReportData,
   type TourLandmark,
 } from "./data/cityDataClient";
+import { type AdvisorMission, evaluateAdvisorMissions } from "./game/missions";
 import {
   type MayorToolId,
   type SandboxActionRecord,
   applySandboxOverlay,
   validateToolOnFile,
 } from "./game/sandboxOverlay";
-import { CitySimulationEngine, type SimStateSnapshot } from "./game/simEngine";
+import { CitySimulationEngine, type SimSpeed, type SimStateSnapshot } from "./game/simEngine";
+import { soundEngine } from "./game/soundEngine";
 import type {
   Annotation,
   BlastRadiusResult,
@@ -155,9 +160,40 @@ export function App() {
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [analyzePct, setAnalyzePct] = useState<number | null>(null);
 
+  const [advisorsOpen, setAdvisorsOpen] = useState(false);
+  const [disastersOpen, setDisastersOpen] = useState(false);
+  const [missions, setMissions] = useState<AdvisorMission[]>([]);
+  const [claimedMissions, setClaimedMissions] = useState<Set<string>>(() => new Set());
+  const [soundEnabled, setSoundEnabled] = useState(true);
+  const [repoAuthors, setRepoAuthors] = useState<AuthorSummary[]>([]);
+
   const showToast = useCallback((msg: string) => {
     setToastMsg(msg);
   }, []);
+
+  // Re-evaluate SQL-driven Advisor Quests when effectiveBundle changes
+  useEffect(() => {
+    if (!effectiveBundle) {
+      setMissions([]);
+      return;
+    }
+    let cancelled = false;
+    void evaluateAdvisorMissions(client, effectiveBundle).then((list) => {
+      if (!cancelled) setMissions(list);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [client, effectiveBundle]);
+
+  // Play milestone fanfare + celebratory popups when city levels up
+  useEffect(() => {
+    if (!simState.milestoneEvent) return;
+    soundEngine.playMilestone();
+    showToast(`🎉 Milestone Unlocked: ${simState.milestoneEvent}!`);
+    sim.spawnFloatingPopup(70, 52, `★ ${simState.milestoneEvent}!`, "#fde047");
+    sim.clearMilestoneEvent();
+  }, [showToast, sim, simState.milestoneEvent]);
 
   useEffect(() => {
     if (!toastMsg) return;
@@ -423,6 +459,7 @@ export function App() {
                   ? "+Co-Maintainer"
                   : "-Upkeep";
       sim.spawnFloatingPopup(cx, cz, badge, tool === "bulldozer" ? "#fda4af" : "#4ade80");
+      soundEngine.playTool(tool);
       setSimState(sim.getSnapshot());
       showToast(`${summaryMap[tool]} (Sandbox)`);
     },
@@ -728,6 +765,35 @@ export function App() {
             />
           </div>
 
+          {effectiveBundle && (
+            <EconomyBar
+              simState={simState}
+              activeQuestCount={missions.filter((m) => !m.completed).length}
+              soundEnabled={soundEnabled}
+              onChangeSpeed={(spd: SimSpeed) => {
+                sim.setSpeed(spd);
+                setSimState(sim.getSnapshot());
+              }}
+              onOpenAdvisors={() => setAdvisorsOpen(true)}
+              onOpenDisasters={() => {
+                if (!isStaticMode && activeRepo) {
+                  void fetch(`/api/repos/${activeRepo.owner}/${activeRepo.repo}/authors`)
+                    .then((r) => (r.ok ? r.json() : []))
+                    .then((rows: AuthorSummary[]) => {
+                      if (Array.isArray(rows)) setRepoAuthors(rows);
+                    })
+                    .catch(() => {});
+                }
+                setDisastersOpen(true);
+              }}
+              onToggleSound={() => {
+                const next = !soundEnabled;
+                setSoundEnabled(next);
+                soundEngine.setEnabled(next);
+              }}
+            />
+          )}
+
           {bundle && (
             <div className="pointer-events-auto">
               <AdvisorTicker
@@ -737,6 +803,30 @@ export function App() {
             </div>
           )}
         </div>
+
+        {/* Active Chaos Disaster Alert Banner */}
+        {simState.activeDisaster && !simState.activeDisaster.resolved && (
+          <div
+            data-testid="active-disaster-banner"
+            className="sim-panel pointer-events-auto flex items-center justify-between gap-3 self-center rounded-xl border-rose-500/50 bg-rose-950/75 px-4 py-1.5 text-xs text-rose-100"
+          >
+            <div className="flex items-center gap-2">
+              <ShieldAlert className="h-4 w-4 animate-pulse text-rose-400" />
+              <span className="font-bold">{simState.activeDisaster.title}:</span>
+              <span className="text-rose-200">{simState.activeDisaster.detail}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                sim.clearDisaster();
+                setSimState(sim.getSnapshot());
+              }}
+              className="rounded-lg bg-rose-500/30 px-2.5 py-0.5 text-[11px] font-semibold text-white hover:bg-rose-500/50"
+            >
+              Resolve
+            </button>
+          </div>
+        )}
 
         {loadingMsg && (
           <div className="sim-panel pointer-events-auto flex items-center gap-2 self-start rounded-xl px-3 py-1.5 text-xs text-sky-200">
@@ -900,6 +990,76 @@ export function App() {
         }}
         onFocusFile={handleFocusFile}
         onClose={() => setHealthModalOpen(false)}
+      />
+
+      {/* 4 Interactive City Advisors & SQL Quests Modal */}
+      <AdvisorCouncilModal
+        open={advisorsOpen}
+        missions={missions}
+        claimedMissionIds={claimedMissions}
+        onClaimReward={(m) => {
+          setClaimedMissions((prev) => new Set([...prev, m.id]));
+          sim.addVelocity(m.rewardVelocity);
+          sim.spawnFloatingPopup(70, 52, `+${m.rewardVelocity} Velocity!`, "#fde047");
+          soundEngine.playMilestone();
+          setSimState(sim.getSnapshot());
+          showToast(`Quest Completed: ${m.title} (+${m.rewardVelocity} Velocity)`);
+        }}
+        onFocusFile={handleFocusFile}
+        onClose={() => setAdvisorsOpen(false)}
+      />
+
+      {/* 4 Playable Chaos Disasters Modal */}
+      <DisastersMenu
+        open={disastersOpen}
+        bundle={effectiveBundle}
+        authors={repoAuthors}
+        onTriggerPowerOutage={(targetFile) => {
+          if (!effectiveBundle) return;
+          // BFS downstream transitive dependents along effective imports
+          const visited = new Set<string>();
+          const queue = [targetFile];
+          while (queue.length > 0) {
+            const cur = queue.shift()!;
+            for (const imp of effectiveBundle.imports) {
+              if (imp.target_file === cur && !visited.has(imp.source_file)) {
+                visited.add(imp.source_file);
+                queue.push(imp.source_file);
+              }
+            }
+          }
+          const protectedSet = new Set(
+            effectiveBundle.files
+              .filter((f) => overlayResult?.protectedDistricts.has(f.district_path))
+              .map((f) => f.file_path),
+          );
+          sim.triggerPowerOutage(targetFile, [...visited], protectedSet);
+          soundEngine.playDisaster();
+          setSimState(sim.getSnapshot());
+          handleFocusFile(targetFile);
+        }}
+        onTriggerBusFactorVacation={(authorLabel, filesList) => {
+          sim.triggerBusFactorVacation(authorLabel, filesList);
+          soundEngine.playDisaster();
+          setSimState(sim.getSnapshot());
+        }}
+        onTriggerCrunchStorm={() => {
+          if (!effectiveBundle) return;
+          sim.triggerCrunchStorm(effectiveBundle);
+          soundEngine.playDisaster();
+          setSimState(sim.getSnapshot());
+        }}
+        onTriggerSupplyDockStorm={(depName) => {
+          if (!effectiveBundle) return;
+          sim.triggerSupplyDockStorm(depName, effectiveBundle);
+          soundEngine.playDisaster();
+          setSimState(sim.getSnapshot());
+        }}
+        onClearDisasters={() => {
+          sim.clearDisaster();
+          setSimState(sim.getSnapshot());
+        }}
+        onClose={() => setDisastersOpen(false)}
       />
     </div>
   );
