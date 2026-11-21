@@ -5,10 +5,16 @@ import { CityCanvas2D, type FocusTarget } from "./city/CityCanvas2D";
 import type { GhostLot } from "./city/isoRenderer2D";
 import { AdvisorTicker } from "./components/AdvisorTicker";
 import { DataMapBar } from "./components/DataMapBar";
+import { HealthCardModal } from "./components/HealthCardModal";
 import { InspectorDrawer } from "./components/InspectorDrawer";
 import { OnboardingTour } from "./components/OnboardingTour";
 import { TimeScrubber } from "./components/TimeScrubber";
-import { type CitySnapshotBundle, CityDataClient, type TourLandmark } from "./data/cityDataClient";
+import {
+  type CitySnapshotBundle,
+  CityDataClient,
+  type HealthReportData,
+  type TourLandmark,
+} from "./data/cityDataClient";
 import type {
   Annotation,
   BlastRadiusResult,
@@ -57,6 +63,7 @@ export function App() {
   const [tourActive, setTourActive] = useState(false);
   const [tourAutoPlay, setTourAutoPlay] = useState(true);
   const [healthModalOpen, setHealthModalOpen] = useState(false);
+  const [healthReport, setHealthReport] = useState<HealthReportData | null>(null);
 
   const [repoInput, setRepoInput] = useState(".");
   const [loadingMsg, setLoadingMsg] = useState<string | null>("Booting DuckDB-Wasm...");
@@ -242,7 +249,20 @@ export function App() {
     [bundle],
   );
 
-  // Mayor's Guided Tour control & auto-advance
+  async function handleOpenHealthModal() {
+    if (!bundle || !activeRepo) return;
+    if (healthModalOpen) {
+      setHealthModalOpen(false);
+      return;
+    }
+    const rep = await client.queryHealthReport(
+      activeRepo.owner,
+      activeRepo.repo,
+      bundle.snapshot.snapshot_idx,
+    );
+    setHealthReport(rep);
+    setHealthModalOpen(true);
+  }
   async function handleStartTour() {
     if (!bundle) return;
     if (tourActive) {
@@ -489,7 +509,7 @@ export function App() {
               viewMode={viewMode}
               onToggleViewMode={() => setViewMode((m) => (m === "2d" ? "3d" : "2d"))}
               onStartTour={() => void handleStartTour()}
-              onOpenHealthModal={() => setHealthModalOpen((o) => !o)}
+              onOpenHealthModal={() => void handleOpenHealthModal()}
               tourActive={tourActive}
             />
           </div>
@@ -576,13 +596,46 @@ export function App() {
         </footer>
       )}
 
-      {/* Placeholder toggle indicator for Phase 5 HealthCardModal */}
-      {healthModalOpen && bundle && (
-        <div className="pointer-events-auto absolute top-28 left-4 z-40 rounded-xl bg-slate-900 p-3 text-xs">
-          Grade {bundle.snapshot.health_grade} ({bundle.snapshot.health_score}) — opening full
-          report in Phase 5!
-        </div>
-      )}
+      {/* Shareable Health Report, Quack CLI Snippet & Static Postcard Export Modal */}
+      <HealthCardModal
+        open={healthModalOpen}
+        report={healthReport}
+        annotations={annotations}
+        isStaticMode={isStaticMode}
+        onFetchQuackSnippet={() => {
+          if (!activeRepo) {
+            return Promise.resolve({
+              quack_uri: null,
+              token: null,
+              proxy_url: "",
+              snippet: "",
+            });
+          }
+          return client.fetchQuackSnippet(activeRepo.owner, activeRepo.repo);
+        }}
+        onFetchAnnotationChanges={() => {
+          if (!activeRepo) return Promise.resolve([]);
+          return client.fetchAnnotationChanges(activeRepo.owner, activeRepo.repo);
+        }}
+        onTriggerExport={async () => {
+          if (!activeRepo) {
+            throw new Error("No repository active");
+          }
+          const resp = await fetch(`/api/repos/${activeRepo.owner}/${activeRepo.repo}/export`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ with_postcard: true }),
+          });
+          if (!resp.ok) throw new Error(`Export failed: ${resp.status}`);
+          return (await resp.json()) as {
+            output_dir: string;
+            badge_url: string;
+            postcard_url: string | null;
+          };
+        }}
+        onFocusFile={handleFocusFile}
+        onClose={() => setHealthModalOpen(false)}
+      />
     </div>
   );
 }

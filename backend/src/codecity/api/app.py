@@ -26,6 +26,7 @@ from sse_starlette.sse import EventSourceResponse
 from codecity.analyzer.git_history import resolve_git_repo
 from codecity.analyzer.pipeline import analyze_repository
 from codecity.analyzer.plugins import preview_file_fix
+from codecity.api.exporter import export_static_site, render_grade_badge_svg
 from codecity.models import AnalyzeRequest, Annotation, FixDiffResult
 from codecity.storage.lakehouse import LakehouseManager, infer_owner_repo
 from codecity.storage.quack_server import QuackServerManager
@@ -54,6 +55,12 @@ class FixDiffRequest(BaseModel):
     """Payload to compute a non-destructive live auto-fix diff on HEAD."""
 
     file_path: str
+
+
+class ExportRequest(BaseModel):
+    """Payload to export a zero-backend static OSS report and optional PNG postcard."""
+
+    with_postcard: bool = True
 
 
 @dataclass
@@ -422,6 +429,56 @@ def create_app(
                 return lake.get_annotation_changes(con, owner, repo)
             except duckdb.Error as exc:
                 raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/api/repos/{owner}/{repo}/badge.svg")
+    def api_badge_svg(owner: str, repo: str) -> Response:
+        with db_lock, open_con() as con:
+            try:
+                snaps = query_snapshots(con, lake, owner, repo)
+                latest_idx = snaps[-1].snapshot_idx if snaps else 0
+                report = query_health_report(con, lake, owner, repo, latest_idx)
+            except (duckdb.Error, IndexError) as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+        svg = render_grade_badge_svg(
+            str(report["health_grade"]),
+            str(report["city_archetype_title"]),
+            owner,
+            repo,
+        )
+        return Response(content=svg, media_type="image/svg+xml")
+
+    @app.post("/api/repos/{owner}/{repo}/export")
+    def api_export_static(owner: str, repo: str, body: ExportRequest) -> dict[str, Any]:
+        export_dir = lake.data_dir / "exports" / f"{owner}_{repo}"
+        with db_lock, open_con() as con:
+            try:
+                res = export_static_site(
+                    lake,
+                    owner,
+                    repo,
+                    export_dir,
+                    con=con,
+                    with_postcard=body.with_postcard,
+                    frontend_dist=frontend_dist,
+                )
+            except duckdb.Error as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return {
+            "output_dir": str(res.output_dir),
+            "badge_url": f"/api/repos/{owner}/{repo}/badge.svg",
+            "postcard_url": (
+                f"/api/repos/{owner}/{repo}/exports/city-postcard.png"
+                if res.postcard_path
+                else None
+            ),
+        }
+
+    @app.get("/api/repos/{owner}/{repo}/exports/city-postcard.png")
+    def api_get_postcard(owner: str, repo: str) -> FileResponse:
+        png_path = lake.data_dir / "exports" / f"{owner}_{repo}" / "city-postcard.png"
+        if not png_path.exists():
+            raise HTTPException(status_code=404, detail="Postcard not generated yet")
+        return FileResponse(png_path, media_type="image/png")
 
     @app.api_route("/quack", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
     @app.api_route("/quack/{subpath:path}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
