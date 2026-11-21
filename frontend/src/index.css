@@ -19,13 +19,38 @@ body {
 }
 
 .sim-panel {
-  background: rgba(15, 23, 42, 0.88);
-  backdrop-filter: blur(12px);
-  border: 1px solid rgba(148, 163, 184, 0.18);
-  box-shadow: 0 12px 32px rgba(2, 6, 23, 0.55);
+  background: rgba(10, 15, 28, 0.78);
+  backdrop-filter: blur(16px) saturate(140%);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  box-shadow: 0 10px 30px rgba(2, 6, 23, 0.5);
+}
+
+.sim-popover {
+  background: rgba(10, 15, 28, 0.93);
+  backdrop-filter: blur(20px) saturate(150%);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: 0 18px 42px rgba(2, 6, 23, 0.7);
 }
 
 .sim-pixel-badge {
   font-variant-numeric: tabular-nums;
-  letter-spacing: 0.03em;
+  letter-spacing: 0.02em;
+}
+
+.sim-scrollbar::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+
+.sim-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.sim-scrollbar::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.22);
+  border-radius: 9999px;
+}
+
+.sim-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: rgba(148, 163, 184, 0.4);
 }
