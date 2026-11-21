@@ -118,6 +118,36 @@ def test_live_studio_e2e_2d_datamaps_tour_notes_3d_timescrub_and_quack(tmp_path:
             assert "E2E verified Mayor refactor note" in page.inner_text(
                 '[data-testid="health-modal"]'
             )
+            page.keyboard.press("Escape")
+            page.click('[data-testid="health-modal"] button[title="Close report"]')
+
+            # 7. CodeCity v2: Camera Controls, Compass Rotation, Presets, Day/Night & Minimap
+            page.wait_for_selector('[data-testid="camera-controls-hud"]', timeout=5000)
+            page.wait_for_selector('[data-testid="minimap-radar"]', timeout=5000)
+            page.click('[data-testid="rotate-cw-btn"]')
+            page.wait_for_timeout(450)
+            assert page.inner_text('[data-testid="compass-rose-btn"]').strip() == "E"
+            page.click('[data-testid="time-of-day-btn"]')
+            assert "golden" in page.inner_text('[data-testid="time-of-day-btn"]').lower()
+            page.click('[data-testid="cam-preset-4"]')  # Follow Vehicle Cam
+
+            # 8. CodeCity v2: Economy Bar, Advisor Council SQL Quests, Disasters & Blueprint Export
+            page.wait_for_selector('[data-testid="economy-bar"]', timeout=5000)
+            page.click('[data-testid="sim-speed-2"]')
+            page.click('[data-testid="open-advisors-btn"]')
+            page.wait_for_selector('[data-testid="advisor-council-modal"]', timeout=5000)
+            assert "Clear Air Act" in page.inner_text('[data-testid="advisor-council-modal"]')
+            page.click('[data-testid="advisor-council-modal"] button[title="Close advisors"]')
+
+            page.click('[data-testid="open-disasters-btn"]')
+            page.wait_for_selector('[data-testid="disasters-modal"]', timeout=5000)
+            page.click('[data-testid="disaster-crunch-storm"]')
+            page.wait_for_selector('[data-testid="active-disaster-banner"]', timeout=5000)
+
+            page.click('[data-testid="export-blueprint-btn"]')
+            page.wait_for_selector('[data-testid="blueprint-modal"]', timeout=5000)
+            blueprint_txt = page.inner_text('[data-testid="blueprint-modal"]')
+            assert "Mayor's Refactor Blueprint" in blueprint_txt
 
             assert page_errors == [], f"Unexpected browser page errors: {page_errors}"
             browser.close()

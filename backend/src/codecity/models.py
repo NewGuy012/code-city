@@ -216,3 +216,20 @@ class AnalyzeRequest(BaseModel):
     max_keyframes: int = Field(default=16, ge=1, le=120)
     semantic: bool = False
     workers: int = Field(default=4, ge=1, le=16)
+
+
+class SandboxAction(BaseModel):
+    """Multiplayer Sandbox Mayor intervention persisted in DuckLake over Quack."""
+
+    action_id: str
+    action_seq: int = 1
+    session_id: str = "default"
+    author: str = "mayor"
+    tool: str
+    target_path: str
+    secondary_path: str | None = None
+    district_path: str
+    summary: str
+    velocity_cost: int = 0
+    active: bool = True
+    created_at: datetime

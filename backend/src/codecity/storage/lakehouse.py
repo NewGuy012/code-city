@@ -23,6 +23,7 @@ from codecity.models import (
     FileMetric,
     LintDiagnostic,
     RepoRef,
+    SandboxAction,
     Snapshot,
 )
 
@@ -323,6 +324,24 @@ class LakehouseManager:
                 author VARCHAR,
                 tag VARCHAR,
                 body VARCHAR,
+                created_at TIMESTAMP
+            );
+            """
+        )
+        con.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {pfx}.sandbox_actions (
+                action_id VARCHAR,
+                action_seq INTEGER,
+                session_id VARCHAR,
+                author VARCHAR,
+                tool VARCHAR,
+                target_path VARCHAR,
+                secondary_path VARCHAR,
+                district_path VARCHAR,
+                summary VARCHAR,
+                velocity_cost INTEGER,
+                active BOOLEAN,
                 created_at TIMESTAMP
             );
             """
@@ -681,6 +700,178 @@ class LakehouseManager:
             "author",
             "tag",
             "body",
+            "created_at",
+        ]
+        results = []
+        for row in rows:
+            item = dict(zip(cols, row, strict=True))
+            if isinstance(item["created_at"], datetime):
+                item["created_at"] = item["created_at"].isoformat()
+            results.append(item)
+        return results
+
+    def add_sandbox_action(
+        self,
+        con: duckdb.DuckDBPyConnection,
+        owner: str,
+        repo: str,
+        action: SandboxAction,
+        *,
+        catalog_prefix: str | None = None,
+    ) -> SandboxAction:
+        """Insert a collaborative Mayor sandbox action into DuckLake via Data Inlining."""
+        pfx = self.schema_prefix(owner, repo, catalog_prefix=catalog_prefix)
+        con.execute(f"DELETE FROM {pfx}.sandbox_actions WHERE active = false;")
+        rows = con.execute(
+            f"SELECT COALESCE(MAX(action_seq), 0) FROM {pfx}.sandbox_actions;"
+        ).fetchall()
+        next_seq = int(rows[0][0]) + 1 if rows else 1
+        persisted = action.model_copy(update={"action_seq": next_seq})
+
+        df = pl.DataFrame(
+            [
+                {
+                    "action_id": persisted.action_id,
+                    "action_seq": persisted.action_seq,
+                    "session_id": persisted.session_id,
+                    "author": persisted.author,
+                    "tool": persisted.tool,
+                    "target_path": persisted.target_path,
+                    "secondary_path": persisted.secondary_path,
+                    "district_path": persisted.district_path,
+                    "summary": persisted.summary,
+                    "velocity_cost": persisted.velocity_cost,
+                    "active": persisted.active,
+                    "created_at": persisted.created_at.replace(tzinfo=None),
+                }
+            ],
+            schema={
+                "action_id": pl.String,
+                "action_seq": pl.Int32,
+                "session_id": pl.String,
+                "author": pl.String,
+                "tool": pl.String,
+                "target_path": pl.String,
+                "secondary_path": pl.String,
+                "district_path": pl.String,
+                "summary": pl.String,
+                "velocity_cost": pl.Int32,
+                "active": pl.Boolean,
+                "created_at": pl.Datetime("us"),
+            },
+        )
+        con.register("_tmp_sbx", df)
+        con.execute(f"INSERT INTO {pfx}.sandbox_actions SELECT * FROM _tmp_sbx;")
+        return persisted
+
+    def query_sandbox_actions(
+        self,
+        con: duckdb.DuckDBPyConnection,
+        owner: str,
+        repo: str,
+        *,
+        catalog_prefix: str | None = None,
+    ) -> list[SandboxAction]:
+        pfx = self.schema_prefix(owner, repo, catalog_prefix=catalog_prefix)
+        rows = con.execute(
+            f"""
+            SELECT action_id, action_seq, session_id, author, tool, target_path,
+                   secondary_path, district_path, summary, velocity_cost, active, created_at
+            FROM {pfx}.sandbox_actions
+            ORDER BY action_seq ASC;
+            """
+        ).fetchall()
+        return [
+            SandboxAction(
+                action_id=str(r[0]),
+                action_seq=int(r[1]),
+                session_id=str(r[2]),
+                author=str(r[3]),
+                tool=str(r[4]),
+                target_path=str(r[5]),
+                secondary_path=str(r[6]) if r[6] is not None else None,
+                district_path=str(r[7]),
+                summary=str(r[8]),
+                velocity_cost=int(r[9]),
+                active=bool(r[10]),
+                created_at=r[11],
+            )
+            for r in rows
+        ]
+
+    def toggle_sandbox_action(
+        self,
+        con: duckdb.DuckDBPyConnection,
+        owner: str,
+        repo: str,
+        action_id: str,
+        active: bool,
+        *,
+        catalog_prefix: str | None = None,
+    ) -> None:
+        pfx = self.schema_prefix(owner, repo, catalog_prefix=catalog_prefix)
+        aid_lit = self._escape_sql_literal(action_id)
+        active_sql = "true" if active else "false"
+        con.execute(
+            f"UPDATE {pfx}.sandbox_actions SET active = {active_sql} WHERE action_id = '{aid_lit}';"
+        )
+
+    def clear_sandbox_actions(
+        self,
+        con: duckdb.DuckDBPyConnection,
+        owner: str,
+        repo: str,
+        *,
+        catalog_prefix: str | None = None,
+    ) -> None:
+        pfx = self.schema_prefix(owner, repo, catalog_prefix=catalog_prefix)
+        con.execute(f"DELETE FROM {pfx}.sandbox_actions;")
+
+    def get_sandbox_action_changes(
+        self,
+        con: duckdb.DuckDBPyConnection,
+        owner: str,
+        repo: str,
+        start_snapshot: int = 0,
+    ) -> list[dict[str, Any]]:
+        """Query DuckLake `ducklake_table_changes()` for collaborative sandbox sync."""
+        schema_dot = self.schema_dot_path(owner, repo)
+        cat = self._escape_sql_literal(self.catalog_name)
+        cur = con.execute(f"SELECT * FROM ducklake_current_snapshot('{cat}')").fetchone()
+        if not cur or cur[0] is None:
+            return []
+        end_snap = int(cur[0])
+        if start_snapshot > end_snap:
+            return []
+        rows = con.execute(
+            f"""
+            SELECT
+                snapshot_id,
+                change_type,
+                action_id,
+                action_seq,
+                author,
+                tool,
+                target_path,
+                summary,
+                active,
+                created_at
+            FROM ducklake_table_changes(
+                '{cat}', '{schema_dot}', 'sandbox_actions', {start_snapshot}, {end_snap}
+            )
+            ORDER BY snapshot_id DESC, action_seq DESC;
+            """
+        ).fetchall()
+        cols = [
+            "snapshot_id",
+            "change_type",
+            "action_id",
+            "action_seq",
+            "author",
+            "tool",
+            "target_path",
+            "summary",
+            "active",
             "created_at",
         ]
         results = []

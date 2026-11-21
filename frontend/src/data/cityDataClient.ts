@@ -731,6 +731,107 @@ export class CityDataClient {
     return (await resp.json()) as QuackSnippetInfo;
   }
 
+  async startLiveMayorSession(
+    owner: string,
+    repo: string,
+  ): Promise<{ branch: string; previous_branch: string; commits: string[] }> {
+    const resp = await fetch(`/api/repos/${owner}/${repo}/mayor/session`, {
+      method: "POST",
+    });
+    if (!resp.ok) {
+      const detail = await resp.text();
+      throw new Error(detail || `Failed to start Mayor session (${resp.status})`);
+    }
+    return (await resp.json()) as { branch: string; previous_branch: string; commits: string[] };
+  }
+
+  async executeLiveMayorAction(
+    owner: string,
+    repo: string,
+    payload: {
+      tool: string;
+      target_path: string;
+      secondary_path?: string | null;
+      district_path?: string;
+      fan_in?: number;
+      confirm?: boolean;
+    },
+  ): Promise<{
+    ok: boolean;
+    branch: string;
+    tool: string;
+    target_path: string;
+    committed: boolean;
+    commit_sha: string | null;
+    diff: string;
+    message: string;
+  }> {
+    const resp = await fetch(`/api/repos/${owner}/${repo}/mayor/execute`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!resp.ok) {
+      const detail = await resp.text();
+      throw new Error(detail || `Live Mayor action failed (${resp.status})`);
+    }
+    return (await resp.json()) as {
+      ok: boolean;
+      branch: string;
+      tool: string;
+      target_path: string;
+      committed: boolean;
+      commit_sha: string | null;
+      diff: string;
+      message: string;
+    };
+  }
+
+  async fetchRemoteSandboxActions(owner: string, repo: string): Promise<SandboxActionRecord[]> {
+    const resp = await fetch(`/api/repos/${owner}/${repo}/sandbox-actions`);
+    if (!resp.ok) return [];
+    return (await resp.json()) as SandboxActionRecord[];
+  }
+
+  async pushRemoteSandboxAction(
+    owner: string,
+    repo: string,
+    action: SandboxActionRecord,
+  ): Promise<SandboxActionRecord> {
+    const resp = await fetch(`/api/repos/${owner}/${repo}/sandbox-actions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        action_id: action.action_id,
+        tool: action.tool,
+        target_path: action.target_path,
+        secondary_path: action.secondary_path,
+        district_path: action.district_path,
+        summary: action.summary,
+        velocity_cost: action.velocity_cost,
+      }),
+    });
+    if (!resp.ok) throw new Error(`Failed to sync sandbox action: ${resp.status}`);
+    return (await resp.json()) as SandboxActionRecord;
+  }
+
+  async toggleRemoteSandboxAction(
+    owner: string,
+    repo: string,
+    actionId: string,
+    active: boolean,
+  ): Promise<void> {
+    await fetch(`/api/repos/${owner}/${repo}/sandbox-actions/${actionId}/toggle`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ active }),
+    });
+  }
+
+  async clearRemoteSandboxActions(owner: string, repo: string): Promise<void> {
+    await fetch(`/api/repos/${owner}/${repo}/sandbox-actions`, { method: "DELETE" });
+  }
+
   async close(): Promise<void> {
     if (this.conn) {
       await this.conn.close();

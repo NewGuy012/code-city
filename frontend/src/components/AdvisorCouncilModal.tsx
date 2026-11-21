@@ -39,6 +39,7 @@ export function AdvisorCouncilModal({
           </div>
           <button
             type="button"
+            title="Close advisors"
             onClick={onClose}
             className="rounded-xl p-1.5 text-slate-400 hover:bg-slate-800 hover:text-white"
           >

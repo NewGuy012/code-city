@@ -28,7 +28,13 @@ from codecity.analyzer.layout import compute_urban_street_grid
 from codecity.analyzer.pipeline import analyze_repository
 from codecity.analyzer.plugins import preview_file_fix
 from codecity.api.exporter import export_static_site, render_grade_badge_svg
-from codecity.models import AnalyzeRequest, Annotation, FixDiffResult
+from codecity.api.mayor import (
+    ensure_mayor_branch,
+    execute_live_mayor_tool,
+    get_mayor_status,
+    list_repo_authors_90d,
+)
+from codecity.models import AnalyzeRequest, Annotation, FixDiffResult, SandboxAction
 from codecity.storage.lakehouse import LakehouseManager, infer_owner_repo
 from codecity.storage.quack_server import QuackServerManager
 from codecity.storage.queries import (
@@ -62,6 +68,37 @@ class ExportRequest(BaseModel):
     """Payload to export a zero-backend static OSS report and optional PNG postcard."""
 
     with_postcard: bool = True
+
+
+class MayorExecuteRequest(BaseModel):
+    """Payload to execute a Mayor tool on the safe `codecity/mayor-session` branch."""
+
+    tool: str
+    target_path: str
+    secondary_path: str | None = None
+    district_path: str = ""
+    fan_in: int = 0
+    confirm: bool = False
+
+
+class SandboxActionCreateRequest(BaseModel):
+    """Payload to sync a Mayor Sandbox intervention via Quack + DuckLake."""
+
+    action_id: str | None = None
+    session_id: str = "default"
+    author: str = "mayor"
+    tool: str
+    target_path: str
+    secondary_path: str | None = None
+    district_path: str
+    summary: str
+    velocity_cost: int = 0
+
+
+class SandboxToggleRequest(BaseModel):
+    """Payload to undo/redo a synced sandbox action."""
+
+    active: bool
 
 
 @dataclass
@@ -364,19 +401,56 @@ def create_app(
             headers={"Cache-Control": "no-store"},
         )
 
-    @app.post("/api/repos/{owner}/{repo}/fix-diff")
-    def api_fix_diff(owner: str, repo: str, body: FixDiffRequest) -> dict[str, Any]:
+    def _resolve_repo_path(owner: str, repo: str) -> Path:
         with db_lock, open_con() as con:
             repos = lake.list_repos(con)
         matched = next((r for r in repos if r.owner == owner and r.repo == repo), None)
         if matched is None:
             raise HTTPException(status_code=404, detail="Repository not found")
         try:
-            repo_path = resolve_git_repo(matched.repo_url_or_path, lake.data_dir / "clones")
+            return resolve_git_repo(matched.repo_url_or_path, lake.data_dir / "clones")
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/api/repos/{owner}/{repo}/fix-diff")
+    def api_fix_diff(owner: str, repo: str, body: FixDiffRequest) -> dict[str, Any]:
+        repo_path = _resolve_repo_path(owner, repo)
         result: FixDiffResult = preview_file_fix(repo_path, body.file_path)
         return result.model_dump(mode="json")
+
+    @app.get("/api/repos/{owner}/{repo}/authors")
+    def api_repo_authors(owner: str, repo: str) -> list[dict[str, Any]]:
+        repo_path = _resolve_repo_path(owner, repo)
+        return list_repo_authors_90d(repo_path)
+
+    @app.post("/api/repos/{owner}/{repo}/mayor/session")
+    def api_mayor_session(owner: str, repo: str) -> dict[str, Any]:
+        repo_path = _resolve_repo_path(owner, repo)
+        try:
+            return ensure_mayor_branch(repo_path)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.get("/api/repos/{owner}/{repo}/mayor/status")
+    def api_mayor_status(owner: str, repo: str) -> dict[str, Any]:
+        repo_path = _resolve_repo_path(owner, repo)
+        return get_mayor_status(repo_path)
+
+    @app.post("/api/repos/{owner}/{repo}/mayor/execute")
+    def api_mayor_execute(owner: str, repo: str, body: MayorExecuteRequest) -> dict[str, Any]:
+        repo_path = _resolve_repo_path(owner, repo)
+        try:
+            return execute_live_mayor_tool(
+                repo_path,
+                tool=body.tool,
+                target_path=body.target_path,
+                secondary_path=body.secondary_path,
+                district_path=body.district_path,
+                fan_in=body.fan_in,
+                confirm=body.confirm,
+            )
+        except (ValueError, FileNotFoundError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.get("/api/repos/{owner}/{repo}/quack-snippet")
     def api_quack_snippet(owner: str, repo: str, request: Request) -> dict[str, Any]:
@@ -442,6 +516,102 @@ def create_app(
         with db_lock, open_con() as con:
             try:
                 return lake.get_annotation_changes(con, owner, repo)
+            except duckdb.Error as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/api/repos/{owner}/{repo}/sandbox-actions")
+    def api_get_sandbox_actions(owner: str, repo: str) -> list[dict[str, Any]]:
+        with db_lock, open_con() as con:
+            try:
+                actions = lake.query_sandbox_actions(con, owner, repo)
+            except duckdb.Error as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return [a.model_dump(mode="json") for a in actions]
+
+    @app.post("/api/repos/{owner}/{repo}/sandbox-actions")
+    def api_add_sandbox_action(
+        owner: str,
+        repo: str,
+        body: SandboxActionCreateRequest,
+    ) -> dict[str, Any]:
+        act = SandboxAction(
+            action_id=body.action_id or f"sbx-{uuid.uuid4().hex[:10]}",
+            session_id=body.session_id,
+            author=body.author.strip() or "mayor",
+            tool=body.tool,
+            target_path=body.target_path,
+            secondary_path=body.secondary_path,
+            district_path=body.district_path,
+            summary=body.summary,
+            velocity_cost=body.velocity_cost,
+            active=True,
+            created_at=datetime.now(UTC).replace(tzinfo=None),
+        )
+        if quack_mgr is not None:
+            client = quack_mgr.connect_client(alias="remote")
+            try:
+                persisted = lake.add_sandbox_action(
+                    client,
+                    owner,
+                    repo,
+                    act,
+                    catalog_prefix=f"remote.{lake.catalog_name}",
+                )
+            finally:
+                client.close()
+        else:
+            with db_lock, lake.session() as con:
+                persisted = lake.add_sandbox_action(con, owner, repo, act)
+        return persisted.model_dump(mode="json")
+
+    @app.post("/api/repos/{owner}/{repo}/sandbox-actions/{action_id}/toggle")
+    def api_toggle_sandbox_action(
+        owner: str,
+        repo: str,
+        action_id: str,
+        body: SandboxToggleRequest,
+    ) -> dict[str, Any]:
+        if quack_mgr is not None:
+            client = quack_mgr.connect_client(alias="remote")
+            try:
+                lake.toggle_sandbox_action(
+                    client,
+                    owner,
+                    repo,
+                    action_id,
+                    body.active,
+                    catalog_prefix=f"remote.{lake.catalog_name}",
+                )
+            finally:
+                client.close()
+        else:
+            with db_lock, lake.session() as con:
+                lake.toggle_sandbox_action(con, owner, repo, action_id, body.active)
+        return {"ok": True, "action_id": action_id, "active": body.active}
+
+    @app.delete("/api/repos/{owner}/{repo}/sandbox-actions")
+    def api_clear_sandbox_actions(owner: str, repo: str) -> dict[str, Any]:
+        if quack_mgr is not None:
+            client = quack_mgr.connect_client(alias="remote")
+            try:
+                lake.clear_sandbox_actions(
+                    client,
+                    owner,
+                    repo,
+                    catalog_prefix=f"remote.{lake.catalog_name}",
+                )
+            finally:
+                client.close()
+        else:
+            with db_lock, lake.session() as con:
+                lake.clear_sandbox_actions(con, owner, repo)
+        return {"ok": True}
+
+    @app.get("/api/repos/{owner}/{repo}/sandbox-actions/changes")
+    def api_sandbox_action_changes(owner: str, repo: str) -> list[dict[str, Any]]:
+        with db_lock, open_con() as con:
+            try:
+                return lake.get_sandbox_action_changes(con, owner, repo)
             except duckdb.Error as exc:
                 raise HTTPException(status_code=404, detail=str(exc)) from exc
 

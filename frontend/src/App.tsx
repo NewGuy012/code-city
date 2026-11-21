@@ -401,6 +401,28 @@ export function App() {
     [effectiveBundle],
   );
 
+  // Multiplayer Co-Op Sandbox Sync over Quack + DuckLake
+  useEffect(() => {
+    if (!coopSyncEnabled || isStaticMode || !activeRepo) return;
+    let cancelled = false;
+    const syncOnce = async () => {
+      try {
+        const remote = await client.fetchRemoteSandboxActions(activeRepo.owner, activeRepo.repo);
+        if (!cancelled && Array.isArray(remote)) {
+          setSandboxActions(remote);
+        }
+      } catch {
+        // ignore transient poll errors
+      }
+    };
+    void syncOnce();
+    const timer = setInterval(() => void syncOnce(), 2500);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [activeRepo, client, coopSyncEnabled, isStaticMode]);
+
   const handleToolAction = useCallback(
     async (file: FileMetric) => {
       if (!effectiveBundle || activeTool === "inspect") return;
@@ -419,6 +441,38 @@ export function App() {
       if (!validation.ok) {
         showToast(validation.reason ?? "Action cannot be applied to this building.");
         return;
+      }
+
+      const fanIn = effectiveBundle.imports.filter((i) => i.target_file === file.file_path).length;
+      if (liveMode && !isStaticMode && activeRepo) {
+        let confirmed = true;
+        if (tool === "bulldozer") {
+          confirmed = window.confirm(
+            `Live Mayor Mode: stage and commit \`git rm ${file.file_path}\` on safe branch ${liveBranchName ?? "codecity/mayor-session"}?`,
+          );
+          if (!confirmed) {
+            showToast("Cancelled live git rm.");
+            return;
+          }
+        }
+        try {
+          const liveRes = await client.executeLiveMayorAction(activeRepo.owner, activeRepo.repo, {
+            tool,
+            target_path: file.file_path,
+            secondary_path: validation.secondaryPath ?? null,
+            district_path: file.district_path,
+            fan_in: fanIn,
+            confirm: confirmed,
+          });
+          showToast(
+            liveRes.committed && liveRes.commit_sha
+              ? `${liveRes.message} [${liveRes.commit_sha}]`
+              : liveRes.message,
+          );
+        } catch (err) {
+          showToast(err instanceof Error ? err.message : String(err));
+          return;
+        }
       }
 
       const summaryMap: Record<Exclude<MayorToolId, "inspect">, string> = {
@@ -441,6 +495,13 @@ export function App() {
       setSandboxActions(nextList);
       setPendingTransitStart(null);
 
+      if (coopSyncEnabled && !isStaticMode && activeRepo) {
+        const latestAct = nextList[nextList.length - 1];
+        if (latestAct) {
+          void client.pushRemoteSandboxAction(activeRepo.owner, activeRepo.repo, latestAct).catch(() => {});
+        }
+      }
+
       // Dispatch service vehicle & floating feedback popup
       const cx = file.layout_x + file.layout_w * 0.5;
       const cz = file.layout_z + file.layout_d * 0.5;
@@ -461,26 +522,57 @@ export function App() {
       sim.spawnFloatingPopup(cx, cz, badge, tool === "bulldozer" ? "#fda4af" : "#4ade80");
       soundEngine.playTool(tool);
       setSimState(sim.getSnapshot());
-      showToast(`${summaryMap[tool]} (Sandbox)`);
+      if (!liveMode) {
+        showToast(`${summaryMap[tool]} (Sandbox)`);
+      }
     },
-    [activeTool, client, effectiveBundle, pendingTransitStart, showToast, sim],
+    [
+      activeRepo,
+      activeTool,
+      client,
+      coopSyncEnabled,
+      effectiveBundle,
+      isStaticMode,
+      liveBranchName,
+      liveMode,
+      pendingTransitStart,
+      showToast,
+      sim,
+    ],
   );
 
   const handleUndo = useCallback(async () => {
-    setSandboxActions(await client.undoSandboxAction());
+    const prevActive = [...sandboxActions].reverse().find((a) => a.active);
+    const updated = await client.undoSandboxAction();
+    setSandboxActions(updated);
+    if (coopSyncEnabled && !isStaticMode && activeRepo && prevActive) {
+      void client
+        .toggleRemoteSandboxAction(activeRepo.owner, activeRepo.repo, prevActive.action_id, false)
+        .catch(() => {});
+    }
     showToast("Undid last Mayor intervention");
-  }, [client, showToast]);
+  }, [activeRepo, client, coopSyncEnabled, isStaticMode, sandboxActions, showToast]);
 
   const handleRedo = useCallback(async () => {
-    setSandboxActions(await client.redoSandboxAction());
+    const nextInactive = sandboxActions.find((a) => !a.active);
+    const updated = await client.redoSandboxAction();
+    setSandboxActions(updated);
+    if (coopSyncEnabled && !isStaticMode && activeRepo && nextInactive) {
+      void client
+        .toggleRemoteSandboxAction(activeRepo.owner, activeRepo.repo, nextInactive.action_id, true)
+        .catch(() => {});
+    }
     showToast("Redid Mayor intervention");
-  }, [client, showToast]);
+  }, [activeRepo, client, coopSyncEnabled, isStaticMode, sandboxActions, showToast]);
 
   const handleResetSandbox = useCallback(async () => {
     setSandboxActions(await client.resetSandboxActions());
     setPendingTransitStart(null);
+    if (coopSyncEnabled && !isStaticMode && activeRepo) {
+      void client.clearRemoteSandboxActions(activeRepo.owner, activeRepo.repo).catch(() => {});
+    }
     showToast("Sandbox reset to HEAD");
-  }, [client, showToast]);
+  }, [activeRepo, client, coopSyncEnabled, isStaticMode, showToast]);
 
   async function handleOpenHealthModal() {
     if (!bundle || !activeRepo) return;
@@ -860,8 +952,21 @@ export function App() {
           onRedo={() => void handleRedo()}
           onReset={() => void handleResetSandbox()}
           onToggleLiveMode={() => {
-            setLiveMode((v) => !v);
-            setLiveBranchName("codecity/mayor-session");
+            if (!liveMode && activeRepo && !isStaticMode) {
+              void client
+                .startLiveMayorSession(activeRepo.owner, activeRepo.repo)
+                .then((res) => {
+                  setLiveMode(true);
+                  setLiveBranchName(res.branch);
+                  showToast(`Live Mayor Mode active on branch ${res.branch}`);
+                })
+                .catch((err) => {
+                  showToast(err instanceof Error ? err.message : String(err));
+                });
+            } else {
+              setLiveMode(false);
+              showToast("Switched back to safe Refactor Sandbox Mode");
+            }
           }}
           onToggleCoopSync={() => setCoopSyncEnabled((v) => !v)}
         />
