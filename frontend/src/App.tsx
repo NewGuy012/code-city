@@ -1,4 +1,4 @@
-import { Box, Building2, Eye, FolderGit2, Loader2, ShieldAlert } from "lucide-react";
+import { Building2, Eye, FolderGit2, Loader2, ShieldAlert, X } from "lucide-react";
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { CityCanvas2D } from "./city/CityCanvas2D";
@@ -12,7 +12,7 @@ import { type AuthorSummary, DisastersMenu } from "./components/DisastersMenu";
 import { EconomyBar } from "./components/EconomyBar";
 import { HealthCardModal } from "./components/HealthCardModal";
 import { InspectorDrawer } from "./components/InspectorDrawer";
-import { MayorToolbar } from "./components/MayorToolbar";
+import { MAYOR_TOOLS, MayorToolbar } from "./components/MayorToolbar";
 import { Minimap2D } from "./components/Minimap2D";
 import { OnboardingTour } from "./components/OnboardingTour";
 import { RepoAnalyzePopover } from "./components/RepoAnalyzePopover";
@@ -34,6 +34,7 @@ import { type AdvisorMission, evaluateAdvisorMissions } from "./game/missions";
 import {
   type MayorToolId,
   type SandboxActionRecord,
+  TOOL_COSTS,
   applySandboxOverlay,
   validateToolOnFile,
 } from "./game/sandboxOverlay";
@@ -773,6 +774,10 @@ export function App() {
   const closeAdvisorsModal = useCallback(() => setAdvisorsOpen(false), []);
   const closeDisastersModal = useCallback(() => setDisastersOpen(false), []);
 
+  const activeToolMeta =
+    activeTool === "inspect" ? null : (MAYOR_TOOLS.find((t) => t.id === activeTool) ?? null);
+  const ActiveToolIcon = activeToolMeta?.icon ?? null;
+
   return (
     <div className="relative h-screen w-screen overflow-hidden bg-slate-950 text-slate-100">
       {effectiveBundle ? (
@@ -868,35 +873,36 @@ export function App() {
         </button>
       )}
 
-      {/* Top HUD */}
+      {/* Zero-Overlap 3-Row Grid HUD Shell */}
       {!zenMode && (
-        <header className="pointer-events-none absolute inset-x-0 top-0 z-20 flex flex-col gap-2 p-3">
-          <div className="flex items-center justify-between gap-2">
-            <RepoAnalyzePopover
-              repos={repos}
-              activeRepo={activeRepo}
-              isStaticMode={isStaticMode}
-              snapshot={effectiveBundle?.snapshot ?? null}
-              simCityLevel={simState.cityLevel}
-              repoInput={repoInput}
-              analyzePct={analyzePct}
-              isOpen={openPopover === "repo"}
-              onToggleOpen={() => togglePopover("repo")}
-              onClose={closePopover}
-              onSelectRepo={(o, r) => {
-                setActiveRepo({ owner: o, repo: r });
-                void loadRepoData(
-                  o,
-                  r,
-                  `/api/repos/${encodeURIComponent(o)}/${encodeURIComponent(r)}/parquet`,
-                );
-              }}
-              onChangeRepoInput={setRepoInput}
-              onAnalyzeSubmit={(e) => void handleAnalyzeSubmit(e)}
-              onOpenHealthModal={handleOpenHealthModal}
-            />
+        <div className="pointer-events-none fixed inset-0 z-20 grid grid-rows-[auto_1fr_auto] gap-2.5 p-3">
+          {/* Row 1: Unified Single-Row Top Bar + Optional Transient Centered Chips */}
+          <header className="flex flex-col gap-2">
+            <div className="flex items-center justify-between gap-2">
+              <RepoAnalyzePopover
+                repos={repos}
+                activeRepo={activeRepo}
+                isStaticMode={isStaticMode}
+                snapshot={effectiveBundle?.snapshot ?? null}
+                simCityLevel={simState.cityLevel}
+                repoInput={repoInput}
+                analyzePct={analyzePct}
+                isOpen={openPopover === "repo"}
+                onToggleOpen={() => togglePopover("repo")}
+                onClose={closePopover}
+                onSelectRepo={(o, r) => {
+                  setActiveRepo({ owner: o, repo: r });
+                  void loadRepoData(
+                    o,
+                    r,
+                    `/api/repos/${encodeURIComponent(o)}/${encodeURIComponent(r)}/parquet`,
+                  );
+                }}
+                onChangeRepoInput={setRepoInput}
+                onAnalyzeSubmit={(e) => void handleAnalyzeSubmit(e)}
+                onOpenHealthModal={handleOpenHealthModal}
+              />
 
-            <div className="flex items-center gap-1.5">
               <DataMapBar
                 dataMap={dataMap}
                 onChangeDataMap={setDataMap}
@@ -904,217 +910,269 @@ export function App() {
                 onTogglePopover={() => togglePopover("datamap")}
                 onClosePopover={closePopover}
               />
-              <button
-                type="button"
-                data-testid="toggle-2d-3d"
-                onClick={() => setViewMode((m) => (m === "2d" ? "3d" : "2d"))}
-                className="sim-panel pointer-events-auto flex h-10 items-center gap-1.5 rounded-xl px-2.5 text-xs font-semibold text-sky-300 transition hover:bg-white/[0.06]"
-              >
-                <Box className="h-3.5 w-3.5" />
-                <span>{viewMode === "2d" ? "2D" : "3D"}</span>
-              </button>
-            </div>
 
-            {effectiveBundle && (
-              <EconomyBar
-                simState={simState}
-                alerts={bundle?.snapshot.advisor_alerts ?? []}
-                activeQuestCount={missions.filter((m) => !m.completed).length}
-                grade={effectiveBundle.snapshot.health_grade}
-                soundEnabled={soundEnabled}
-                tourActive={tourActive}
-                radarOpen={radarOpen}
-                openPopover={openPopover}
-                onTogglePopover={togglePopover}
-                onClosePopover={closePopover}
-                onChangeSpeed={(spd: SimSpeed) => {
-                  sim.setSpeed(spd);
-                  setSimState(sim.getSnapshot());
-                }}
-                onOpenAdvisors={() => setAdvisorsOpen(true)}
-                onOpenDisasters={() => {
-                  if (!isStaticMode && activeRepo) {
-                    void client
-                      .fetchAuthors(activeRepo.owner, activeRepo.repo)
-                      .then(setRepoAuthors);
-                  }
-                  setDisastersOpen(true);
-                }}
-                onFocusFile={handleFocusFile}
-                onOpenHealthModal={handleOpenHealthModal}
-                onStartTour={handleStartTour}
-                onToggleSound={() => {
-                  const next = !soundEnabled;
-                  setSoundEnabled(next);
-                  soundEngine.setEnabled(next);
-                }}
-                onToggleRadar={() => setRadarOpen((v) => !v)}
-                onToggleZenMode={() => {
-                  setZenMode(true);
-                  closePopover();
-                }}
-              />
-            )}
-          </div>
-
-          {simState.activeDisaster && !simState.activeDisaster.resolved && (
-            <div
-              data-testid="active-disaster-banner"
-              className="sim-panel pointer-events-auto flex items-center justify-between gap-3 self-center rounded-xl border-rose-500/45 bg-rose-950/75 px-3.5 py-1.5 text-xs text-rose-100"
-            >
-              <div className="flex items-center gap-2">
-                <ShieldAlert className="h-4 w-4 animate-pulse text-rose-400" />
-                <span className="font-bold">{simState.activeDisaster.title}:</span>
-                <span className="text-rose-200">{simState.activeDisaster.detail}</span>
-              </div>
-              <button
-                type="button"
-                onClick={() => {
-                  sim.clearDisaster();
-                  setSimState(sim.getSnapshot());
-                }}
-                className="rounded-lg bg-rose-500/30 px-2.5 py-0.5 text-[11px] font-semibold text-white hover:bg-rose-500/50"
-              >
-                Resolve
-              </button>
-            </div>
-          )}
-
-          {loadingMsg && (
-            <div className="sim-panel pointer-events-auto flex items-center gap-2 self-center rounded-xl px-3 py-1.5 text-xs text-sky-200">
-              <Loader2 className="h-3.5 w-3.5 animate-spin text-sky-400" />
-              <span>{loadingMsg}</span>
-              {analyzePct !== null && (
-                <span className="font-mono text-amber-300">{analyzePct.toFixed(0)}%</span>
+              {effectiveBundle && (
+                <EconomyBar
+                  simState={simState}
+                  alerts={bundle?.snapshot.advisor_alerts ?? []}
+                  activeQuestCount={missions.filter((m) => !m.completed).length}
+                  grade={effectiveBundle.snapshot.health_grade}
+                  soundEnabled={soundEnabled}
+                  tourActive={tourActive}
+                  radarOpen={radarOpen}
+                  openPopover={openPopover}
+                  onTogglePopover={togglePopover}
+                  onClosePopover={closePopover}
+                  onChangeSpeed={(spd: SimSpeed) => {
+                    sim.setSpeed(spd);
+                    setSimState(sim.getSnapshot());
+                  }}
+                  onOpenAdvisors={() => setAdvisorsOpen(true)}
+                  onOpenDisasters={() => {
+                    if (!isStaticMode && activeRepo) {
+                      void client
+                        .fetchAuthors(activeRepo.owner, activeRepo.repo)
+                        .then(setRepoAuthors);
+                    }
+                    setDisastersOpen(true);
+                  }}
+                  onFocusFile={handleFocusFile}
+                  onOpenHealthModal={handleOpenHealthModal}
+                  onStartTour={handleStartTour}
+                  onToggleSound={() => {
+                    const next = !soundEnabled;
+                    setSoundEnabled(next);
+                    soundEngine.setEnabled(next);
+                  }}
+                  onToggleRadar={() => setRadarOpen((v) => !v)}
+                  onToggleZenMode={() => {
+                    setZenMode(true);
+                    closePopover();
+                  }}
+                />
               )}
             </div>
-          )}
-        </header>
-      )}
 
-      {!zenMode && effectiveBundle && (
-        <MayorToolbar
-          activeTool={activeTool}
-          onSelectTool={(t) => {
-            setActiveTool(t);
-            setPendingTransitStart(null);
-          }}
-          actions={sandboxActions}
-          isStaticMode={isStaticMode}
-          liveMode={liveMode}
-          liveBranchName={liveBranchName}
-          coopSyncEnabled={coopSyncEnabled}
-          repoLabel={activeRepo ? `${activeRepo.owner}/${activeRepo.repo}` : "codecity"}
-          baseBundle={bundle}
-          effectiveBundle={effectiveBundle}
-          pendingTransitStart={pendingTransitStart}
-          isModePopoverOpen={openPopover === "mayorMode"}
-          onToggleModePopover={() => togglePopover("mayorMode")}
-          onClosePopover={closePopover}
-          onUndo={() => void handleUndo()}
-          onRedo={() => void handleRedo()}
-          onReset={() => void handleResetSandbox()}
-          onToggleLiveMode={() => {
-            if (!liveMode && activeRepo && !isStaticMode) {
-              void client
-                .startLiveMayorSession(activeRepo.owner, activeRepo.repo)
-                .then((res) => {
-                  setLiveMode(true);
-                  setLiveBranchName(res.branch);
-                  showToast(`Live Mayor Mode active on branch ${res.branch}`);
-                })
-                .catch((err) => {
-                  showToast(err instanceof Error ? err.message : String(err));
-                });
-            } else {
-              setLiveMode(false);
-              showToast("Switched back to safe Refactor Sandbox Mode");
-            }
-          }}
-          onToggleCoopSync={() => setCoopSyncEnabled((v) => !v)}
-        />
-      )}
+            {/* Transient Centered Chips (0px when idle) */}
+            {(activeToolMeta ||
+              (simState.activeDisaster && !simState.activeDisaster.resolved) ||
+              loadingMsg ||
+              toastMsg) && (
+              <div className="flex flex-col items-center gap-1.5">
+                {activeToolMeta && ActiveToolIcon && activeTool !== "inspect" && (
+                  <div
+                    data-testid="active-tool-chip"
+                    className="sim-panel pointer-events-auto flex items-center gap-2 rounded-xl px-3 py-1 text-xs"
+                  >
+                    <ActiveToolIcon className={`h-3.5 w-3.5 ${activeToolMeta.accent}`} />
+                    <span className="font-semibold text-white">{activeToolMeta.label}</span>
+                    <span className="font-mono text-[11px] text-amber-300">
+                      -{TOOL_COSTS[activeTool]} ⚡
+                    </span>
+                    <span className="text-slate-400">
+                      {activeTool === "transit_hub" && pendingTransitStart
+                        ? `· Link ${pendingTransitStart.split("/").pop()} → Click 2nd building`
+                        : "· Click a building"}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setActiveTool("inspect");
+                        setPendingTransitStart(null);
+                      }}
+                      title="Return to Inspect (Esc)"
+                      className="ml-1 rounded p-0.5 text-slate-400 transition hover:bg-white/[0.08] hover:text-white"
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  </div>
+                )}
 
-      {toastMsg && (
-        <div
-          data-testid="mayor-toast"
-          className="sim-panel pointer-events-none fixed top-16 left-1/2 z-40 -translate-x-1/2 rounded-xl border-amber-400/40 px-4 py-2 text-xs font-medium text-amber-200 shadow-2xl"
-        >
-          {toastMsg}
-        </div>
-      )}
+                {simState.activeDisaster && !simState.activeDisaster.resolved && (
+                  <div
+                    data-testid="active-disaster-banner"
+                    className="sim-panel pointer-events-auto flex items-center justify-between gap-3 rounded-xl border-rose-500/45 bg-rose-950/75 px-3.5 py-1.5 text-xs text-rose-100"
+                  >
+                    <div className="flex items-center gap-2">
+                      <ShieldAlert className="h-4 w-4 animate-pulse text-rose-400" />
+                      <span className="font-bold">{simState.activeDisaster.title}:</span>
+                      <span className="text-rose-200">{simState.activeDisaster.detail}</span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        sim.clearDisaster();
+                        setSimState(sim.getSnapshot());
+                      }}
+                      className="rounded-lg bg-rose-500/30 px-2.5 py-0.5 text-[11px] font-semibold text-white hover:bg-rose-500/50"
+                    >
+                      Resolve
+                    </button>
+                  </div>
+                )}
 
-      {!zenMode && tourActive && (
-        <OnboardingTour
-          stops={tourStops}
-          stepIndex={tourStep}
-          autoPlaying={tourAutoPlay}
-          onSelectStep={handleSelectTourStep}
-          onToggleAuto={() => setTourAutoPlay((a) => !a)}
-          onClose={() => setTourActive(false)}
-        />
-      )}
+                {loadingMsg && (
+                  <div className="sim-panel pointer-events-auto flex items-center gap-2 rounded-xl px-3 py-1.5 text-xs text-sky-200">
+                    <Loader2 className="h-3.5 w-3.5 animate-spin text-sky-400" />
+                    <span>{loadingMsg}</span>
+                    {analyzePct !== null && (
+                      <span className="font-mono text-amber-300">{analyzePct.toFixed(0)}%</span>
+                    )}
+                  </div>
+                )}
 
-      {!zenMode && (
-        <InspectorDrawer
-          file={selectedFileMetric}
-          blastRadius={blastRadius}
-          diagnostics={fileDiagnostics}
-          history={fileHistory}
-          annotations={annotations}
-          isStaticMode={isStaticMode}
-          onRequestFixDiff={async (fpath) => {
-            if (!activeRepo) {
-              return {
-                file_path: fpath,
-                linter: "none",
-                has_changes: false,
-                diff: "",
-                message: "No repository active",
-              };
-            }
-            return client.fetchFixDiff(activeRepo.owner, activeRepo.repo, fpath);
-          }}
-          onAddAnnotation={async (payload) => {
-            if (!activeRepo) return;
-            const created = await client.postAnnotation(activeRepo.owner, activeRepo.repo, payload);
-            setAnnotations((prev) => [created, ...prev]);
-          }}
-          onSelectFile={handleFocusFile}
-          onClose={() => setSelectedFile(null)}
-        />
-      )}
+                {toastMsg && (
+                  <div
+                    data-testid="mayor-toast"
+                    className="sim-popover pointer-events-none rounded-xl border-amber-400/35 px-3.5 py-1.5 text-xs font-medium text-amber-200"
+                  >
+                    {toastMsg}
+                  </div>
+                )}
+              </div>
+            )}
+          </header>
 
-      {bundle && snapshots.length > 0 && (
-        <footer className="pointer-events-none absolute inset-x-0 bottom-0 z-20 flex items-end justify-between gap-3 p-3">
-          <CameraControlsHUD
-            viewMode={viewMode}
-            repoKey={activeRepo ? `${activeRepo.owner}/${activeRepo.repo}` : "default"}
-            showTraffic={showTraffic}
-            onToggleTraffic={() => setShowTraffic((v) => !v)}
-          />
-          <div className="min-w-0 flex-1 max-w-3xl">
-            <TimeScrubber
-              snapshots={snapshots}
-              snapshotIdx={snapshotIdx}
-              isPlaying={isPlayingTime}
-              addedCount={addedFiles.size}
-              removedCount={removedLots.length}
-              onSelectSnapshot={(idx) => {
-                setIsPlayingTime(false);
-                setSnapshotIdx(idx);
+          {/* Row 2: 1fr Middle Zone — 44px Left Rail | Open Canvas | 320px Right Inspector */}
+          <div className="relative flex min-h-0 items-center justify-between gap-3">
+            {effectiveBundle ? (
+              <MayorToolbar
+                activeTool={activeTool}
+                onSelectTool={(t) => {
+                  setActiveTool(t);
+                  setPendingTransitStart(null);
+                }}
+                actions={sandboxActions}
+                isStaticMode={isStaticMode}
+                liveMode={liveMode}
+                liveBranchName={liveBranchName}
+                coopSyncEnabled={coopSyncEnabled}
+                repoLabel={activeRepo ? `${activeRepo.owner}/${activeRepo.repo}` : "codecity"}
+                baseBundle={bundle}
+                effectiveBundle={effectiveBundle}
+                pendingTransitStart={pendingTransitStart}
+                isModePopoverOpen={openPopover === "mayorMode"}
+                onToggleModePopover={() => togglePopover("mayorMode")}
+                onClosePopover={closePopover}
+                onUndo={() => void handleUndo()}
+                onRedo={() => void handleRedo()}
+                onReset={() => void handleResetSandbox()}
+                onToggleLiveMode={() => {
+                  if (!liveMode && activeRepo && !isStaticMode) {
+                    void client
+                      .startLiveMayorSession(activeRepo.owner, activeRepo.repo)
+                      .then((res) => {
+                        setLiveMode(true);
+                        setLiveBranchName(res.branch);
+                        showToast(`Live Mayor Mode active on branch ${res.branch}`);
+                      })
+                      .catch((err) => {
+                        showToast(err instanceof Error ? err.message : String(err));
+                      });
+                  } else {
+                    setLiveMode(false);
+                    showToast("Switched back to safe Refactor Sandbox Mode");
+                  }
+                }}
+                onToggleCoopSync={() => setCoopSyncEnabled((v) => !v)}
+                className="self-center"
+              />
+            ) : (
+              <span />
+            )}
+
+            <InspectorDrawer
+              file={selectedFileMetric}
+              blastRadius={blastRadius}
+              diagnostics={fileDiagnostics}
+              history={fileHistory}
+              annotations={annotations}
+              isStaticMode={isStaticMode}
+              onRequestFixDiff={async (fpath) => {
+                if (!activeRepo) {
+                  return {
+                    file_path: fpath,
+                    linter: "none",
+                    has_changes: false,
+                    diff: "",
+                    message: "No repository active",
+                  };
+                }
+                return client.fetchFixDiff(activeRepo.owner, activeRepo.repo, fpath);
               }}
-              onTogglePlay={() => setIsPlayingTime((p) => !p)}
+              onAddAnnotation={async (payload) => {
+                if (!activeRepo) return;
+                const created = await client.postAnnotation(
+                  activeRepo.owner,
+                  activeRepo.repo,
+                  payload,
+                );
+                setAnnotations((prev) => [created, ...prev]);
+              }}
+              onSelectFile={handleFocusFile}
+              onClose={() => setSelectedFile(null)}
+              className="h-full max-h-full shrink-0"
             />
           </div>
-          <Minimap2D
-            districts={effectiveBundle?.districts ?? bundle.districts}
-            files={effectiveBundle?.files ?? bundle.files}
-            vehicles={simState.vehicles}
-            fireFiles={simState.fireFiles}
-            blackoutFiles={simState.blackoutFiles}
-          />
-        </footer>
+
+          {/* Row 3: Compact Bottom Dock */}
+          {bundle && snapshots.length > 0 ? (
+            <footer className="flex items-end justify-between gap-3">
+              <div className="flex flex-col items-start gap-2">
+                {tourActive && (
+                  <OnboardingTour
+                    stops={tourStops}
+                    stepIndex={tourStep}
+                    autoPlaying={tourAutoPlay}
+                    onSelectStep={handleSelectTourStep}
+                    onToggleAuto={() => setTourAutoPlay((a) => !a)}
+                    onClose={() => setTourActive(false)}
+                    className="sm:ml-14"
+                  />
+                )}
+                <TimeScrubber
+                  snapshots={snapshots}
+                  snapshotIdx={snapshotIdx}
+                  isPlaying={isPlayingTime}
+                  addedCount={addedFiles.size}
+                  removedCount={removedLots.length}
+                  onSelectSnapshot={(idx) => {
+                    setIsPlayingTime(false);
+                    setSnapshotIdx(idx);
+                  }}
+                  onTogglePlay={() => setIsPlayingTime((p) => !p)}
+                />
+              </div>
+
+              <div className="flex flex-col items-end gap-2">
+                {radarOpen && (
+                  <Minimap2D
+                    districts={effectiveBundle?.districts ?? bundle.districts}
+                    files={effectiveBundle?.files ?? bundle.files}
+                    vehicles={simState.vehicles}
+                    fireFiles={simState.fireFiles}
+                    blackoutFiles={simState.blackoutFiles}
+                    onClose={() => setRadarOpen(false)}
+                  />
+                )}
+                <CameraControlsHUD
+                  viewMode={viewMode}
+                  onToggleViewMode={() => setViewMode((m) => (m === "2d" ? "3d" : "2d"))}
+                  repoKey={activeRepo ? `${activeRepo.owner}/${activeRepo.repo}` : "default"}
+                  showTraffic={showTraffic}
+                  onToggleTraffic={() => setShowTraffic((v) => !v)}
+                  radarOpen={radarOpen}
+                  onToggleRadar={() => setRadarOpen((v) => !v)}
+                  hasRadarAlert={simState.fireFiles.size > 0 || simState.blackoutFiles.size > 0}
+                  isViewPopoverOpen={openPopover === "view"}
+                  onToggleViewPopover={() => togglePopover("view")}
+                />
+              </div>
+            </footer>
+          ) : (
+            <div />
+          )}
+        </div>
       )}
 
       <HealthCardModal

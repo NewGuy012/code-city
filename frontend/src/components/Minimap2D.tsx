@@ -1,9 +1,10 @@
+import { X } from "lucide-react";
 import { useEffect, useRef } from "react";
 
-import type { District, FileMetric } from "../types/city";
-import { ZONE_PALETTES } from "../city/cityTheme";
 import { cameraStore, useCameraStore } from "../city/cameraStore";
+import { ZONE_PALETTES } from "../city/cityTheme";
 import type { SimVehicleRender } from "../city/isoRenderer2D";
+import type { District, FileMetric } from "../types/city";
 
 interface Minimap2DProps {
   districts: District[];
@@ -11,10 +12,11 @@ interface Minimap2DProps {
   vehicles?: SimVehicleRender[];
   fireFiles?: Set<string>;
   blackoutFiles?: Set<string>;
+  onClose?: () => void;
 }
 
-const MAP_W = 176;
-const MAP_H = 128;
+const MAP_W = 168;
+const MAP_H = 120;
 const WORLD_W = 148;
 const WORLD_D = 112;
 const WORLD_X0 = -4;
@@ -26,6 +28,7 @@ export function Minimap2D({
   vehicles = [],
   fireFiles,
   blackoutFiles,
+  onClose,
 }: Minimap2DProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const draggingRef = useRef(false);
@@ -135,18 +138,27 @@ export function Minimap2D({
   return (
     <div
       data-testid="minimap-radar"
-      className="sim-panel pointer-events-auto hidden overflow-hidden rounded-xl p-1.5 sm:block"
-      title="SimCity Radar Minimap — Click or drag to jump camera"
+      className="sim-panel pointer-events-auto overflow-hidden rounded-xl p-1.5"
+      title="City Radar Minimap — Click or drag to jump camera (M to toggle)"
     >
       <div className="mb-1 flex items-center justify-between px-1 text-[10px] font-semibold uppercase tracking-wider text-slate-400">
         <span>Radar</span>
-        <span className="font-mono text-amber-300">{cameraStore.getCompassLabel()}</span>
+        {onClose && (
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Hide radar"
+            className="rounded p-0.5 text-slate-400 transition hover:bg-white/[0.08] hover:text-white"
+          >
+            <X className="h-3 w-3" />
+          </button>
+        )}
       </div>
       <canvas
         ref={canvasRef}
         width={MAP_W}
         height={MAP_H}
-        className="block cursor-crosshair rounded-lg border border-slate-700/70"
+        className="block cursor-crosshair rounded-lg border border-white/10"
         onPointerDown={(e) => {
           draggingRef.current = true;
           e.currentTarget.setPointerCapture(e.pointerId);

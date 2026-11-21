@@ -1,4 +1,14 @@
-import { GitCommitHorizontal, Pause, Play, SkipBack, SkipForward, Tag } from "lucide-react";
+import {
+  ChevronDown,
+  ChevronUp,
+  GitCommitHorizontal,
+  Pause,
+  Play,
+  SkipBack,
+  SkipForward,
+  Tag,
+} from "lucide-react";
+import { useState } from "react";
 
 import type { Snapshot } from "../types/city";
 
@@ -35,6 +45,8 @@ export function TimeScrubber({
   onSelectSnapshot,
   onTogglePlay,
 }: TimeScrubberProps) {
+  const [expanded, setExpanded] = useState(false);
+
   if (snapshots.length === 0) return null;
 
   const curPos = Math.max(
@@ -44,13 +56,67 @@ export function TimeScrubber({
   const current = snapshots[curPos] ?? snapshots[0];
   const dateLabel = formatSnapshotDate(current.committed_at);
 
+  if (!expanded) {
+    return (
+      <div
+        data-testid="time-scrubber"
+        className="sim-panel pointer-events-auto inline-flex h-9 items-center gap-1.5 rounded-xl px-1.5 text-xs"
+      >
+        <button
+          type="button"
+          data-testid="time-play-btn"
+          onClick={onTogglePlay}
+          title={isPlaying ? "Pause Time-Lapse" : "Play Git History Time-Lapse"}
+          className={`flex h-6 items-center gap-1 rounded-lg px-2 text-[11px] font-semibold transition ${
+            isPlaying
+              ? "bg-amber-400 text-slate-950"
+              : "bg-white/[0.08] text-amber-300 hover:bg-amber-400 hover:text-slate-950"
+          }`}
+        >
+          {isPlaying ? <Pause className="h-3 w-3" /> : <Play className="h-3 w-3" />}
+          <span className="hidden sm:inline">{isPlaying ? "Pause" : "Time-Lapse"}</span>
+        </button>
+
+        <button
+          type="button"
+          data-testid="time-expand-btn"
+          onClick={() => setExpanded(true)}
+          title="Expand commit timeline scrubber"
+          className="flex items-center gap-2 rounded-lg px-1.5 py-1 text-left transition hover:bg-white/[0.06]"
+        >
+          <span className="flex items-center gap-1 font-mono text-[11px] text-sky-300">
+            <GitCommitHorizontal className="h-3 w-3" />
+            {current.commit_sha.slice(0, 7)}
+          </span>
+          <span className="hidden text-[11px] text-slate-400 md:inline">{dateLabel}</span>
+          {current.git_tag && (
+            <span className="hidden items-center gap-0.5 rounded bg-amber-500/15 px-1.5 py-px font-mono text-[10px] font-semibold text-amber-300 sm:flex">
+              <Tag className="h-2.5 w-2.5" />
+              {current.git_tag}
+            </span>
+          )}
+          <span className="sim-pixel-badge rounded bg-white/[0.07] px-1.5 py-px font-mono text-[10px] text-slate-200">
+            {curPos + 1}/{snapshots.length}
+          </span>
+          {(addedCount > 0 || removedCount > 0) && (
+            <span className="hidden items-center gap-1 font-mono text-[10px] sm:flex">
+              {addedCount > 0 && <span className="text-emerald-400">+{addedCount}</span>}
+              {removedCount > 0 && <span className="text-rose-400">-{removedCount}</span>}
+            </span>
+          )}
+          <ChevronUp className="h-3.5 w-3.5 text-slate-400" />
+        </button>
+      </div>
+    );
+  }
+
   return (
     <div
       data-testid="time-scrubber"
-      className="sim-panel pointer-events-auto flex flex-col gap-2 rounded-2xl px-4 py-2.5"
+      className="sim-popover pointer-events-auto flex w-[min(520px,calc(100vw-1.5rem))] flex-col gap-2 rounded-2xl px-3.5 py-2.5 text-xs"
     >
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-1.5">
+      <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1">
           <button
             type="button"
             onClick={() => {
@@ -58,19 +124,19 @@ export function TimeScrubber({
               if (prev) onSelectSnapshot(prev.snapshot_idx);
             }}
             disabled={curPos <= 0}
-            className="rounded-lg p-1.5 text-slate-300 hover:bg-slate-800 disabled:opacity-35"
+            className="rounded-lg p-1 text-slate-300 hover:bg-white/[0.08] disabled:opacity-30"
             title="Previous keyframe"
           >
-            <SkipBack className="h-4 w-4" />
+            <SkipBack className="h-3.5 w-3.5" />
           </button>
           <button
             type="button"
             data-testid="time-play-btn"
             onClick={onTogglePlay}
-            className="flex items-center gap-1 rounded-xl bg-amber-500 px-3 py-1 text-xs font-bold text-slate-950 transition hover:bg-amber-400"
+            className="flex h-7 items-center gap-1 rounded-lg bg-amber-400 px-2.5 text-[11px] font-bold text-slate-950 transition hover:bg-amber-300"
           >
-            {isPlaying ? <Pause className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
-            <span>{isPlaying ? "Pause" : "Time-Lapse"}</span>
+            {isPlaying ? <Pause className="h-3 w-3" /> : <Play className="h-3 w-3" />}
+            <span>{isPlaying ? "Pause" : "Play"}</span>
           </button>
           <button
             type="button"
@@ -79,39 +145,13 @@ export function TimeScrubber({
               if (next) onSelectSnapshot(next.snapshot_idx);
             }}
             disabled={curPos >= snapshots.length - 1}
-            className="rounded-lg p-1.5 text-slate-300 hover:bg-slate-800 disabled:opacity-35"
+            className="rounded-lg p-1 text-slate-300 hover:bg-white/[0.08] disabled:opacity-30"
             title="Next keyframe"
           >
-            <SkipForward className="h-4 w-4" />
+            <SkipForward className="h-3.5 w-3.5" />
           </button>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2 text-xs">
-          <span className="flex items-center gap-1 font-mono text-sky-300">
-            <GitCommitHorizontal className="h-3.5 w-3.5" />
-            {current.commit_sha.slice(0, 7)}
-          </span>
-          <span className="text-slate-400">{dateLabel}</span>
-          {current.git_tag && (
-            <span className="flex items-center gap-1 rounded-md bg-amber-500/15 px-1.5 py-0.5 font-mono text-[11px] font-semibold text-amber-300 ring-1 ring-amber-400/35">
-              <Tag className="h-3 w-3" />
-              {current.git_tag}
-            </span>
-          )}
-          <span className="sim-pixel-badge rounded-md bg-slate-800 px-2 py-0.5 text-slate-300">
-            Snapshot {curPos + 1}/{snapshots.length}
-          </span>
-          {(addedCount > 0 || removedCount > 0) && (
-            <span className="flex items-center gap-1.5 rounded-md bg-slate-900 px-2 py-0.5 font-mono text-[11px]">
-              {addedCount > 0 && <span className="text-emerald-400">+{addedCount} built</span>}
-              {removedCount > 0 && <span className="text-rose-400">-{removedCount} razed</span>}
-            </span>
-          )}
-        </div>
-      </div>
-
-      {/* Timeline Slider & Tag Chips */}
-      <div className="flex items-center gap-3">
         <input
           type="range"
           data-testid="time-slider"
@@ -122,21 +162,57 @@ export function TimeScrubber({
             const target = snapshots[Number(e.target.value)];
             if (target) onSelectSnapshot(target.snapshot_idx);
           }}
-          className="h-1.5 flex-1 cursor-pointer accent-amber-400"
+          className="h-1.5 min-w-0 flex-1 cursor-pointer accent-amber-400"
         />
-        <div className="hidden items-center gap-1 md:flex">
+
+        <button
+          type="button"
+          data-testid="time-collapse-btn"
+          onClick={() => setExpanded(false)}
+          title="Collapse timeline"
+          className="rounded-lg p-1 text-slate-400 transition hover:bg-white/[0.08] hover:text-white"
+        >
+          <ChevronDown className="h-4 w-4" />
+        </button>
+      </div>
+
+      <div className="flex flex-wrap items-center justify-between gap-2 text-[11px]">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="flex items-center gap-1 font-mono text-sky-300">
+            <GitCommitHorizontal className="h-3.5 w-3.5" />
+            {current.commit_sha.slice(0, 7)}
+          </span>
+          <span className="text-slate-400">{dateLabel}</span>
+          {current.git_tag && (
+            <span className="flex items-center gap-1 rounded-md bg-amber-500/15 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-amber-300">
+              <Tag className="h-3 w-3" />
+              {current.git_tag}
+            </span>
+          )}
+          <span className="sim-pixel-badge rounded bg-white/[0.07] px-1.5 py-0.5 text-slate-300">
+            Snapshot {curPos + 1}/{snapshots.length}
+          </span>
+          {(addedCount > 0 || removedCount > 0) && (
+            <span className="flex items-center gap-1.5 font-mono text-[10px]">
+              {addedCount > 0 && <span className="text-emerald-400">+{addedCount} built</span>}
+              {removedCount > 0 && <span className="text-rose-400">-{removedCount} razed</span>}
+            </span>
+          )}
+        </div>
+
+        <div className="hidden items-center gap-1 sm:flex">
           {snapshots
             .filter((s) => s.git_tag)
-            .slice(-5)
+            .slice(-4)
             .map((s) => (
               <button
                 key={s.snapshot_idx}
                 type="button"
                 onClick={() => onSelectSnapshot(s.snapshot_idx)}
-                className={`rounded-md px-1.5 py-0.5 font-mono text-[11px] transition ${
+                className={`rounded-md px-1.5 py-0.5 font-mono text-[10px] transition ${
                   s.snapshot_idx === snapshotIdx
-                    ? "bg-amber-500 text-slate-950 font-bold"
-                    : "bg-slate-800/80 text-slate-300 hover:bg-slate-700"
+                    ? "bg-amber-400 font-bold text-slate-950"
+                    : "bg-white/[0.07] text-slate-300 hover:bg-white/[0.14]"
                 }`}
               >
                 {s.git_tag}
