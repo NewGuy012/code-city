@@ -1,7 +1,13 @@
-import { Line, OrbitControls } from "@react-three/drei";
-import { Canvas, type ThreeEvent } from "@react-three/fiber";
+import {
+  Line,
+  OrbitControls,
+  OrthographicCamera,
+  PerspectiveCamera,
+} from "@react-three/drei";
+import { Canvas, type ThreeEvent, useFrame, useThree } from "@react-three/fiber";
 import { useEffect, useMemo, useRef } from "react";
 import * as THREE from "three";
+import type { OrbitControls as OrbitControlsImpl } from "three-stdlib";
 
 import type {
   BlastRadiusResult,
@@ -10,7 +16,14 @@ import type {
   District,
   FileMetric,
 } from "../types/city";
+import {
+  WORLD_CENTER_X,
+  WORLD_CENTER_Z,
+  cameraStore,
+  useCameraStore,
+} from "./cameraStore";
 import { buildingColor3D, buildingHeight3D } from "./geometries3D";
+import type { FocusTarget } from "./CityCanvas2D";
 
 interface CityCanvas3DProps {
   districts: District[];
@@ -19,24 +32,122 @@ interface CityCanvas3DProps {
   dataMap: DataMapMode;
   selectedFile: string | null;
   blastRadius: BlastRadiusResult | null;
+  focusTarget?: FocusTarget | null;
+  activeTool?: string;
   onSelectFile: (filePath: string | null) => void;
+  onToolAction?: (file: FileMetric) => void;
 }
 
-const WORLD_CX = 70;
-const WORLD_CZ = 52;
+const WORLD_CX = WORLD_CENTER_X;
+const WORLD_CZ = WORLD_CENTER_Z;
+const BASE_ORBIT_DISTANCE = 92;
+
+function CameraRig3D() {
+  const controlsRef = useRef<OrbitControlsImpl | null>(null);
+  const { camera, size } = useThree();
+  const camState = useCameraStore();
+  const syncingFromStoreRef = useRef(false);
+  const userInteractingRef = useRef(false);
+
+  // Push store -> Three camera & OrbitControls whenever store updates (when not actively dragging)
+  useEffect(() => {
+    const controls = controlsRef.current;
+    if (!controls || userInteractingRef.current) return;
+
+    syncingFromStoreRef.current = true;
+    const tx = camState.targetX - WORLD_CX;
+    const tz = camState.targetZ - WORLD_CZ;
+    controls.target.set(tx, 0, tz);
+
+    const pitchRad = (camState.pitch * Math.PI) / 180;
+    const dist = BASE_ORBIT_DISTANCE / Math.max(0.35, camState.zoom);
+    const horiz = dist * Math.cos(pitchRad);
+    const camY = Math.max(1.8, dist * Math.sin(pitchRad));
+    const camX = tx + horiz * Math.sin(camState.yaw);
+    const camZ = tz + horiz * Math.cos(camState.yaw);
+
+    camera.position.set(camX, camY, camZ);
+    if (camera instanceof THREE.OrthographicCamera) {
+      const baseSpan = 65 / Math.max(0.35, camState.zoom);
+      const aspect = Math.max(0.5, size.width / Math.max(1, size.height));
+      camera.left = -baseSpan * aspect;
+      camera.right = baseSpan * aspect;
+      camera.top = baseSpan;
+      camera.bottom = -baseSpan;
+      camera.zoom = 1;
+      camera.updateProjectionMatrix();
+    }
+    controls.update();
+    syncingFromStoreRef.current = false;
+  }, [camState, camera, size.height, size.width]);
+
+  // Ground collision guard & smooth sync on frame
+  useFrame(() => {
+    if (camera.position.y < 1.8) {
+      camera.position.y = 1.8;
+    }
+  });
+
+  return (
+    <OrbitControls
+      ref={controlsRef}
+      makeDefault
+      enableDamping
+      dampingFactor={0.08}
+      minDistance={16}
+      maxDistance={280}
+      minPolarAngle={(5 * Math.PI) / 180}
+      maxPolarAngle={(78 * Math.PI) / 180}
+      onStart={() => {
+        userInteractingRef.current = true;
+        cameraStore.cancelTween();
+        cameraStore.setState({ followVehicleId: null, cinematicOrbit: false }, { cancelTween: false });
+      }}
+      onEnd={() => {
+        userInteractingRef.current = false;
+      }}
+      onChange={() => {
+        if (syncingFromStoreRef.current || !controlsRef.current || !userInteractingRef.current) {
+          return;
+        }
+        const ctrl = controlsRef.current;
+        const offset = new THREE.Vector3().subVectors(camera.position, ctrl.target);
+        const dist = Math.max(16, offset.length());
+        const yaw = Math.atan2(offset.x, offset.z);
+        const horiz = Math.max(0.01, Math.hypot(offset.x, offset.z));
+        const pitch = (Math.atan2(Math.max(1.8, offset.y), horiz) * 180) / Math.PI;
+        const zoom = BASE_ORBIT_DISTANCE / dist;
+        cameraStore.setState(
+          {
+            targetX: ctrl.target.x + WORLD_CX,
+            targetZ: ctrl.target.z + WORLD_CZ,
+            yaw,
+            pitch,
+            zoom,
+          },
+          { cancelTween: false },
+        );
+      }}
+    />
+  );
+}
 
 function InstancedBuildings({
   files,
   dataMap,
   selectedFile,
   blastRadius,
+  activeTool,
   onSelectFile,
+  onToolAction,
 }: {
   files: FileMetric[];
   dataMap: DataMapMode;
   selectedFile: string | null;
   blastRadius: BlastRadiusResult | null;
+  activeTool: string;
   onSelectFile: (filePath: string | null) => void;
+  onToolAction?: (file: FileMetric) => void;
 }) {
   const meshRef = useRef<THREE.InstancedMesh | null>(null);
 
@@ -79,7 +190,12 @@ function InstancedBuildings({
   function handleClick(e: ThreeEvent<MouseEvent>) {
     e.stopPropagation();
     if (e.instanceId !== undefined && files[e.instanceId]) {
-      onSelectFile(files[e.instanceId].file_path);
+      const f = files[e.instanceId];
+      if (activeTool !== "inspect" && onToolAction) {
+        onToolAction(f);
+      } else {
+        onSelectFile(f.file_path);
+      }
     }
   }
 
@@ -184,19 +300,44 @@ export default function CityCanvas3D({
   dataMap,
   selectedFile,
   blastRadius,
+  focusTarget,
+  activeTool = "inspect",
   onSelectFile,
+  onToolAction,
 }: CityCanvas3DProps) {
+  const cam = useCameraStore();
+
+  useEffect(() => {
+    if (!focusTarget) return;
+    cameraStore.flyTo({
+      targetX: focusTarget.x,
+      targetZ: focusTarget.z,
+      zoom: focusTarget.zoom ?? Math.max(1.25, cameraStore.getState().zoom),
+      durationMs: 480,
+    });
+  }, [focusTarget]);
+
+  const skyBg =
+    cam.timeOfDay === "golden" ? "#1b1433" : cam.timeOfDay === "night" ? "#030712" : "#060c18";
+
   return (
     <div data-testid="city-canvas-3d" className="h-full w-full bg-slate-950">
-      <Canvas
-        shadows
-        camera={{ position: [92, 78, 92], fov: 42, near: 0.5, far: 1000 }}
-        onPointerMissed={() => onSelectFile(null)}
-      >
-        <color attach="background" args={["#060c18"]} />
-        <fog attach="fog" args={["#060c18", 130, 320]} />
-        <ambientLight intensity={0.65} />
-        <directionalLight position={[80, 120, 60]} intensity={1.35} castShadow />
+      <Canvas shadows onPointerMissed={() => onSelectFile(null)}>
+        {cam.projection === "orthographic" ? (
+          <OrthographicCamera makeDefault near={-400} far={1200} position={[85, 72, 85]} />
+        ) : (
+          <PerspectiveCamera makeDefault fov={42} near={0.5} far={1000} position={[85, 72, 85]} />
+        )}
+
+        <color attach="background" args={[skyBg]} />
+        <fog attach="fog" args={[skyBg, 130, 340]} />
+        <ambientLight intensity={cam.timeOfDay === "night" ? 0.32 : 0.65} />
+        <directionalLight
+          position={cam.timeOfDay === "golden" ? [110, 48, 70] : [80, 120, 60]}
+          intensity={cam.timeOfDay === "night" ? 0.45 : cam.timeOfDay === "golden" ? 1.55 : 1.35}
+          color={cam.timeOfDay === "golden" ? "#fbbf24" : "#ffffff"}
+          castShadow
+        />
         <directionalLight position={[-60, 40, -60]} intensity={0.35} color="#38bdf8" />
 
         {/* Harbor water + city island */}
@@ -215,7 +356,9 @@ export default function CityCanvas3D({
           dataMap={dataMap}
           selectedFile={selectedFile}
           blastRadius={blastRadius}
+          activeTool={activeTool}
           onSelectFile={onSelectFile}
+          onToolAction={onToolAction}
         />
         <FaultArcs3D
           files={files}
@@ -223,12 +366,7 @@ export default function CityCanvas3D({
           selectedFile={selectedFile}
           blastRadius={blastRadius}
         />
-        <OrbitControls
-          makeDefault
-          enableDamping
-          dampingFactor={0.08}
-          maxPolarAngle={Math.PI * 0.47}
-        />
+        <CameraRig3D />
       </Canvas>
     </div>
   );

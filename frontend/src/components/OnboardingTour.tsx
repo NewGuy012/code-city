@@ -25,7 +25,7 @@ export function OnboardingTour({
   return (
     <div
       data-testid="onboarding-tour"
-      className="sim-panel pointer-events-auto absolute bottom-28 left-4 z-30 w-80 rounded-2xl p-4 sm:w-96"
+      className="sim-panel pointer-events-auto absolute bottom-32 left-4 z-30 w-80 rounded-2xl p-4 sm:w-96"
     >
       <div className="flex items-start justify-between gap-2">
         <div className="flex items-center gap-2">

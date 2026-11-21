@@ -9,11 +9,20 @@ import type {
   FileMetric,
   ZoneType,
 } from "../types/city";
+import {
+  DEFAULT_PITCH,
+  DEFAULT_YAW,
+  type TimeOfDay,
+  WORLD_CENTER_X,
+  WORLD_CENTER_Z,
+} from "./cameraStore";
 
 export interface Camera2D {
   panX: number;
   panY: number;
   zoom: number;
+  yaw?: number;
+  pitch?: number;
 }
 
 export interface GhostLot {
@@ -24,12 +33,31 @@ export interface GhostLot {
   layout_d: number;
 }
 
+export interface SimVehicleRender {
+  id: string;
+  type: "request_car" | "cycle_car" | "sweeper" | "fire_truck" | "crew" | "cargo_ship";
+  x: number;
+  z: number;
+  heading: number;
+  jammed?: boolean;
+}
+
+export interface FloatingStatPopup {
+  id: string;
+  x: number;
+  z: number;
+  text: string;
+  color: string;
+  progress: number; // 0..1
+}
+
 export interface RenderCitySceneArgs {
   ctx: CanvasRenderingContext2D;
   width: number;
   height: number;
   camera: Camera2D;
   timeSec: number;
+  timeOfDay?: TimeOfDay;
   districts: District[];
   files: FileMetric[];
   imports: FileImport[];
@@ -42,6 +70,14 @@ export interface RenderCitySceneArgs {
   addedFiles: Set<string>;
   removedLots: GhostLot[];
   showTraffic: boolean;
+  vehicles?: SimVehicleRender[];
+  fireFiles?: Set<string>;
+  blackoutFiles?: Set<string>;
+  plazas?: Array<{ x: number; z: number; w: number; d: number; kind: string }>;
+  streetLines?: { xLines: number[]; zLines: number[] };
+  floatingPopups?: FloatingStatPopup[];
+  /** Optional hook allowing sprite atlas drawing in Phase B+ */
+  drawSpriteOverride?: boolean;
 }
 
 export interface HitBuilding {
@@ -54,17 +90,57 @@ export interface HitBuilding {
   maxY: number;
 }
 
-const WORLD_CENTER_X = 70;
-const WORLD_CENTER_Z = 52;
 const ISO_X = 7.4;
 const ISO_Y = 3.7;
 
-export function worldToIso(x: number, z: number, y = 0): { x: number; y: number } {
+export function getTiltFactors(pitchDeg = DEFAULT_PITCH): {
+  isoYScale: number;
+  heightScale: number;
+} {
+  const clamped = Math.max(12, Math.min(85, pitchDeg));
+  const baseRad = (DEFAULT_PITCH * Math.PI) / 180;
+  const rad = (clamped * Math.PI) / 180;
+  return {
+    isoYScale: Math.max(0.42, Math.min(1.85, Math.sin(rad) / Math.sin(baseRad))),
+    heightScale: Math.max(0.12, Math.min(1.22, Math.cos(rad) / Math.cos(baseRad))),
+  };
+}
+
+export function cameraFromTarget(
+  targetX: number,
+  targetZ: number,
+  zoom: number,
+  yaw = DEFAULT_YAW,
+  pitch = DEFAULT_PITCH,
+): Camera2D {
+  const iso = worldToIso(targetX, targetZ, 0, yaw, pitch);
+  return {
+    panX: -iso.x * zoom,
+    panY: -iso.y * zoom,
+    zoom,
+    yaw,
+    pitch,
+  };
+}
+
+export function worldToIso(
+  x: number,
+  z: number,
+  y = 0,
+  yaw = DEFAULT_YAW,
+  pitch = DEFAULT_PITCH,
+): { x: number; y: number } {
   const dx = x - WORLD_CENTER_X;
   const dz = z - WORLD_CENTER_Z;
+  const theta = yaw - DEFAULT_YAW;
+  const cosT = Math.cos(theta);
+  const sinT = Math.sin(theta);
+  const rx = dx * cosT - dz * sinT;
+  const rz = dx * sinT + dz * cosT;
+  const { isoYScale, heightScale } = getTiltFactors(pitch);
   return {
-    x: (dx - dz) * ISO_X,
-    y: (dx + dz) * ISO_Y - y,
+    x: (rx - rz) * ISO_X,
+    y: (rx + rz) * (ISO_Y * isoYScale) - y * heightScale,
   };
 }
 
@@ -89,7 +165,7 @@ export function worldToScreen(
   height: number,
   camera: Camera2D,
 ): { x: number; y: number } {
-  const iso = worldToIso(wx, wz, wy);
+  const iso = worldToIso(wx, wz, wy, camera.yaw ?? DEFAULT_YAW, camera.pitch ?? DEFAULT_PITCH);
   return isoToScreen(iso.x, iso.y, width, height, camera);
 }
 
@@ -100,10 +176,19 @@ export function screenToWorldGround(
   height: number,
   camera: Camera2D,
 ): { x: number; z: number } {
+  const yaw = camera.yaw ?? DEFAULT_YAW;
+  const pitch = camera.pitch ?? DEFAULT_PITCH;
+  const { isoYScale } = getTiltFactors(pitch);
   const isoX = (sx - width * 0.5 - camera.panX) / camera.zoom;
   const isoY = (sy - height * 0.52 - camera.panY) / camera.zoom;
-  const dx = 0.5 * (isoX / ISO_X + isoY / ISO_Y);
-  const dz = 0.5 * (isoY / ISO_Y - isoX / ISO_X);
+  const isoYEff = ISO_Y * isoYScale;
+  const rx = 0.5 * (isoX / ISO_X + isoY / isoYEff);
+  const rz = 0.5 * (isoY / isoYEff - isoX / ISO_X);
+  const theta = yaw - DEFAULT_YAW;
+  const cosT = Math.cos(theta);
+  const sinT = Math.sin(theta);
+  const dx = rx * cosT + rz * sinT;
+  const dz = -rx * sinT + rz * cosT;
   return {
     x: dx + WORLD_CENTER_X,
     z: dz + WORLD_CENTER_Z,
@@ -150,7 +235,7 @@ const LANGUAGE_PALETTES: Record<string, ShadePalette> = {
   other: { roof: "#cbd5e1", left: "#64748b", right: "#334155", accent: "#f1f5f9" },
 };
 
-function buildingPalette(file: FileMetric, dataMap: DataMapMode): ShadePalette {
+export function buildingPalette(file: FileMetric, dataMap: DataMapMode): ShadePalette {
   if (dataMap === "living") {
     return ARCHETYPE_PALETTES[file.building_archetype] ?? ARCHETYPE_PALETTES.office_tower;
   }
@@ -190,13 +275,12 @@ function buildingPalette(file: FileMetric, dataMap: DataMapMode): ShadePalette {
     }
     return { roof: "#5eead4", left: "#0d9488", right: "#134e4a", accent: "#ccfbf1" };
   }
-  // format_drift
   return file.format_drift
     ? { roof: "#f0abfc", left: "#c026d3", right: "#701a75", accent: "#fdf4ff" }
     : { roof: "#7dd3fc", left: "#0284c7", right: "#0c4a6e", accent: "#e0f2fe" };
 }
 
-function computeBuildingHeight(file: FileMetric): number {
+export function computeBuildingHeight(file: FileMetric): number {
   if (file.building_archetype === "park_stadium") {
     return 6;
   }
@@ -212,7 +296,29 @@ function computeBuildingHeight(file: FileMetric): number {
   return Math.max(12, Math.min(86, slocFactor + compFactor + symbolFactor + roleBoost));
 }
 
-function drawIsoPrism(
+function drawQuad(
+  ctx: CanvasRenderingContext2D,
+  pts: Array<{ x: number; y: number }>,
+  fill: string,
+  stroke?: string | null,
+  lineWidth = 1,
+): void {
+  ctx.beginPath();
+  ctx.moveTo(pts[0].x, pts[0].y);
+  for (let i = 1; i < pts.length; i++) {
+    ctx.lineTo(pts[i].x, pts[i].y);
+  }
+  ctx.closePath();
+  ctx.fillStyle = fill;
+  ctx.fill();
+  if (stroke) {
+    ctx.strokeStyle = stroke;
+    ctx.lineWidth = lineWidth;
+    ctx.stroke();
+  }
+}
+
+export function drawIsoPrism(
   ctx: CanvasRenderingContext2D,
   x: number,
   z: number,
@@ -227,59 +333,46 @@ function drawIsoPrism(
   strokeColor?: string,
   lineWidth = 1,
 ): void {
+  const yaw = cam.yaw ?? DEFAULT_YAW;
   const p00 = worldToScreen(x, z, yBase + h, wScreen, hScreen, cam);
   const p10 = worldToScreen(x + w, z, yBase + h, wScreen, hScreen, cam);
   const p11 = worldToScreen(x + w, z + d, yBase + h, wScreen, hScreen, cam);
   const p01 = worldToScreen(x, z + d, yBase + h, wScreen, hScreen, cam);
 
+  const b00 = worldToScreen(x, z, yBase, wScreen, hScreen, cam);
   const b10 = worldToScreen(x + w, z, yBase, wScreen, hScreen, cam);
   const b11 = worldToScreen(x + w, z + d, yBase, wScreen, hScreen, cam);
   const b01 = worldToScreen(x, z + d, yBase, wScreen, hScreen, cam);
 
-  // Left visible face (z + d side)
-  ctx.beginPath();
-  ctx.moveTo(p01.x, p01.y);
-  ctx.lineTo(p11.x, p11.y);
-  ctx.lineTo(b11.x, b11.y);
-  ctx.lineTo(b01.x, b01.y);
-  ctx.closePath();
-  ctx.fillStyle = palette.left;
-  ctx.fill();
-  if (strokeColor) {
-    ctx.strokeStyle = strokeColor;
-    ctx.lineWidth = lineWidth;
-    ctx.stroke();
+  const viewX = Math.sin(yaw);
+  const viewZ = Math.cos(yaw);
+
+  // Determine the 2 front-facing walls for any camera yaw
+  const candidates: Array<{ pts: Array<{ x: number; y: number }>; midX: number }> = [];
+  if (viewZ >= -1e-4) {
+    // +Z wall
+    candidates.push({ pts: [p01, p11, b11, b01], midX: (p01.x + p11.x) * 0.5 });
+  } else {
+    // -Z wall
+    candidates.push({ pts: [p10, p00, b00, b10], midX: (p10.x + p00.x) * 0.5 });
+  }
+  if (viewX >= -1e-4) {
+    // +X wall
+    candidates.push({ pts: [p10, p11, b11, b10], midX: (p10.x + p11.x) * 0.5 });
+  } else {
+    // -X wall
+    candidates.push({ pts: [p00, p01, b01, b00], midX: (p00.x + p01.x) * 0.5 });
   }
 
-  // Right visible face (x + w side)
-  ctx.beginPath();
-  ctx.moveTo(p10.x, p10.y);
-  ctx.lineTo(p11.x, p11.y);
-  ctx.lineTo(b11.x, b11.y);
-  ctx.lineTo(b10.x, b10.y);
-  ctx.closePath();
-  ctx.fillStyle = palette.right;
-  ctx.fill();
-  if (strokeColor) {
-    ctx.strokeStyle = strokeColor;
-    ctx.lineWidth = lineWidth;
-    ctx.stroke();
+  candidates.sort((a, b) => a.midX - b.midX);
+  if (candidates[0]) {
+    drawQuad(ctx, candidates[0].pts, palette.left, strokeColor, lineWidth);
+  }
+  if (candidates[1]) {
+    drawQuad(ctx, candidates[1].pts, palette.right, strokeColor, lineWidth);
   }
 
-  // Roof face
-  ctx.beginPath();
-  ctx.moveTo(p00.x, p00.y);
-  ctx.lineTo(p10.x, p10.y);
-  ctx.lineTo(p11.x, p11.y);
-  ctx.lineTo(p01.x, p01.y);
-  ctx.closePath();
-  ctx.fillStyle = palette.roof;
-  ctx.fill();
-  if (strokeColor) {
-    ctx.strokeStyle = strokeColor;
-    ctx.lineWidth = lineWidth;
-    ctx.stroke();
-  }
+  drawQuad(ctx, [p00, p10, p11, p01], palette.roof, strokeColor, lineWidth);
 }
 
 function drawGroundQuad(
@@ -300,19 +393,40 @@ function drawGroundQuad(
   const b = worldToScreen(x + w, z, y, wScreen, hScreen, cam);
   const c = worldToScreen(x + w, z + d, y, wScreen, hScreen, cam);
   const e = worldToScreen(x, z + d, y, wScreen, hScreen, cam);
-  ctx.beginPath();
-  ctx.moveTo(a.x, a.y);
-  ctx.lineTo(b.x, b.y);
-  ctx.lineTo(c.x, c.y);
-  ctx.lineTo(e.x, e.y);
-  ctx.closePath();
-  ctx.fillStyle = fill;
-  ctx.fill();
-  if (stroke) {
-    ctx.strokeStyle = stroke;
-    ctx.lineWidth = lineWidth;
-    ctx.stroke();
-  }
+  drawQuad(ctx, [a, b, c, e], fill, stroke, lineWidth);
+}
+
+function drawCastShadow(
+  ctx: CanvasRenderingContext2D,
+  bx: number,
+  bz: number,
+  bw: number,
+  bd: number,
+  height: number,
+  timeOfDay: TimeOfDay,
+  wScreen: number,
+  hScreen: number,
+  cam: Camera2D,
+): void {
+  const shadowReach = timeOfDay === "golden" ? 0.34 : timeOfDay === "night" ? 0.14 : 0.22;
+  const sx = bx + bw * 0.12 + height * shadowReach;
+  const sz = bz + bd * 0.12 + height * shadowReach * 0.55;
+  ctx.save();
+  ctx.globalAlpha *= timeOfDay === "night" ? 0.22 : 0.32;
+  drawGroundQuad(
+    ctx,
+    sx,
+    sz,
+    bw,
+    bd,
+    0.35,
+    "#020617",
+    null,
+    wScreen,
+    hScreen,
+    cam,
+  );
+  ctx.restore();
 }
 
 function drawBuildingDetails(
@@ -325,16 +439,18 @@ function drawBuildingDetails(
   height: number,
   palette: ShadePalette,
   timeSec: number,
+  timeOfDay: TimeOfDay,
   wScreen: number,
   hScreen: number,
   cam: Camera2D,
   stroke: string,
+  isBurning: boolean,
+  isBlackout: boolean,
 ): void {
   const arch = file.building_archetype;
   const zoom = cam.zoom;
 
   if (arch === "park_stadium") {
-    // Lush green proving park + stadium track + isometric trees
     drawGroundQuad(ctx, bx, bz, bw, bd, 1, "#14532d", "#4ade80", wScreen, hScreen, cam, 1.1);
     const cx = bx + bw * 0.5;
     const cz = bz + bd * 0.5;
@@ -349,7 +465,6 @@ function drawBuildingDetails(
     ctx.stroke();
     ctx.restore();
 
-    // Two crisp trees
     for (const [ox, oz] of [
       [0.24, 0.28],
       [0.74, 0.72],
@@ -363,11 +478,64 @@ function drawBuildingDetails(
     return;
   }
 
-  // Base structure
-  drawIsoPrism(ctx, bx, bz, bw, bd, 0, height * zoom, palette, wScreen, hScreen, cam, stroke, 1);
+  // Directional cast ground shadow
+  drawCastShadow(ctx, bx, bz, bw, bd, height, timeOfDay, wScreen, hScreen, cam);
+
+  const effectivePalette = isBlackout
+    ? { roof: "#1e293b", left: "#0f172a", right: "#020617", accent: "#475569" }
+    : palette;
+
+  drawIsoPrism(
+    ctx,
+    bx,
+    bz,
+    bw,
+    bd,
+    0,
+    height * zoom,
+    effectivePalette,
+    wScreen,
+    hScreen,
+    cam,
+    stroke,
+    1,
+  );
+
+  // Floor window bands when zoomed in comfortably
+  if (zoom >= 0.75 && height > 14 && !isBlackout) {
+    const floors = Math.min(8, Math.max(2, Math.floor(height / 9)));
+    ctx.save();
+    const winColor =
+      timeOfDay === "night"
+        ? "rgba(253, 224, 71, 0.72)"
+        : timeOfDay === "golden"
+          ? "rgba(254, 240, 138, 0.58)"
+          : "rgba(224, 242, 254, 0.32)";
+    ctx.strokeStyle = winColor;
+    ctx.lineWidth = Math.max(0.8, 1.1 * zoom);
+    const yaw = cam.yaw ?? DEFAULT_YAW;
+    const vx = Math.sin(yaw) >= 0 ? bx + bw : bx;
+    const vz = Math.cos(yaw) >= 0 ? bz + bd : bz;
+    for (let fl = 1; fl < floors; fl++) {
+      const fy = (height * (fl / floors)) * zoom;
+      const pA = worldToScreen(bx + bw * 0.14, vz, fy, wScreen, hScreen, cam);
+      const pB = worldToScreen(bx + bw * 0.86, vz, fy, wScreen, hScreen, cam);
+      ctx.beginPath();
+      ctx.moveTo(pA.x, pA.y);
+      ctx.lineTo(pB.x, pB.y);
+      ctx.stroke();
+
+      const pC = worldToScreen(vx, bz + bd * 0.14, fy, wScreen, hScreen, cam);
+      const pD = worldToScreen(vx, bz + bd * 0.86, fy, wScreen, hScreen, cam);
+      ctx.beginPath();
+      ctx.moveTo(pC.x, pC.y);
+      ctx.lineTo(pD.x, pD.y);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
 
   if (arch === "city_hall") {
-    // Stepped Art-Deco crown + civic spire
     drawIsoPrism(
       ctx,
       bx + bw * 0.22,
@@ -376,7 +544,7 @@ function drawBuildingDetails(
       bd * 0.56,
       height * zoom,
       height * 0.34 * zoom,
-      palette,
+      effectivePalette,
       wScreen,
       hScreen,
       cam,
@@ -410,7 +578,6 @@ function drawBuildingDetails(
     ctx.fillStyle = "#fde047";
     ctx.fill();
   } else if (arch === "twin_silos") {
-    // Twin roof tanks / domes
     for (const ox of [0.3, 0.7]) {
       drawIsoPrism(
         ctx,
@@ -420,7 +587,7 @@ function drawBuildingDetails(
         bd * 0.44,
         height * zoom,
         height * 0.25 * zoom,
-        { ...palette, roof: palette.accent },
+        { ...effectivePalette, roof: effectivePalette.accent },
         wScreen,
         hScreen,
         cam,
@@ -429,7 +596,6 @@ function drawBuildingDetails(
       );
     }
   } else if (arch === "factory") {
-    // Sawtooth industrial roof monitor + twin smokestacks
     drawIsoPrism(
       ctx,
       bx + bw * 0.15,
@@ -438,7 +604,7 @@ function drawBuildingDetails(
       bd * 0.7,
       height * zoom,
       7 * zoom,
-      palette,
+      effectivePalette,
       wScreen,
       hScreen,
       cam,
@@ -468,7 +634,6 @@ function drawBuildingDetails(
     ctx.lineWidth = Math.max(2.5, 3.5 * zoom);
     ctx.stroke();
   } else if (arch === "grand_terminal") {
-    // Arched gateway beacon dome
     drawIsoPrism(
       ctx,
       bx + bw * 0.18,
@@ -477,7 +642,7 @@ function drawBuildingDetails(
       bd * 0.64,
       height * zoom,
       9 * zoom,
-      { ...palette, roof: "#fef08a" },
+      { ...effectivePalette, roof: "#fef08a" },
       wScreen,
       hScreen,
       cam,
@@ -485,7 +650,6 @@ function drawBuildingDetails(
       0.8,
     );
   } else if (arch === "archive_vault") {
-    // Colonnaded pediment step
     drawIsoPrism(
       ctx,
       bx + bw * 0.1,
@@ -494,7 +658,7 @@ function drawBuildingDetails(
       bd * 0.8,
       height * zoom,
       5 * zoom,
-      { ...palette, roof: "#e2e8f0" },
+      { ...effectivePalette, roof: "#e2e8f0" },
       wScreen,
       hScreen,
       cam,
@@ -502,7 +666,6 @@ function drawBuildingDetails(
       0.8,
     );
   } else if (arch === "watchtower") {
-    // Narrow armored turret top
     drawIsoPrism(
       ctx,
       bx + bw * 0.28,
@@ -511,7 +674,7 @@ function drawBuildingDetails(
       bd * 0.44,
       height * zoom,
       10 * zoom,
-      palette,
+      effectivePalette,
       wScreen,
       hScreen,
       cam,
@@ -519,7 +682,6 @@ function drawBuildingDetails(
       0.8,
     );
   } else if (arch === "office_tower" && height > 30) {
-    // Upper setback tier + glowing window bands
     drawIsoPrism(
       ctx,
       bx + bw * 0.18,
@@ -528,7 +690,7 @@ function drawBuildingDetails(
       bd * 0.64,
       height * zoom,
       height * 0.24 * zoom,
-      palette,
+      effectivePalette,
       wScreen,
       hScreen,
       cam,
@@ -536,7 +698,6 @@ function drawBuildingDetails(
       0.7,
     );
   } else if (arch === "glass_pavilion") {
-    // Rooftop terrace strip
     drawIsoPrism(
       ctx,
       bx + bw * 0.16,
@@ -545,7 +706,7 @@ function drawBuildingDetails(
       bd * 0.68,
       height * zoom,
       5 * zoom,
-      { ...palette, roof: "#f472b6" },
+      { ...effectivePalette, roof: "#f472b6" },
       wScreen,
       hScreen,
       cam,
@@ -554,7 +715,6 @@ function drawBuildingDetails(
     );
   }
 
-  // Condition Signals: Crane, Smog, Lone-Keeper Lighthouse
   const roofCenter = worldToScreen(
     bx + bw * 0.5,
     bz + bd * 0.5,
@@ -565,7 +725,6 @@ function drawBuildingDetails(
   );
 
   if (file.condition_flags?.crane) {
-    // Animated construction crane jib!
     const mastTop = { x: roofCenter.x, y: roofCenter.y - 16 * zoom };
     const angle = Math.sin(timeSec * 1.1 + bx) * 0.55;
     const jibLen = 17 * zoom;
@@ -579,7 +738,6 @@ function drawBuildingDetails(
     ctx.moveTo(mastTop.x, mastTop.y);
     ctx.lineTo(mastTop.x - Math.cos(angle) * jibLen * 0.4, mastTop.y - Math.sin(angle) * 2 * zoom);
     ctx.stroke();
-    // Hanging hook
     const hookX = mastTop.x + Math.cos(angle) * jibLen * 0.78;
     const hookY = mastTop.y + Math.sin(angle) * 3.8 * zoom;
     ctx.beginPath();
@@ -592,7 +750,6 @@ function drawBuildingDetails(
   }
 
   if (file.condition_flags?.smog || file.lint_issue_count >= 3) {
-    // Drifting pollution smog puffs
     ctx.save();
     for (let i = 0; i < 3; i++) {
       const phase = timeSec * 0.9 + i * 2.1 + bz;
@@ -606,8 +763,7 @@ function drawBuildingDetails(
     ctx.restore();
   }
 
-  if (file.condition_flags?.lone_keeper) {
-    // Solitary lighthouse pulse (Bus Factor = 1)
+  if (file.condition_flags?.lone_keeper || isBlackout) {
     const pulse = 0.5 + 0.5 * Math.sin(timeSec * 3.4);
     ctx.save();
     ctx.beginPath();
@@ -621,6 +777,25 @@ function drawBuildingDetails(
     ctx.fill();
     ctx.restore();
   }
+
+  if (isBurning) {
+    ctx.save();
+    for (let i = 0; i < 4; i++) {
+      const flicker = Math.sin(timeSec * 9 + i * 1.9 + bx) * 3.2 * zoom;
+      const fy = roofCenter.y - (4 + ((timeSec * 14 + i * 5) % 14)) * zoom;
+      ctx.beginPath();
+      ctx.arc(
+        roofCenter.x + flicker,
+        fy,
+        Math.max(2.2, (5 - i * 0.8) * zoom),
+        0,
+        Math.PI * 2,
+      );
+      ctx.fillStyle = i % 2 === 0 ? "rgba(249, 115, 22, 0.86)" : "rgba(250, 204, 21, 0.78)";
+      ctx.fill();
+    }
+    ctx.restore();
+  }
 }
 
 export function renderCityScene(args: RenderCitySceneArgs): HitBuilding[] {
@@ -630,6 +805,7 @@ export function renderCityScene(args: RenderCitySceneArgs): HitBuilding[] {
     height,
     camera,
     timeSec,
+    timeOfDay = "day",
     districts,
     files,
     imports,
@@ -642,19 +818,35 @@ export function renderCityScene(args: RenderCitySceneArgs): HitBuilding[] {
     addedFiles,
     removedLots,
     showTraffic,
+    vehicles = [],
+    fireFiles,
+    blackoutFiles,
+    plazas = [],
+    streetLines,
+    floatingPopups = [],
   } = args;
 
   ctx.clearRect(0, 0, width, height);
 
-  // 1. Deep harbor water backdrop + subtle animated ripples
+  // 1. Deep harbor water backdrop + time-of-day gradient & animated ripples
   const grad = ctx.createLinearGradient(0, 0, 0, height);
-  grad.addColorStop(0, "#050d1a");
-  grad.addColorStop(1, "#0b1f38");
+  if (timeOfDay === "golden") {
+    grad.addColorStop(0, "#1c1938");
+    grad.addColorStop(0.55, "#282348");
+    grad.addColorStop(1, "#0f2942");
+  } else if (timeOfDay === "night") {
+    grad.addColorStop(0, "#020611");
+    grad.addColorStop(1, "#061326");
+  } else {
+    grad.addColorStop(0, "#050d1a");
+    grad.addColorStop(1, "#0b1f38");
+  }
   ctx.fillStyle = grad;
   ctx.fillRect(0, 0, width, height);
 
   ctx.save();
-  ctx.strokeStyle = "rgba(56, 189, 248, 0.08)";
+  ctx.strokeStyle =
+    timeOfDay === "golden" ? "rgba(251, 191, 36, 0.10)" : "rgba(56, 189, 248, 0.08)";
   ctx.lineWidth = 1;
   for (let i = 0; i < 16; i++) {
     const wy = ((i * 58 + timeSec * 8) % (height + 40)) - 20;
@@ -672,16 +864,16 @@ export function renderCityScene(args: RenderCitySceneArgs): HitBuilding[] {
   }
   ctx.restore();
 
-  // 2. City Foundation Island Slab (with 3D beveled shoreline)
+  // 2. Stepped Stone Seawall + Asphalt Foundation Island Slab
   drawIsoPrism(
     ctx,
-    -2,
-    -2,
-    144,
-    108,
-    -5 * camera.zoom,
-    5 * camera.zoom,
-    { roof: "#0f172a", left: "#1e293b", right: "#0f172a", accent: "#334155" },
+    -2.5,
+    -2.5,
+    145,
+    109,
+    -5.5 * camera.zoom,
+    5.5 * camera.zoom,
+    { roof: "#1e293b", left: "#334155", right: "#1e293b", accent: "#475569" },
     width,
     height,
     camera,
@@ -689,7 +881,48 @@ export function renderCityScene(args: RenderCitySceneArgs): HitBuilding[] {
     1.4,
   );
 
-  // 3. Waterfront Supply Docks (direct external dependencies from lockfiles)
+  // Inner paved city asphalt deck
+  drawGroundQuad(
+    ctx,
+    0,
+    0,
+    140,
+    104,
+    0.05,
+    "#0f172a",
+    "rgba(148, 163, 184, 0.25)",
+    width,
+    height,
+    camera,
+    1,
+  );
+
+  // Explicit avenue/street centerlines & intersection crosswalks
+  if (streetLines && (streetLines.xLines.length > 0 || streetLines.zLines.length > 0)) {
+    ctx.save();
+    ctx.strokeStyle = "rgba(250, 204, 21, 0.22)";
+    ctx.lineWidth = Math.max(0.8, 1.1 * camera.zoom);
+    ctx.setLineDash([4 * camera.zoom, 4 * camera.zoom]);
+    for (const xl of streetLines.xLines) {
+      const a = worldToScreen(xl, 1.2, 0.15, width, height, camera);
+      const b = worldToScreen(xl, 102.8, 0.15, width, height, camera);
+      ctx.beginPath();
+      ctx.moveTo(a.x, a.y);
+      ctx.lineTo(b.x, b.y);
+      ctx.stroke();
+    }
+    for (const zl of streetLines.zLines) {
+      const a = worldToScreen(1.2, zl, 0.15, width, height, camera);
+      const b = worldToScreen(138.8, zl, 0.15, width, height, camera);
+      ctx.beginPath();
+      ctx.moveTo(a.x, a.y);
+      ctx.lineTo(b.x, b.y);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  // 3. Waterfront Supply Docks (timber piers + bobbing cargo barges)
   const directDeps = deps.filter((d) => d.is_direct).slice(0, 8);
   if (directDeps.length > 0) {
     directDeps.forEach((dep, idx) => {
@@ -720,16 +953,30 @@ export function renderCityScene(args: RenderCitySceneArgs): HitBuilding[] {
     });
   }
 
-  // 4. Zoned District Neighborhood Plates
+  // 4. Concrete Sidewalk Plates & Zoned District Neighborhoods
   for (const dist of districts) {
     const zStyle = ZONE_GROUND[dist.zone_type] ?? ZONE_GROUND.downtown_core;
+    drawGroundQuad(
+      ctx,
+      dist.bounds_x - 0.35,
+      dist.bounds_z - 0.35,
+      dist.bounds_w + 0.7,
+      dist.bounds_d + 0.7,
+      0.2,
+      "#334155",
+      "rgba(148, 163, 184, 0.28)",
+      width,
+      height,
+      camera,
+      0.8,
+    );
     drawGroundQuad(
       ctx,
       dist.bounds_x,
       dist.bounds_z,
       dist.bounds_w,
       dist.bounds_d,
-      0.3,
+      0.32,
       zStyle.fill,
       zStyle.border,
       width,
@@ -739,7 +986,41 @@ export function renderCityScene(args: RenderCitySceneArgs): HitBuilding[] {
     );
   }
 
-  // 5. Ghost Diff Demolished Lots (files present in previous snapshot but removed now)
+  // Urban Pocket Plazas & Courtyards
+  for (const pz of plazas) {
+    const fill =
+      pz.kind === "loading_bay" ? "#3f2e21" : pz.kind === "courtyard" ? "#1b4332" : "#273549";
+    drawGroundQuad(
+      ctx,
+      pz.x,
+      pz.z,
+      pz.w,
+      pz.d,
+      0.38,
+      fill,
+      "rgba(148, 163, 184, 0.35)",
+      width,
+      height,
+      camera,
+      0.7,
+    );
+    if (camera.zoom >= 0.75 && pz.kind !== "loading_bay") {
+      const tp = worldToScreen(
+        pz.x + pz.w * 0.5,
+        pz.z + pz.d * 0.5,
+        3.5 * camera.zoom,
+        width,
+        height,
+        camera,
+      );
+      ctx.beginPath();
+      ctx.arc(tp.x, tp.y, Math.max(2, 3.2 * camera.zoom), 0, Math.PI * 2);
+      ctx.fillStyle = "#22c55e";
+      ctx.fill();
+    }
+  }
+
+  // 5. Ghost Diff Demolished Lots
   for (const lot of removedLots) {
     const pad = 0.25;
     const x = lot.layout_x + pad;
@@ -765,14 +1046,13 @@ export function renderCityScene(args: RenderCitySceneArgs): HitBuilding[] {
     ctx.restore();
   }
 
-  // Index file coordinates for traffic pulses, blast radius & seismic fault lines
   const fileByPath = new Map<string, FileMetric>();
   for (const f of files) {
     fileByPath.set(f.file_path, f);
   }
 
-  // 6. Animated Import Artery Traffic Pulses
-  if (showTraffic && imports.length > 0) {
+  // 6. Animated Import Artery Traffic Pulses (when no sim vehicles or traffic overlay active)
+  if (showTraffic && imports.length > 0 && vehicles.length === 0) {
     ctx.save();
     const maxEdges = Math.min(80, imports.length);
     for (let i = 0; i < maxEdges; i++) {
@@ -814,7 +1094,38 @@ export function renderCityScene(args: RenderCitySceneArgs): HitBuilding[] {
     ctx.restore();
   }
 
-  // Blast radius lookup map
+  // Street-routed Simulation Vehicles
+  if (showTraffic && vehicles.length > 0) {
+    ctx.save();
+    for (const v of vehicles) {
+      const p = worldToScreen(v.x, v.z, 1.5, width, height, camera);
+      const size = Math.max(2.2, (v.type === "cargo_ship" ? 4.8 : 2.8) * camera.zoom);
+      ctx.beginPath();
+      if (v.type === "cargo_ship") {
+        ctx.rect(p.x - size * 1.4, p.y - size * 0.7, size * 2.8, size * 1.4);
+      } else {
+        ctx.arc(p.x, p.y, size, 0, Math.PI * 2);
+      }
+      ctx.fillStyle = v.jammed
+        ? "#ef4444"
+        : v.type === "fire_truck"
+          ? timeSec % 0.4 < 0.2
+            ? "#f43f5e"
+            : "#fef08a"
+          : v.type === "sweeper"
+            ? "#4ade80"
+            : v.type === "crew"
+              ? "#fb923c"
+              : v.type === "cycle_car"
+                ? "#e879f9"
+                : v.type === "cargo_ship"
+                  ? "#fbbf24"
+                  : "#7dd3fc";
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
   const impactedHop = new Map<string, number>();
   if (blastRadius) {
     for (const node of blastRadius.impacted_files) {
@@ -822,19 +1133,25 @@ export function renderCityScene(args: RenderCitySceneArgs): HitBuilding[] {
     }
   }
 
-  // 7. Sort Buildings Back-to-Front (Painter's Algorithm) and Draw!
+  // 7. Sort Buildings Back-to-Front relative to Camera Yaw
+  const yaw = camera.yaw ?? DEFAULT_YAW;
+  const viewSin = Math.sin(yaw);
+  const viewCos = Math.cos(yaw);
   const sortedFiles = [...files].sort((a, b) => {
-    const da = a.layout_x + a.layout_w * 0.5 + (a.layout_z + a.layout_d * 0.5);
-    const db = b.layout_x + b.layout_w * 0.5 + (b.layout_z + b.layout_d * 0.5);
+    const da =
+      (a.layout_x + a.layout_w * 0.5 - WORLD_CENTER_X) * viewSin +
+      (a.layout_z + a.layout_d * 0.5 - WORLD_CENTER_Z) * viewCos;
+    const db =
+      (b.layout_x + b.layout_w * 0.5 - WORLD_CENTER_X) * viewSin +
+      (b.layout_z + b.layout_d * 0.5 - WORLD_CENTER_Z) * viewCos;
     return da - db;
   });
 
   const hits: HitBuilding[] = [];
   for (const file of sortedFiles) {
-    const pad = Math.min(0.45, Math.min(file.layout_w, file.layout_d) * 0.14);
-    const rawW = Math.max(0.9, file.layout_w - pad * 2);
-    const rawD = Math.max(0.9, file.layout_d - pad * 2);
-    // Clamp extreme sliver aspect ratios (> 3.2:1) so buildings keep handsome architectural proportions
+    const pad = Math.min(0.42, Math.min(file.layout_w, file.layout_d) * 0.12);
+    const rawW = Math.max(0.85, file.layout_w - pad * 2);
+    const rawD = Math.max(0.85, file.layout_d - pad * 2);
     const maxRatio = 3.2;
     const bw = rawW > rawD * maxRatio ? rawD * maxRatio : rawW;
     const bd = rawD > rawW * maxRatio ? rawW * maxRatio : rawD;
@@ -886,14 +1203,16 @@ export function renderCityScene(args: RenderCitySceneArgs): HitBuilding[] {
       heightVal,
       palette,
       timeSec,
+      timeOfDay,
       width,
       height,
       camera,
       stroke,
+      fireFiles?.has(file.file_path) ?? false,
+      blackoutFiles?.has(file.file_path) ?? false,
     );
     ctx.restore();
 
-    // Compute tight screen bounding box for fast hit-testing
     const topCenter = worldToScreen(
       bx + bw * 0.5,
       bz + bd * 0.5,
@@ -902,12 +1221,18 @@ export function renderCityScene(args: RenderCitySceneArgs): HitBuilding[] {
       height,
       camera,
     );
-    const p00 = worldToScreen(bx, bz, heightVal * camera.zoom, width, height, camera);
-    const p10 = worldToScreen(bx + bw, bz, heightVal * camera.zoom, width, height, camera);
-    const p11 = worldToScreen(bx + bw, bz + bd, 0, width, height, camera);
-    const p01 = worldToScreen(bx, bz + bd, 0, width, height, camera);
-    const xs = [p00.x, p10.x, p11.x, p01.x];
-    const ys = [p00.y, p10.y, p11.y, p01.y];
+    const corners = [
+      worldToScreen(bx, bz, heightVal * camera.zoom, width, height, camera),
+      worldToScreen(bx + bw, bz, heightVal * camera.zoom, width, height, camera),
+      worldToScreen(bx + bw, bz + bd, heightVal * camera.zoom, width, height, camera),
+      worldToScreen(bx, bz + bd, heightVal * camera.zoom, width, height, camera),
+      worldToScreen(bx, bz, 0, width, height, camera),
+      worldToScreen(bx + bw, bz, 0, width, height, camera),
+      worldToScreen(bx + bw, bz + bd, 0, width, height, camera),
+      worldToScreen(bx, bz + bd, 0, width, height, camera),
+    ];
+    const xs = corners.map((c) => c.x);
+    const ys = corners.map((c) => c.y);
     hits.push({
       file,
       screenX: topCenter.x,
@@ -919,7 +1244,7 @@ export function renderCityScene(args: RenderCitySceneArgs): HitBuilding[] {
     });
   }
 
-  // 8. Dashed Purple Seismic Fault Lines (hidden temporal co-change pairs!)
+  // 8. Dashed Purple Seismic Fault Lines
   const faultSource = blastRadius?.fault_lines?.length
     ? blastRadius.fault_lines
     : selectedFile
@@ -967,7 +1292,7 @@ export function renderCityScene(args: RenderCitySceneArgs): HitBuilding[] {
     ctx.restore();
   }
 
-  // 9. District Name Plaques (floating cleanly above largest districts at comfortable zoom)
+  // 9. District Name Plaques
   if (camera.zoom >= 0.6) {
     ctx.save();
     ctx.textAlign = "center";
@@ -991,6 +1316,23 @@ export function renderCityScene(args: RenderCitySceneArgs): HitBuilding[] {
       ctx.fillRect(center.x - tw * 0.5, center.y - 8, tw, 15);
       ctx.fillStyle = ZONE_GROUND[dist.zone_type]?.border ?? "#e2e8f0";
       ctx.fillText(label, center.x, center.y + 3);
+    }
+    ctx.restore();
+  }
+
+  // 10. Floating Stat Popups (+Health / -Smog / +Velocity)
+  if (floatingPopups.length > 0) {
+    ctx.save();
+    ctx.font = "700 12px Inter, sans-serif";
+    ctx.textAlign = "center";
+    for (const pop of floatingPopups) {
+      const p = worldToScreen(pop.x, pop.z, 26 * camera.zoom, width, height, camera);
+      ctx.globalAlpha = Math.max(0, 1 - pop.progress);
+      ctx.fillStyle = "rgba(2, 6, 23, 0.75)";
+      const tw = ctx.measureText(pop.text).width + 10;
+      ctx.fillRect(p.x - tw * 0.5, p.y - 24 * pop.progress - 11, tw, 16);
+      ctx.fillStyle = pop.color;
+      ctx.fillText(pop.text, p.x, p.y - 24 * pop.progress);
     }
     ctx.restore();
   }

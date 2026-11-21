@@ -9,7 +9,7 @@ import threading
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, contextmanager
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -24,6 +24,7 @@ from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
 from codecity.analyzer.git_history import resolve_git_repo
+from codecity.analyzer.layout import compute_urban_street_grid
 from codecity.analyzer.pipeline import analyze_repository
 from codecity.analyzer.plugins import preview_file_fix
 from codecity.api.exporter import export_static_site, render_grade_badge_svg
@@ -253,6 +254,20 @@ def create_app(
             "cochanges": [c.model_dump(mode="json") for c in bundle["cochanges"]],
             "deps": [dep.model_dump(mode="json") for dep in bundle["deps"]],
         }
+
+    @app.get("/api/repos/{owner}/{repo}/city-grid")
+    def api_city_grid(
+        owner: str,
+        repo: str,
+        snapshot_idx: int = Query(default=0),
+    ) -> dict[str, Any]:
+        with db_lock, open_con() as con:
+            try:
+                bundle = query_snapshot_bundle(con, lake, owner, repo, snapshot_idx)
+            except (KeyError, duckdb.Error) as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+        grid = compute_urban_street_grid(bundle["districts"], bundle["files"])
+        return asdict(grid)
 
     @app.get("/api/repos/{owner}/{repo}/blast-radius")
     def api_blast_radius(

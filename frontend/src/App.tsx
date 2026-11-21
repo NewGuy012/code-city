@@ -2,11 +2,15 @@ import { Building2, FolderGit2, Loader2, Search } from "lucide-react";
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { CityCanvas2D, type FocusTarget } from "./city/CityCanvas2D";
+import { cameraStore, useUnifiedCameraHotkeys } from "./city/cameraStore";
 import type { GhostLot } from "./city/isoRenderer2D";
+import { deriveStreetLinesAndPlazas } from "./city/streetGrid";
 import { AdvisorTicker } from "./components/AdvisorTicker";
+import { CameraControlsHUD } from "./components/CameraControlsHUD";
 import { DataMapBar } from "./components/DataMapBar";
 import { HealthCardModal } from "./components/HealthCardModal";
 import { InspectorDrawer } from "./components/InspectorDrawer";
+import { Minimap2D } from "./components/Minimap2D";
 import { OnboardingTour } from "./components/OnboardingTour";
 import { TimeScrubber } from "./components/TimeScrubber";
 import {
@@ -43,7 +47,27 @@ export function App() {
 
   const [dataMap, setDataMap] = useState<DataMapMode>("living");
   const [viewMode, setViewMode] = useState<"2d" | "3d">("2d");
+  const [showTraffic, setShowTraffic] = useState(true);
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
+
+  useUnifiedCameraHotkeys(viewMode);
+
+  // Cinematic turntable orbit (Preset 5)
+  useEffect(() => {
+    let raf = 0;
+    let last = performance.now();
+    const tick = (now: number) => {
+      const dt = Math.min(0.05, (now - last) / 1000);
+      last = now;
+      const st = cameraStore.getState();
+      if (st.cinematicOrbit) {
+        cameraStore.setState({ yaw: st.yaw + 0.18 * dt }, { cancelTween: false });
+      }
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, []);
   const [blastRadius, setBlastRadius] = useState<BlastRadiusResult | null>(null);
   const [fileDiagnostics, setFileDiagnostics] = useState<LintDiagnostic[]>([]);
   const [fileHistory, setFileHistory] = useState<
@@ -233,6 +257,11 @@ export function App() {
     return bundle.files.find((f) => f.file_path === selectedFile) ?? null;
   }, [bundle, selectedFile]);
 
+  const streetGrid = useMemo(() => {
+    if (!bundle) return { xLines: [], zLines: [], plazas: [] };
+    return deriveStreetLinesAndPlazas(bundle.districts, bundle.files);
+  }, [bundle]);
+
   const handleFocusFile = useCallback(
     (filePath: string) => {
       if (!bundle) return;
@@ -381,6 +410,9 @@ export function App() {
             addedFiles={addedFiles}
             removedLots={removedLots}
             focusTarget={focusTarget}
+            showTraffic={showTraffic}
+            plazas={streetGrid.plazas}
+            streetLines={{ xLines: streetGrid.xLines, zLines: streetGrid.zLines }}
             onSelectFile={setSelectedFile}
           />
         ) : (
@@ -399,6 +431,7 @@ export function App() {
               dataMap={dataMap}
               selectedFile={selectedFile}
               blastRadius={blastRadius}
+              focusTarget={focusTarget}
               onSelectFile={setSelectedFile}
             />
           </Suspense>
@@ -576,10 +609,16 @@ export function App() {
         onClose={() => setSelectedFile(null)}
       />
 
-      {/* Bottom Time-Machine Scrubber */}
+      {/* Bottom HUD: Camera Controls + Time-Machine Scrubber + Radar Minimap */}
       {bundle && snapshots.length > 0 && (
-        <footer className="pointer-events-none absolute inset-x-0 bottom-0 z-20 flex justify-center p-3">
-          <div className="w-full max-w-4xl">
+        <footer className="pointer-events-none absolute inset-x-0 bottom-0 z-20 flex items-end justify-between gap-3 p-3">
+          <CameraControlsHUD
+            viewMode={viewMode}
+            repoKey={activeRepo ? `${activeRepo.owner}/${activeRepo.repo}` : "default"}
+            showTraffic={showTraffic}
+            onToggleTraffic={() => setShowTraffic((v) => !v)}
+          />
+          <div className="min-w-0 flex-1 max-w-3xl">
             <TimeScrubber
               snapshots={snapshots}
               snapshotIdx={snapshotIdx}
@@ -593,6 +632,7 @@ export function App() {
               onTogglePlay={() => setIsPlayingTime((p) => !p)}
             />
           </div>
+          <Minimap2D districts={bundle.districts} files={bundle.files} />
         </footer>
       )}
 

@@ -121,7 +121,7 @@ export function InspectorDrawer({
   return (
     <aside
       data-testid="inspector-drawer"
-      className="sim-panel pointer-events-auto absolute top-28 right-3 bottom-24 z-30 flex w-96 max-w-[calc(100vw-1.5rem)] flex-col overflow-hidden rounded-2xl"
+      className="sim-panel pointer-events-auto absolute top-28 right-3 bottom-24 z-30 flex w-96 max-w-[calc(100vw-1.5rem)] flex-col overflow-hidden rounded-2xl sm:bottom-44"
     >
       {/* Header */}
       <div className="flex items-start justify-between gap-2 border-b border-slate-700/70 px-4 py-3">
