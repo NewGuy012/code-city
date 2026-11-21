@@ -6,8 +6,8 @@
 
 - **2D Isometric SimCity Canvas (Default) + Lazy 3D Skyline Toggle (`2D ↔ 3D`):** Zoned neighborhoods, paved streets with animated traffic pulses, Waterfront Supply Docks for external dependencies, 10 architectural building archetypes, animated construction cranes, lint smog, and solitary lighthouse beacons for Bus Factor = 1.
 - **Polyglot AST & Toolchain Plugins:** Unified **Tree-sitter** core (`Python`, `TypeScript/JS`, `Rust`, `Go`) + `ruff` (`ruff check`, `ruff analyze graph`, `--fix --diff`) + `Bun` toolchain (`bun lint` / `oxlint`, `bun fmt --check`) + `go.mod` & `Cargo.toml`/`Cargo.lock` dependency graphs.
-- **DuckDB 2.0 + DuckLake 1.1 + Quack Lakehouse:** Parallel `git worktree` workers ingest concurrently over **Quack** into nested DuckLake schemas (`repos.<owner>.<repo>`) with `VARIANT` metadata, Data Inlining for live collaborative Mayor Notes, `ducklake_table_changes()` audit feed, and recursive CTE Power-Outage Blast Radius queries.
-- **Two Modes from One Studio:** Live Studio mode (FastAPI + SSE progress + Quack CORS proxy + live `--fix` diff previews) and zero-backend **Static OSS Report Mode** (`DuckDB-Wasm` + Parquet + SVG grade badge + Playwright PNG City Postcard).
+- **DuckDB 2.0 + DuckLake 1.1 + Quack Lakehouse:** Parallel `git worktree` workers ingest concurrently over **Quack** into nested DuckLake schemas (`repos.<owner>.<repo>`) with `VARIANT` metadata, Data Inlining for live collaborative Mayor Notes, `ducklake_table_changes()` audit feed, and client-side `DuckDB-Wasm` recursive CTE Blast Radius queries over Parquet.
+- **Two Modes from One Studio:** Live Studio mode (lean FastAPI control plane with SSE progress, Parquet export, Live Mayor Git branch actions, live `--fix` diff previews, Co-Op sandbox sync, and localhost-restricted Quack CORS proxy) and zero-backend **Static OSS Report Mode** (`DuckDB-Wasm` + Parquet + SVG grade badge + Playwright PNG City Postcard).
 
 ## Quickstart
 
