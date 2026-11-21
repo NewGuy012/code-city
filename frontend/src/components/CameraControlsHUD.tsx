@@ -110,7 +110,9 @@ export function CameraControlsHUD({
 
         <button
           type="button"
-          onClick={() => cameraStore.flyTo({ zoom: Math.min(MAX_ZOOM, cam.zoom * 1.25), durationMs: 220 })}
+          onClick={() =>
+            cameraStore.flyTo({ zoom: Math.min(MAX_ZOOM, cam.zoom * 1.25), durationMs: 220 })
+          }
           title="Zoom In (+)"
           className="rounded-lg p-1 text-slate-300 hover:bg-slate-800 hover:text-white"
         >
@@ -121,7 +123,9 @@ export function CameraControlsHUD({
         </span>
         <button
           type="button"
-          onClick={() => cameraStore.flyTo({ zoom: Math.max(MIN_ZOOM, cam.zoom * 0.8), durationMs: 220 })}
+          onClick={() =>
+            cameraStore.flyTo({ zoom: Math.max(MIN_ZOOM, cam.zoom * 0.8), durationMs: 220 })
+          }
           title="Zoom Out (-)"
           className="rounded-lg p-1 text-slate-300 hover:bg-slate-800 hover:text-white"
         >
@@ -203,7 +207,10 @@ export function CameraControlsHUD({
           })}
         </div>
 
-        <label className="flex items-center gap-1.5 text-[10px] text-slate-300" title="Tilt / Pitch (R / F)">
+        <label
+          className="flex items-center gap-1.5 text-[10px] text-slate-300"
+          title="Tilt / Pitch (R / F)"
+        >
           <span>Pitch</span>
           <input
             type="range"

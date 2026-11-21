@@ -1,4 +1,4 @@
-"""Bake pre-rendered 2D isometric sprite atlases (30 building variants x 4 angles + emissive + props)."""
+"""Bake pre-rendered 2D isometric sprite atlases (30 building variants x 4 angles + emissive)."""
 
 from __future__ import annotations
 
@@ -22,12 +22,6 @@ ARCHETYPES = [
 TIERS = ["low", "mid", "high"]
 ANGLES = ["N", "E", "S", "W"]
 
-CELL_W = 96
-CELL_H = 128
-ANCHOR_X = 48
-ANCHOR_Y = 114
-PROP_SIZE = 64
-
 HTML_PAINTER = r"""
 <!DOCTYPE html>
 <html>
@@ -35,7 +29,6 @@ HTML_PAINTER = r"""
 <body style="margin:0;background:transparent">
 <canvas id="buildings"></canvas>
 <canvas id="emissive"></canvas>
-<canvas id="props"></canvas>
 <script>
 const ARCHETYPES = __ARCHETYPES__;
 const TIERS = __TIERS__;
@@ -305,44 +298,9 @@ for (let ai = 0; ai < ARCHETYPES.length; ai++) {
   }
 }
 
-// Props atlas (6 cols x 3 rows of 64x64)
-const pCanvas = document.getElementById('props');
-pCanvas.width = 6 * 64;
-pCanvas.height = 3 * 64;
-const pCtx = pCanvas.getContext('2d');
-
-function drawTree(px, py, col, r) {
-  pCtx.fillStyle = '#78350f';
-  pCtx.fillRect(px + 30, py + 42, 4, 10);
-  pCtx.fillStyle = col;
-  pCtx.beginPath();
-  pCtx.arc(px + 32, py + 34, r, 0, Math.PI * 2);
-  pCtx.fill();
-  pCtx.fillStyle = '#86efac';
-  pCtx.beginPath();
-  pCtx.arc(px + 29, py + 31, r * 0.45, 0, Math.PI * 2);
-  pCtx.fill();
-}
-drawTree(0, 0, '#16a34a', 11);
-drawTree(64, 0, '#15803d', 10);
-
-// Vehicles (Row 2)
-const vehColors = ['#38bdf8', '#e879f9', '#4ade80', '#f43f5e', '#fb923c', '#fbbf24'];
-vehColors.forEach((vc, idx) => {
-  const vx = idx * 64 + 32;
-  const vy = 2 * 64 + 32;
-  pCtx.fillStyle = vc;
-  pCtx.beginPath();
-  pCtx.roundRect(vx - 11, vy - 6, 22, 12, 4);
-  pCtx.fill();
-  pCtx.fillStyle = '#0f172a';
-  pCtx.fillRect(vx - 4, vy - 4, 8, 8);
-});
-
 window.__ATLAS_DATA__ = {
   buildings: bCanvas.toDataURL('image/png'),
   emissive: eCanvas.toDataURL('image/png'),
-  props: pCanvas.toDataURL('image/png'),
 };
 </script>
 </body>
@@ -373,23 +331,11 @@ def main() -> None:
     for key, fname in [
         ("buildings", "buildings_atlas.png"),
         ("emissive", "buildings_emissive.png"),
-        ("props", "props_atlas.png"),
     ]:
         b64 = data[key].split(",", 1)[1]
         (out_dir / fname).write_bytes(base64.b64decode(b64))
 
-    manifest = {
-        "cellWidth": CELL_W,
-        "cellHeight": CELL_H,
-        "anchorX": ANCHOR_X,
-        "anchorY": ANCHOR_Y,
-        "archetypes": ARCHETYPES,
-        "tiers": TIERS,
-        "angles": ANGLES,
-        "propSize": PROP_SIZE,
-    }
-    (out_dir / "atlas_manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-    print(f"Baked 30-sprite isometric atlas + emissive mask + props into {out_dir}")
+    print(f"Baked 30-sprite isometric atlas + emissive mask into {out_dir}")
 
 
 if __name__ == "__main__":

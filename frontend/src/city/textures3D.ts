@@ -21,7 +21,12 @@ function makeCanvas(w: number, h: number): HTMLCanvasElement {
   return c;
 }
 
-function makeTex(canvas: HTMLCanvasElement, repeatX = 1, repeatY = 1, srgb = true): THREE.CanvasTexture {
+function makeTex(
+  canvas: HTMLCanvasElement,
+  repeatX = 1,
+  repeatY = 1,
+  srgb = true,
+): THREE.CanvasTexture {
   const tex = new THREE.CanvasTexture(canvas);
   tex.wrapS = THREE.RepeatWrapping;
   tex.wrapT = THREE.RepeatWrapping;
@@ -94,12 +99,7 @@ export function getFacadeTextureSet(style: FacadeStyle): FacadeTextureSet | null
       const wh = cellH - 12;
 
       // Reflective glass pane vs matte frame
-      cCtx.fillStyle =
-        style === "glass"
-          ? "#1e3a5f"
-          : style === "stone"
-            ? "#334155"
-            : "#27272a";
+      cCtx.fillStyle = style === "glass" ? "#1e3a5f" : style === "stone" ? "#334155" : "#27272a";
       cCtx.fillRect(wx, wy, ww, wh);
 
       // Glossy low roughness on glass panes

@@ -1,25 +1,45 @@
 import type { MayorToolId } from "./sandboxOverlay";
 
+type ToolSfxNote = [
+  freq: number,
+  dur: number,
+  type: OscillatorType,
+  gain: number,
+  delay: number,
+  endFreq?: number,
+];
+
+const TOOL_SFX: Record<Exclude<MayorToolId, "inspect">, ToolSfxNote[]> = {
+  sweeper: [
+    [520, 0.14, "triangle", 0.06, 0, 880],
+    [1046, 0.16, "sine", 0.05, 0.08],
+  ],
+  splitter: [
+    [240, 0.09, "square", 0.05, 0, 160],
+    [360, 0.12, "triangle", 0.06, 0.11, 540],
+  ],
+  transit_hub: [
+    [440, 0.16, "sine", 0.06, 0],
+    [659.25, 0.22, "sine", 0.06, 0.09],
+  ],
+  proving_park: [
+    [523.25, 0.18, "sine", 0.06, 0],
+    [659.25, 0.18, "sine", 0.05, 0.06],
+    [783.99, 0.24, "sine", 0.05, 0.12],
+  ],
+  co_maintainer: [
+    [587.33, 0.14, "triangle", 0.06, 0],
+    [880, 0.22, "sine", 0.06, 0.08],
+  ],
+  bulldozer: [[110, 0.28, "sawtooth", 0.06, 0, 52]],
+};
+
 class SoundEngine {
   private ctx: AudioContext | null = null;
   private enabled = true;
-  private ambientOn = false;
-  private ambientOsc: OscillatorNode | null = null;
-  private ambientGain: GainNode | null = null;
-
-  isEnabled(): boolean {
-    return this.enabled;
-  }
-
-  isAmbientOn(): boolean {
-    return this.ambientOn;
-  }
 
   setEnabled(val: boolean): void {
     this.enabled = val;
-    if (!val && this.ambientOn) {
-      this.stopAmbient();
-    }
   }
 
   private ensureContext(): AudioContext | null {
@@ -68,30 +88,13 @@ class SoundEngine {
       osc.start(now);
       osc.stop(now + durationSec + 0.02);
     } catch {
-      // Ignore audio errors in headless environments
+      // Headless browsers can reject Web Audio without user gesture
     }
   }
 
   playTool(tool: Exclude<MayorToolId, "inspect">): void {
-    if (tool === "sweeper") {
-      this.tone(520, 0.14, "triangle", 0.06, 0, 880);
-      this.tone(1046, 0.16, "sine", 0.05, 0.08);
-    } else if (tool === "splitter") {
-      this.tone(240, 0.09, "square", 0.05, 0, 160);
-      this.tone(360, 0.12, "triangle", 0.06, 0.11, 540);
-    } else if (tool === "transit_hub") {
-      this.tone(440, 0.16, "sine", 0.06, 0);
-      this.tone(659.25, 0.22, "sine", 0.06, 0.09);
-    } else if (tool === "proving_park") {
-      this.tone(523.25, 0.18, "sine", 0.06, 0);
-      this.tone(659.25, 0.18, "sine", 0.05, 0.06);
-      this.tone(783.99, 0.24, "sine", 0.05, 0.12);
-    } else if (tool === "co_maintainer") {
-      this.tone(587.33, 0.14, "triangle", 0.06, 0);
-      this.tone(880, 0.22, "sine", 0.06, 0.08);
-    } else {
-      // bulldozer rumble
-      this.tone(110, 0.28, "sawtooth", 0.06, 0, 52);
+    for (const args of TOOL_SFX[tool]) {
+      this.tone(...args);
     }
   }
 
@@ -101,52 +104,9 @@ class SoundEngine {
   }
 
   playMilestone(): void {
-    const notes = [523.25, 659.25, 783.99, 1046.5];
-    notes.forEach((n, idx) => {
+    [523.25, 659.25, 783.99, 1046.5].forEach((n, idx) => {
       this.tone(n, 0.24, "triangle", 0.07, idx * 0.09);
     });
-  }
-
-  toggleAmbient(): boolean {
-    if (this.ambientOn) {
-      this.stopAmbient();
-      return false;
-    }
-    const ctx = this.ensureContext();
-    if (!ctx) {
-      this.ambientOn = false;
-      return false;
-    }
-    try {
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.type = "sine";
-      osc.frequency.value = 110;
-      gain.gain.value = 0.018;
-      osc.connect(gain);
-      gain.connect(ctx.destination);
-      osc.start();
-      this.ambientOsc = osc;
-      this.ambientGain = gain;
-      this.ambientOn = true;
-      return true;
-    } catch {
-      this.ambientOn = false;
-      return false;
-    }
-  }
-
-  stopAmbient(): void {
-    try {
-      this.ambientOsc?.stop();
-      this.ambientOsc?.disconnect();
-      this.ambientGain?.disconnect();
-    } catch {
-      // ignore
-    }
-    this.ambientOsc = null;
-    this.ambientGain = null;
-    this.ambientOn = false;
   }
 }
 

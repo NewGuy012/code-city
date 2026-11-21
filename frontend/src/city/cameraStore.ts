@@ -41,8 +41,8 @@ export interface FlyToOptions {
 
 export const WORLD_CENTER_X = 70;
 export const WORLD_CENTER_Z = 52;
-export const DEFAULT_YAW = Math.PI * 0.25; // 45 deg classic SE isometric camera
-export const DEFAULT_PITCH = 35; // maps to exact 2:1 isometric ratio in 2D
+export const DEFAULT_YAW = Math.PI * 0.25; // 45 deg SE isometric camera
+export const DEFAULT_PITCH = 35; // maps to 2:1 isometric ratio in 2D
 export const MIN_ZOOM = 0.35;
 export const MAX_ZOOM = 4.0;
 export const MIN_PITCH = 12;
@@ -59,7 +59,7 @@ function normalizeAngle(rad: number): number {
 
 function shortestAngleDiff(from: number, to: number): number {
   const twoPi = Math.PI * 2;
-  let diff = ((to - from) % twoPi + twoPi) % twoPi;
+  let diff = (((to - from) % twoPi) + twoPi) % twoPi;
   if (diff > Math.PI) diff -= twoPi;
   return diff;
 }
@@ -83,6 +83,13 @@ class CameraStore {
 
   private listeners = new Set<Listener>();
   private tweenRaf: number | null = null;
+  private tweenDest: {
+    targetX: number;
+    targetZ: number;
+    zoom: number;
+    yaw: number;
+    pitch: number;
+  } | null = null;
 
   getState(): UnifiedCameraState {
     return this.state;
@@ -106,6 +113,7 @@ class CameraStore {
       cancelAnimationFrame(this.tweenRaf);
       this.tweenRaf = null;
     }
+    this.tweenDest = null;
   }
 
   setState(patch: Partial<UnifiedCameraState>, options?: { cancelTween?: boolean }): void {
@@ -137,7 +145,6 @@ class CameraStore {
   /** Pan in camera-aligned screen/ground axes: forward (+1 = up/away), right (+1 = right). */
   panRelative(rightAmount: number, forwardAmount: number): void {
     const { yaw } = this.state;
-    // Camera forward projected onto XZ plane is (-sin(yaw), -cos(yaw)); right is (cos(yaw), -sin(yaw))
     const rightX = Math.cos(yaw);
     const rightZ = -Math.sin(yaw);
     const fwdX = -Math.sin(yaw);
@@ -149,7 +156,8 @@ class CameraStore {
   }
 
   rotateCompass(stepDelta: -1 | 1): void {
-    const snappedBase = Math.round((this.state.yaw - DEFAULT_YAW) / (Math.PI / 2));
+    const refYaw = this.tweenDest?.yaw ?? this.state.yaw;
+    const snappedBase = Math.round((refYaw - DEFAULT_YAW) / (Math.PI / 2));
     const targetYaw = DEFAULT_YAW + (snappedBase + stepDelta) * (Math.PI / 2);
     this.flyTo({ yaw: targetYaw, durationMs: 320 });
   }
@@ -159,23 +167,17 @@ class CameraStore {
     return (["N", "E", "S", "W"] as const)[idx];
   }
 
-  getCompassStep(): 0 | 1 | 2 | 3 {
-    return (((Math.round((this.state.yaw - DEFAULT_YAW) / (Math.PI / 2)) % 4) + 4) % 4) as
-      | 0
-      | 1
-      | 2
-      | 3;
-  }
-
   flyTo(opts: FlyToOptions): void {
-    this.cancelTween();
+    const base = this.tweenDest ?? this.state;
     const start = { ...this.state };
-    const endTargetX = opts.targetX ?? start.targetX;
-    const endTargetZ = opts.targetZ ?? start.targetZ;
-    const endZoom = clamp(opts.zoom ?? start.zoom, MIN_ZOOM, MAX_ZOOM);
-    const endYaw = opts.yaw !== undefined ? opts.yaw : start.yaw;
-    const endPitch = clamp(opts.pitch ?? start.pitch, MIN_PITCH, MAX_PITCH);
-    const yawDiff = shortestAngleDiff(start.yaw, normalizeAngle(endYaw));
+    const endTargetX = opts.targetX ?? base.targetX;
+    const endTargetZ = opts.targetZ ?? base.targetZ;
+    const endZoom = clamp(opts.zoom ?? base.zoom, MIN_ZOOM, MAX_ZOOM);
+    const endYaw = normalizeAngle(opts.yaw ?? base.yaw);
+    const endPitch = clamp(opts.pitch ?? base.pitch, MIN_PITCH, MAX_PITCH);
+    this.cancelTween();
+
+    const yawDiff = shortestAngleDiff(start.yaw, endYaw);
     const duration = Math.max(120, opts.durationMs ?? 520);
 
     if (typeof requestAnimationFrame !== "function" || typeof performance === "undefined") {
@@ -192,11 +194,16 @@ class CameraStore {
       return;
     }
 
+    this.tweenDest = {
+      targetX: endTargetX,
+      targetZ: endTargetZ,
+      zoom: endZoom,
+      yaw: endYaw,
+      pitch: endPitch,
+    };
     const t0 = performance.now();
     const step = (now: number) => {
-      const elapsed = now - t0;
-      const u = Math.min(1, elapsed / duration);
-      // Cubic ease-out
+      const u = Math.min(1, (now - t0) / duration);
       const ease = 1 - Math.pow(1 - u, 3);
       this.setState(
         {
@@ -212,6 +219,7 @@ class CameraStore {
         this.tweenRaf = requestAnimationFrame(step);
       } else {
         this.tweenRaf = null;
+        this.tweenDest = null;
       }
     };
     this.tweenRaf = requestAnimationFrame(step);
@@ -292,19 +300,44 @@ class CameraStore {
     const next = order[(order.indexOf(this.state.timeOfDay) + 1) % order.length];
     this.setState({ timeOfDay: next });
   }
-
-  setTimeOfDay(timeOfDay: TimeOfDay): void {
-    this.setState({ timeOfDay });
-  }
 }
 
 export const cameraStore = new CameraStore();
+
+export function useCameraSelector<T>(selector: (state: UnifiedCameraState) => T): T {
+  const [val, setVal] = useState<T>(() => selector(cameraStore.getState()));
+  useEffect(
+    () =>
+      cameraStore.subscribe((next) => {
+        const picked = selector(next);
+        setVal((prev) => (Object.is(prev, picked) ? prev : picked));
+      }),
+    [selector],
+  );
+  return val;
+}
 
 export function useCameraStore(): UnifiedCameraState {
   const [snap, setSnap] = useState<UnifiedCameraState>(() => cameraStore.getState());
   useEffect(() => cameraStore.subscribe(setSnap), []);
   return snap;
 }
+
+const MOVEMENT_KEYS = new Set([
+  "w",
+  "a",
+  "s",
+  "d",
+  "q",
+  "e",
+  "r",
+  "f",
+  "shift",
+  "arrowup",
+  "arrowdown",
+  "arrowleft",
+  "arrowright",
+]);
 
 export function useUnifiedCameraHotkeys(viewMode: "2d" | "3d"): void {
   useEffect(() => {
@@ -322,40 +355,49 @@ export function useUnifiedCameraHotkeys(viewMode: "2d" | "3d"): void {
       const dt = Math.min(0.05, Math.max(0.001, (now - lastTs) / 1000));
       lastTs = now;
 
+      if (pressed.size === 0) {
+        raf = 0;
+        return;
+      }
+
       const cam = cameraStore.getState();
-      if (pressed.size > 0) {
-        const boost = pressed.has("shift") ? 2.3 : 1.0;
-        const speed = (38 / Math.max(0.35, cam.zoom)) * boost * dt;
-        let fwd = 0;
-        let right = 0;
-        if (pressed.has("w") || pressed.has("arrowup")) fwd += 1;
-        if (pressed.has("s") || pressed.has("arrowdown")) fwd -= 1;
-        if (pressed.has("d") || pressed.has("arrowright")) right += 1;
-        if (pressed.has("a") || pressed.has("arrowleft")) right -= 1;
-        if (fwd !== 0 || right !== 0) {
-          cameraStore.panRelative(right * speed, fwd * speed);
-        }
+      const boost = pressed.has("shift") ? 2.3 : 1.0;
+      const speed = (38 / Math.max(0.35, cam.zoom)) * boost * dt;
+      let fwd = 0;
+      let right = 0;
+      if (pressed.has("w") || pressed.has("arrowup")) fwd += 1;
+      if (pressed.has("s") || pressed.has("arrowdown")) fwd -= 1;
+      if (pressed.has("d") || pressed.has("arrowright")) right += 1;
+      if (pressed.has("a") || pressed.has("arrowleft")) right -= 1;
+      if (fwd !== 0 || right !== 0) {
+        cameraStore.panRelative(right * speed, fwd * speed);
+      }
 
-        if (viewMode === "3d") {
-          let yawDelta = 0;
-          if (pressed.has("q")) yawDelta -= 1.6 * dt;
-          if (pressed.has("e")) yawDelta += 1.6 * dt;
-          if (yawDelta !== 0) {
-            cameraStore.setState({ yaw: cam.yaw + yawDelta, cinematicOrbit: false });
-          }
+      if (viewMode === "3d") {
+        let yawDelta = 0;
+        if (pressed.has("q")) yawDelta -= 1.6 * dt;
+        if (pressed.has("e")) yawDelta += 1.6 * dt;
+        if (yawDelta !== 0) {
+          cameraStore.setState({ yaw: cam.yaw + yawDelta, cinematicOrbit: false });
         }
+      }
 
-        let pitchDelta = 0;
-        if (pressed.has("r")) pitchDelta += 36 * dt;
-        if (pressed.has("f")) pitchDelta -= 36 * dt;
-        if (pitchDelta !== 0) {
-          cameraStore.setState({ pitch: cam.pitch + pitchDelta });
-        }
+      let pitchDelta = 0;
+      if (pressed.has("r")) pitchDelta += 36 * dt;
+      if (pressed.has("f")) pitchDelta -= 36 * dt;
+      if (pitchDelta !== 0) {
+        cameraStore.setState({ pitch: cam.pitch + pitchDelta });
       }
 
       raf = requestAnimationFrame(tick);
     };
-    raf = requestAnimationFrame(tick);
+
+    const ensureLoop = () => {
+      if (raf === 0 && pressed.size > 0) {
+        lastTs = performance.now();
+        raf = requestAnimationFrame(tick);
+      }
+    };
 
     const onKeyDown = (e: KeyboardEvent) => {
       if (isTextInput(e.target) || e.metaKey || e.ctrlKey || e.altKey) return;
@@ -370,11 +412,17 @@ export function useUnifiedCameraHotkeys(viewMode: "2d" | "3d"): void {
         return;
       }
       if (key === "=" || key === "+") {
-        cameraStore.flyTo({ zoom: Math.min(MAX_ZOOM, cameraStore.getState().zoom * 1.22), durationMs: 200 });
+        cameraStore.flyTo({
+          zoom: Math.min(MAX_ZOOM, cameraStore.getState().zoom * 1.22),
+          durationMs: 200,
+        });
         return;
       }
       if (key === "-" || key === "_") {
-        cameraStore.flyTo({ zoom: Math.max(MIN_ZOOM, cameraStore.getState().zoom * 0.82), durationMs: 200 });
+        cameraStore.flyTo({
+          zoom: Math.max(MIN_ZOOM, cameraStore.getState().zoom * 0.82),
+          durationMs: 200,
+        });
         return;
       }
       if (key === "0" || key === "home") {
@@ -386,25 +434,24 @@ export function useUnifiedCameraHotkeys(viewMode: "2d" | "3d"): void {
         return;
       }
 
-      if (
-        ["w", "a", "s", "d", "q", "e", "r", "f", "shift", "arrowup", "arrowdown", "arrowleft", "arrowright"].includes(
-          key,
-        )
-      ) {
+      if (MOVEMENT_KEYS.has(key)) {
         pressed.add(key);
+        ensureLoop();
       }
     };
 
     const onKeyUp = (e: KeyboardEvent) => {
       pressed.delete(e.key.toLowerCase());
     };
-    const onBlur = () => pressed.clear();
+    const onBlur = () => {
+      pressed.clear();
+    };
 
     window.addEventListener("keydown", onKeyDown);
     window.addEventListener("keyup", onKeyUp);
     window.addEventListener("blur", onBlur);
     return () => {
-      cancelAnimationFrame(raf);
+      if (raf !== 0) cancelAnimationFrame(raf);
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
       window.removeEventListener("blur", onBlur);

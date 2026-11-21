@@ -6,16 +6,10 @@ import { type RoadGraph, buildRoadGraph, detectImportCycles, findStreetPath } fr
 export type SimSpeed = 0 | 1 | 2 | 3;
 
 export type CityMilestone =
-  | "Frontier Outpost"
-  | "Bustling Harbor Town"
-  | "Civic Metropolis"
-  | "A+ Sunlit Smart City";
+  "Frontier Outpost" | "Bustling Harbor Town" | "Civic Metropolis" | "A+ Sunlit Smart City";
 
 export type ActiveDisasterKind =
-  | "power_outage"
-  | "bus_factor_vacation"
-  | "crunch_storm"
-  | "supply_dock_storm";
+  "power_outage" | "bus_factor_vacation" | "crunch_storm" | "supply_dock_storm";
 
 export interface ActiveDisasterState {
   kind: ActiveDisasterKind;
@@ -49,7 +43,6 @@ export interface SimStateSnapshot {
   vehicles: SimVehicleRender[];
   fireFiles: Set<string>;
   blackoutFiles: Set<string>;
-  brownoutFiles: Set<string>;
   activeDisaster: ActiveDisasterState | null;
   floatingPopups: FloatingStatPopup[];
   milestoneEvent: CityMilestone | null;
@@ -57,7 +50,11 @@ export interface SimStateSnapshot {
 
 const TICKS_PER_SPRINT = 40; // 4 seconds per sprint at 1x (10Hz)
 
-export function computeCityMilestone(healthScore: number, totalFiles: number, happiness: number): CityMilestone {
+export function computeCityMilestone(
+  healthScore: number,
+  totalFiles: number,
+  happiness: number,
+): CityMilestone {
   const composite = healthScore * 0.65 + happiness * 0.35;
   if (composite >= 88 && totalFiles >= 6) return "A+ Sunlit Smart City";
   if (composite >= 76 && totalFiles >= 4) return "Civic Metropolis";
@@ -116,7 +113,7 @@ export class CitySimulationEngine {
   }
 
   private ensureGraph(bundle: CitySnapshotBundle): void {
-    const key = `${bundle.snapshot.snapshot_idx}:${bundle.files.length}:${bundle.imports.length}`;
+    const key = `${bundle.snapshot.commit_sha}:${bundle.snapshot.snapshot_idx}:${bundle.files.length}:${bundle.imports.length}`;
     if (this.graph && this.bundleKey === key) return;
 
     this.bundleKey = key;
@@ -150,16 +147,12 @@ export class CitySimulationEngine {
     const maxCars = Math.min(24, Math.max(6, Math.floor(bundle.files.length * 0.7)));
     for (let i = 0; i < maxCars; i++) {
       const imp = bundle.imports.length > 0 ? bundle.imports[i % bundle.imports.length] : null;
-      const srcFile =
-        (imp && byPath.get(imp.source_file)) || sources[i % sources.length];
-      const dstFile =
-        (imp && byPath.get(imp.target_file)) || targets[(i * 3) % targets.length];
+      const srcFile = (imp && byPath.get(imp.source_file)) || sources[i % sources.length];
+      const dstFile = (imp && byPath.get(imp.target_file)) || targets[(i * 3) % targets.length];
       if (!srcFile || !dstFile) continue;
 
-      const startId =
-        this.graph.fileToNode.get(srcFile.file_path) ?? this.graph.harborNodeIds[0];
-      const goalId =
-        this.graph.fileToNode.get(dstFile.file_path) ?? this.graph.nodes[0]?.id;
+      const startId = this.graph.fileToNode.get(srcFile.file_path) ?? this.graph.harborNodeIds[0];
+      const goalId = this.graph.fileToNode.get(dstFile.file_path) ?? this.graph.nodes[0]?.id;
       if (!startId || !goalId) continue;
 
       const pathOut = findStreetPath(this.graph, startId, goalId);
@@ -271,7 +264,11 @@ export class CitySimulationEngine {
     });
   }
 
-  triggerPowerOutage(sourceFile: string, impactedFiles: string[], greenbeltProtected: Set<string>): void {
+  triggerPowerOutage(
+    sourceFile: string,
+    impactedFiles: string[],
+    greenbeltProtected: Set<string>,
+  ): void {
     this.blackoutFiles.clear();
     this.blackoutFiles.add(sourceFile);
     for (const fp of impactedFiles) {
@@ -380,7 +377,9 @@ export class CitySimulationEngine {
       const complexPenalty = bundle.files.filter((f) => f.max_complexity >= 12).length * 2;
       const firePenalty = this.fireFiles.size * 5;
       const income = Math.max(15, 22 + healthyFeatures * 4);
-      const upkeep = Math.round(totalLint * 0.65 + complexPenalty + firePenalty + this.cycles.length * 4);
+      const upkeep = Math.round(
+        totalLint * 0.65 + complexPenalty + firePenalty + this.cycles.length * 4,
+      );
       this.incomePerSprint = income;
       this.upkeepPerSprint = upkeep;
 
@@ -457,9 +456,13 @@ export class CitySimulationEngine {
 
       // Update Happiness & City Level
       const jammedCount = this.vehicles.filter((v) => v.jammed).length;
-      const greenbeltFiles = bundle.files.filter((f) => f.building_archetype === "park_stadium").length;
+      const greenbeltFiles = bundle.files.filter(
+        (f) => f.building_archetype === "park_stadium",
+      ).length;
       const greenbeltBoost = Math.min(18, greenbeltFiles * 4.5);
-      const smogCount = bundle.files.filter((f) => f.condition_flags?.smog || f.format_drift).length;
+      const smogCount = bundle.files.filter(
+        (f) => f.condition_flags?.smog || f.format_drift,
+      ).length;
       const targetHappiness = Math.max(
         18,
         Math.min(
@@ -537,7 +540,6 @@ export class CitySimulationEngine {
       })),
       fireFiles: new Set(this.fireFiles),
       blackoutFiles: effectiveBlackout,
-      brownoutFiles: new Set(this.brownoutFiles),
       activeDisaster: this.activeDisaster,
       floatingPopups: [...this.floatingPopups],
       milestoneEvent: this.milestoneEvent,

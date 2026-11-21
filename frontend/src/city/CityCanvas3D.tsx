@@ -8,9 +8,8 @@ import {
 } from "@react-three/drei";
 import { Canvas, type ThreeEvent, useFrame, useThree } from "@react-three/fiber";
 import { Bloom, EffectComposer, N8AO } from "@react-three/postprocessing";
-import { Component, type ReactNode, useEffect, useMemo, useRef } from "react";
+import { Component, type ComponentRef, type ReactNode, useEffect, useMemo, useRef } from "react";
 import * as THREE from "three";
-import type { OrbitControls as OrbitControlsImpl } from "three-stdlib";
 
 import type {
   BlastRadiusResult,
@@ -21,14 +20,14 @@ import type {
   ExternalDep,
   FileMetric,
 } from "../types/city";
-import type { FocusTarget } from "./CityCanvas2D";
 import {
   type TimeOfDay,
   WORLD_CENTER_X,
   WORLD_CENTER_Z,
   cameraStore,
-  useCameraStore,
+  useCameraSelector,
 } from "./cameraStore";
+import { vehicleColor } from "./cityTheme";
 import {
   ARCHETYPE_KITS,
   type ArchetypePartSpec,
@@ -52,7 +51,6 @@ interface CityCanvas3DProps {
   dataMap: DataMapMode;
   selectedFile: string | null;
   blastRadius: BlastRadiusResult | null;
-  focusTarget?: FocusTarget | null;
   activeTool?: string;
   vehicles?: SimVehicleRender[];
   fireFiles?: Set<string>;
@@ -66,6 +64,7 @@ interface CityCanvas3DProps {
 const WORLD_CX = WORLD_CENTER_X;
 const WORLD_CZ = WORLD_CENTER_Z;
 const BASE_ORBIT_DISTANCE = 92;
+type OrbitControlsImpl = ComponentRef<typeof OrbitControls>;
 
 class PostprocessingBoundary extends Component<{ children: ReactNode }, { failed: boolean }> {
   state = { failed: false };
@@ -84,40 +83,44 @@ class PostprocessingBoundary extends Component<{ children: ReactNode }, { failed
 function CameraRig3D() {
   const controlsRef = useRef<OrbitControlsImpl | null>(null);
   const { camera, size } = useThree();
-  const camState = useCameraStore();
   const syncingFromStoreRef = useRef(false);
   const userInteractingRef = useRef(false);
 
   useEffect(() => {
-    const controls = controlsRef.current;
-    if (!controls || userInteractingRef.current) return;
+    const applyCam = (camState = cameraStore.getState()) => {
+      const controls = controlsRef.current;
+      if (!controls || userInteractingRef.current) return;
 
-    syncingFromStoreRef.current = true;
-    const tx = camState.targetX - WORLD_CX;
-    const tz = camState.targetZ - WORLD_CZ;
-    controls.target.set(tx, 0, tz);
+      syncingFromStoreRef.current = true;
+      const tx = camState.targetX - WORLD_CX;
+      const tz = camState.targetZ - WORLD_CZ;
+      controls.target.set(tx, 0, tz);
 
-    const pitchRad = (camState.pitch * Math.PI) / 180;
-    const dist = BASE_ORBIT_DISTANCE / Math.max(0.35, camState.zoom);
-    const horiz = dist * Math.cos(pitchRad);
-    const camY = Math.max(1.8, dist * Math.sin(pitchRad));
-    const camX = tx + horiz * Math.sin(camState.yaw);
-    const camZ = tz + horiz * Math.cos(camState.yaw);
+      const pitchRad = (camState.pitch * Math.PI) / 180;
+      const dist = BASE_ORBIT_DISTANCE / Math.max(0.35, camState.zoom);
+      const horiz = dist * Math.cos(pitchRad);
+      const camY = Math.max(1.8, dist * Math.sin(pitchRad));
+      const camX = tx + horiz * Math.sin(camState.yaw);
+      const camZ = tz + horiz * Math.cos(camState.yaw);
 
-    camera.position.set(camX, camY, camZ);
-    if (camera instanceof THREE.OrthographicCamera) {
-      const baseSpan = 65 / Math.max(0.35, camState.zoom);
-      const aspect = Math.max(0.5, size.width / Math.max(1, size.height));
-      camera.left = -baseSpan * aspect;
-      camera.right = baseSpan * aspect;
-      camera.top = baseSpan;
-      camera.bottom = -baseSpan;
-      camera.zoom = 1;
-      camera.updateProjectionMatrix();
-    }
-    controls.update();
-    syncingFromStoreRef.current = false;
-  }, [camState, camera, size.height, size.width]);
+      camera.position.set(camX, camY, camZ);
+      if (camera instanceof THREE.OrthographicCamera) {
+        const baseSpan = 65 / Math.max(0.35, camState.zoom);
+        const aspect = Math.max(0.5, size.width / Math.max(1, size.height));
+        camera.left = -baseSpan * aspect;
+        camera.right = baseSpan * aspect;
+        camera.top = baseSpan;
+        camera.bottom = -baseSpan;
+        camera.zoom = 1;
+        camera.updateProjectionMatrix();
+      }
+      controls.update();
+      syncingFromStoreRef.current = false;
+    };
+
+    applyCam();
+    return cameraStore.subscribe(applyCam);
+  }, [camera, size.height, size.width]);
 
   useFrame(() => {
     if (camera.position.y < 1.8) {
@@ -138,7 +141,10 @@ function CameraRig3D() {
       onStart={() => {
         userInteractingRef.current = true;
         cameraStore.cancelTween();
-        cameraStore.setState({ followVehicleId: null, cinematicOrbit: false }, { cancelTween: false });
+        cameraStore.setState(
+          { followVehicleId: null, cinematicOrbit: false },
+          { cancelTween: false },
+        );
       }}
       onEnd={() => {
         userInteractingRef.current = false;
@@ -219,11 +225,7 @@ function ArchetypePartMesh({
       const sz = part.fixedXZ ?? bd * part.scale[2];
       const sy = part.fixedY ?? h * part.scale[1];
 
-      dummy.position.set(
-        cx + part.offset[0] * bw,
-        part.offset[1] * h,
-        cz + part.offset[2] * bd,
-      );
+      dummy.position.set(cx + part.offset[0] * bw, part.offset[1] * h, cz + part.offset[2] * bd);
       dummy.rotation.set(0, part.rotY ?? 0, 0);
       dummy.scale.set(sx, sy, sz);
       dummy.updateMatrix();
@@ -283,11 +285,7 @@ function ArchetypePartMesh({
         bumpScale={facadeMaps ? 0.08 : 0}
         emissiveMap={facadeMaps?.emissiveMap ?? null}
         emissive={
-          part.role === "beacon"
-            ? part.tintHex ?? "#fde047"
-            : facadeMaps
-              ? "#fef3c7"
-              : "#000000"
+          part.role === "beacon" ? (part.tintHex ?? "#fde047") : facadeMaps ? "#fef3c7" : "#000000"
         }
         emissiveIntensity={emissiveIntensity}
         roughness={part.facadeStyle === "glass" ? 0.25 : 0.65}
@@ -550,30 +548,14 @@ function LiveVehiclesAndFires3D({
   return (
     <group>
       {vehicles.slice(0, 120).map((v) => {
-        const col = v.jammed
-          ? "#ef4444"
-          : v.type === "fire_truck"
-            ? "#f43f5e"
-            : v.type === "sweeper"
-              ? "#4ade80"
-              : v.type === "crew"
-                ? "#fb923c"
-                : v.type === "cycle_car"
-                  ? "#e879f9"
-                  : v.type === "cargo_ship"
-                    ? "#fbbf24"
-                    : "#38bdf8";
+        const col = vehicleColor(v.type, v.jammed);
         return (
           <mesh
             key={v.id}
             position={[v.x - WORLD_CX, v.type === "cargo_ship" ? 0.1 : 0.35, v.z - WORLD_CZ]}
             rotation={[0, -v.heading, 0]}
           >
-            <boxGeometry
-              args={
-                v.type === "cargo_ship" ? [2.8, 0.7, 1.3] : [0.85, 0.45, 1.35]
-              }
-            />
+            <boxGeometry args={v.type === "cargo_ship" ? [2.8, 0.7, 1.3] : [0.85, 0.45, 1.35]} />
             <meshStandardMaterial
               color={col}
               emissive={col}
@@ -670,7 +652,6 @@ export default function CityCanvas3D({
   dataMap,
   selectedFile,
   blastRadius,
-  focusTarget,
   activeTool = "inspect",
   vehicles = [],
   fireFiles,
@@ -680,20 +661,10 @@ export default function CityCanvas3D({
   onSelectFile,
   onToolAction,
 }: CityCanvas3DProps) {
-  const cam = useCameraStore();
+  const projection = useCameraSelector((s) => s.projection);
+  const timeOfDay = useCameraSelector((s) => s.timeOfDay);
 
-  useEffect(() => {
-    if (!focusTarget) return;
-    cameraStore.flyTo({
-      targetX: focusTarget.x,
-      targetZ: focusTarget.z,
-      zoom: focusTarget.zoom ?? Math.max(1.25, cameraStore.getState().zoom),
-      durationMs: 480,
-    });
-  }, [focusTarget]);
-
-  const skyBg =
-    cam.timeOfDay === "golden" ? "#1b1433" : cam.timeOfDay === "night" ? "#030712" : "#071121";
+  const skyBg = timeOfDay === "golden" ? "#1b1433" : timeOfDay === "night" ? "#030712" : "#071121";
 
   return (
     <div data-testid="city-canvas-3d" className="h-full w-full bg-slate-950">
@@ -703,7 +674,7 @@ export default function CityCanvas3D({
         gl={{ antialias: true, powerPreference: "high-performance" }}
         onPointerMissed={() => onSelectFile(null)}
       >
-        {cam.projection === "orthographic" ? (
+        {projection === "orthographic" ? (
           <OrthographicCamera makeDefault near={-400} far={1200} position={[85, 72, 85]} />
         ) : (
           <PerspectiveCamera makeDefault fov={42} near={0.5} far={1000} position={[85, 72, 85]} />
@@ -711,11 +682,11 @@ export default function CityCanvas3D({
 
         <color attach="background" args={[skyBg]} />
         <fog attach="fog" args={[skyBg, 145, 360]} />
-        <ambientLight intensity={cam.timeOfDay === "night" ? 0.35 : 0.6} />
+        <ambientLight intensity={timeOfDay === "night" ? 0.35 : 0.6} />
         <directionalLight
-          position={cam.timeOfDay === "golden" ? [115, 42, 72] : [80, 120, 60]}
-          intensity={cam.timeOfDay === "night" ? 0.48 : cam.timeOfDay === "golden" ? 1.65 : 1.4}
-          color={cam.timeOfDay === "golden" ? "#fbbf24" : "#ffffff"}
+          position={timeOfDay === "golden" ? [115, 42, 72] : [80, 120, 60]}
+          intensity={timeOfDay === "night" ? 0.48 : timeOfDay === "golden" ? 1.65 : 1.4}
+          color={timeOfDay === "golden" ? "#fbbf24" : "#ffffff"}
           castShadow
           shadow-mapSize={[1024, 1024]}
           shadow-camera-left={-90}
@@ -725,27 +696,25 @@ export default function CityCanvas3D({
         />
         <directionalLight position={[-65, 45, -65]} intensity={0.38} color="#38bdf8" />
 
-        {/* Offline procedural HDRI sky reflection environment */}
         <Environment resolution={128}>
           <Lightformer
             form="rect"
-            intensity={cam.timeOfDay === "night" ? 0.4 : 1.6}
-            color={cam.timeOfDay === "golden" ? "#fb923c" : "#bae6fd"}
+            intensity={timeOfDay === "night" ? 0.4 : 1.6}
+            color={timeOfDay === "golden" ? "#fb923c" : "#bae6fd"}
             scale={[40, 15, 1]}
             position={[0, 35, -30]}
             rotation={[Math.PI * 0.35, 0, 0]}
           />
           <Lightformer
             form="ring"
-            intensity={cam.timeOfDay === "night" ? 0.3 : 1.2}
+            intensity={timeOfDay === "night" ? 0.3 : 1.2}
             color="#38bdf8"
             scale={20}
             position={[25, 22, 25]}
           />
         </Environment>
 
-        {/* Animated harbor water & stepped seawall island slab */}
-        <HarborWater3D timeOfDay={cam.timeOfDay} />
+        <HarborWater3D timeOfDay={timeOfDay} />
         <mesh position={[0, -0.35, 0]} receiveShadow>
           <boxGeometry args={[146, 0.55, 110]} />
           <meshStandardMaterial color="#334155" roughness={0.88} />
@@ -763,7 +732,7 @@ export default function CityCanvas3D({
           selectedFile={selectedFile}
           blastRadius={blastRadius}
           blackoutFiles={blackoutFiles}
-          timeOfDay={cam.timeOfDay}
+          timeOfDay={timeOfDay}
           activeTool={activeTool}
           onSelectFile={onSelectFile}
           onToolAction={onToolAction}
@@ -783,7 +752,7 @@ export default function CityCanvas3D({
             <Bloom
               luminanceThreshold={0.9}
               mipmapBlur
-              intensity={cam.timeOfDay === "night" ? 0.95 : cam.timeOfDay === "golden" ? 0.65 : 0.3}
+              intensity={timeOfDay === "night" ? 0.95 : timeOfDay === "golden" ? 0.65 : 0.3}
             />
           </EffectComposer>
         </PostprocessingBoundary>

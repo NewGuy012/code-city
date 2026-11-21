@@ -1,11 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { cameraStore, DEFAULT_YAW } from "./cameraStore";
-import {
-  cameraFromTarget,
-  screenToWorldGround,
-  worldToIso,
-  worldToScreen,
-} from "./isoRenderer2D";
+import { cameraFromTarget, screenToWorldGround, worldToIso, worldToScreen } from "./isoRenderer2D";
 
 describe("isoRenderer2D projection", () => {
   test("worldToScreen and screenToWorldGround invert cleanly", () => {

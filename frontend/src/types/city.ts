@@ -114,7 +114,6 @@ export interface ExternalDep {
   package_name: string;
   version: string;
   is_direct: boolean;
-  parent_package: string | null;
 }
 
 export interface LintDiagnostic {
@@ -154,8 +153,6 @@ export interface RepoRef {
 export interface BlastRadiusNode {
   file_path: string;
   hop_distance: number;
-  district_path: string;
-  building_archetype: BuildingArchetype;
 }
 
 export interface BlastRadiusResult {

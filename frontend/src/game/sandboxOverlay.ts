@@ -108,7 +108,11 @@ export function validateToolOnFile(
 
   if (tool === "co_maintainer") {
     if (file.distinct_authors_90d > 1 && !file.condition_flags?.lone_keeper) {
-      return { ok: false, reason: `${file.file_path} already has ${file.distinct_authors_90d} maintainers.`, cost };
+      return {
+        ok: false,
+        reason: `${file.file_path} already has ${file.distinct_authors_90d} maintainers.`,
+        cost,
+      };
     }
     return { ok: true, cost };
   }
@@ -180,7 +184,10 @@ export function applySandboxOverlay(
     if (act.tool === "sweeper") {
       files = files.map((f) => {
         if (f.file_path !== act.target_path) return f;
-        const reducedHotspot = Math.max(0, Number((f.hotspot_score - f.lint_issue_count * 0.35).toFixed(2)));
+        const reducedHotspot = Math.max(
+          0,
+          Number((f.hotspot_score - f.lint_issue_count * 0.35).toFixed(2)),
+        );
         return {
           ...f,
           lint_issue_count: 0,
@@ -208,8 +215,12 @@ export function applySandboxOverlay(
       const children: FileMetric[] = suffixes.map((suf, idx) => {
         const childPath = `${stem}${suf}${ext}`;
         addedFiles.add(childPath);
-        const pw = horizontal ? (target.layout_w - gap * (partsCount - 1)) / partsCount : target.layout_w;
-        const pd = horizontal ? target.layout_d : (target.layout_d - gap * (partsCount - 1)) / partsCount;
+        const pw = horizontal
+          ? (target.layout_w - gap * (partsCount - 1)) / partsCount
+          : target.layout_w;
+        const pd = horizontal
+          ? target.layout_d
+          : (target.layout_d - gap * (partsCount - 1)) / partsCount;
         const px = horizontal ? target.layout_x + idx * (pw + gap) : target.layout_x;
         const pz = horizontal ? target.layout_z : target.layout_z + idx * (pd + gap);
         return {
@@ -247,7 +258,9 @@ export function applySandboxOverlay(
       const hubPath = `${fA.district_path}/interface_hub_${act.action_seq}${ext}`;
       if (!files.some((f) => f.file_path === hubPath)) {
         const dist = districts.find((d) => d.district_path === fA.district_path);
-        const hx = dist ? dist.bounds_x + dist.bounds_w * 0.5 - 1.5 : fA.layout_x + fA.layout_w + 0.5;
+        const hx = dist
+          ? dist.bounds_x + dist.bounds_w * 0.5 - 1.5
+          : fA.layout_x + fA.layout_w + 0.5;
         const hz = dist ? dist.bounds_z + dist.bounds_d - 3.6 : fA.layout_z;
         addedFiles.add(hubPath);
         files.push({
@@ -279,8 +292,16 @@ export function applySandboxOverlay(
             ),
         );
         imports.push(
-          { snapshot_idx: baseBundle.snapshot.snapshot_idx, source_file: fA.file_path, target_file: hubPath },
-          { snapshot_idx: baseBundle.snapshot.snapshot_idx, source_file: fB.file_path, target_file: hubPath },
+          {
+            snapshot_idx: baseBundle.snapshot.snapshot_idx,
+            source_file: fA.file_path,
+            target_file: hubPath,
+          },
+          {
+            snapshot_idx: baseBundle.snapshot.snapshot_idx,
+            source_file: fB.file_path,
+            target_file: hubPath,
+          },
         );
         cochanges = cochanges.filter(
           (c) =>
@@ -372,7 +393,9 @@ export function applySandboxOverlay(
   const compPenalty = Math.min(20, Math.max(0, avgComp - 4) * 2.2);
   const greenBonus = Math.min(10, testRatio * 30);
   const healthScore = Number(
-    Math.max(15, Math.min(99, 92 - lintPenalty - driftPenalty - compPenalty + greenBonus)).toFixed(1),
+    Math.max(15, Math.min(99, 92 - lintPenalty - driftPenalty - compPenalty + greenBonus)).toFixed(
+      1,
+    ),
   );
   const healthGrade = gradeFromScore(healthScore);
   const cityTitle =
@@ -384,8 +407,10 @@ export function applySandboxOverlay(
 
   districts = districts.map((d) => {
     const members = files.filter((f) => f.district_path === d.district_path);
-    const avgLintD = members.reduce((a, m) => a + m.lint_issue_count, 0) / Math.max(1, members.length);
-    const avgCompD = members.reduce((a, m) => a + m.max_complexity, 0) / Math.max(1, members.length);
+    const avgLintD =
+      members.reduce((a, m) => a + m.lint_issue_count, 0) / Math.max(1, members.length);
+    const avgCompD =
+      members.reduce((a, m) => a + m.max_complexity, 0) / Math.max(1, members.length);
     const avgH = Number(
       Math.max(25, 100 - avgLintD * 4.5 - Math.max(0, avgCompD - 5) * 2.2).toFixed(1),
     );
@@ -437,7 +462,7 @@ export function generateRefactorBlueprintMarkdown(
     "",
     "| Metric | Baseline (HEAD) | Projected Blueprint | Delta |",
     "| :--- | :---: | :---: | :---: |",
-    `| **City Grade** | ${baseS.health_grade} (${baseS.health_score.toFixed(1)}) | **${effS.health_grade}** (${effS.health_score.toFixed(1)}) | ${(effS.health_score - baseS.health_score >= 0 ? "+" : "")}${(effS.health_score - baseS.health_score).toFixed(1)} |`,
+    `| **City Grade** | ${baseS.health_grade} (${baseS.health_score.toFixed(1)}) | **${effS.health_grade}** (${effS.health_score.toFixed(1)}) | ${effS.health_score - baseS.health_score >= 0 ? "+" : ""}${(effS.health_score - baseS.health_score).toFixed(1)} |`,
     `| **Lint Issues** | ${baseS.total_lint_issues} | ${effS.total_lint_issues} | ${effS.total_lint_issues - baseS.total_lint_issues} |`,
     `| **Modules** | ${baseS.total_files} | ${effS.total_files} | ${effS.total_files - baseS.total_files >= 0 ? "+" : ""}${effS.total_files - baseS.total_files} |`,
     "",
@@ -446,7 +471,9 @@ export function generateRefactorBlueprintMarkdown(
   ];
 
   if (active.length === 0) {
-    lines.push("- [ ] No sandbox interventions queued yet. Use Mayor Toolbar tools to plan refactors.");
+    lines.push(
+      "- [ ] No sandbox interventions queued yet. Use Mayor Toolbar tools to plan refactors.",
+    );
   } else {
     active.forEach((act, idx) => {
       const extra = act.secondary_path ? ` ↔ \`${act.secondary_path}\`` : "";

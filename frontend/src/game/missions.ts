@@ -23,11 +23,11 @@ export async function evaluateAdvisorMissions(
 ): Promise<AdvisorMission[]> {
   const snapIdx = effectiveBundle.snapshot.snapshot_idx;
 
-  // Execute real DuckDB-Wasm SQL analytics queries on base snapshot tables
-  const transitSql = `SELECT file_path, max_complexity, hotspot_score FROM file_metrics WHERE snapshot_idx = ${snapIdx} ORDER BY max_complexity DESC, hotspot_score DESC LIMIT 3;`;
-  const airSql = `SELECT COUNT(*) AS smog_files, COALESCE(SUM(lint_issue_count), 0) AS total_lints FROM file_metrics WHERE snapshot_idx = ${snapIdx} AND (lint_issue_count > 0 OR format_drift = true);`;
-  const greenSql = `SELECT COALESCE(SUM(CASE WHEN building_archetype = 'park_stadium' THEN sloc ELSE 0 END), 0) AS park_sloc, COALESCE(SUM(sloc), 1) AS total_sloc FROM file_metrics WHERE snapshot_idx = ${snapIdx};`;
-  const busSql = `SELECT file_path, sloc FROM file_metrics WHERE snapshot_idx = ${snapIdx} AND distinct_authors_90d <= 1 AND sloc >= 40 ORDER BY hotspot_score DESC LIMIT 5;`;
+  // Parameterized DuckDB-Wasm SQL queries over base snapshot tables
+  const transitSql = `SELECT file_path, max_complexity, hotspot_score FROM file_metrics WHERE snapshot_idx = ? ORDER BY max_complexity DESC, hotspot_score DESC LIMIT 3;`;
+  const airSql = `SELECT COUNT(*) AS smog_files, COALESCE(SUM(lint_issue_count), 0) AS total_lints FROM file_metrics WHERE snapshot_idx = ? AND (lint_issue_count > 0 OR format_drift = true);`;
+  const greenSql = `SELECT COALESCE(SUM(CASE WHEN building_archetype = 'park_stadium' THEN sloc ELSE 0 END), 0) AS park_sloc, COALESCE(SUM(sloc), 1) AS total_sloc FROM file_metrics WHERE snapshot_idx = ?;`;
+  const busSql = `SELECT file_path, sloc FROM file_metrics WHERE snapshot_idx = ? AND distinct_authors_90d <= 1 AND sloc >= 40 ORDER BY hotspot_score DESC LIMIT 5;`;
 
   let sqlTopComplex = "";
   let sqlBaseSmog = 0;
@@ -36,10 +36,10 @@ export async function evaluateAdvisorMissions(
 
   try {
     const [tRows, aRows, gRows, bRows] = await Promise.all([
-      client.runReadSql(transitSql),
-      client.runReadSql(airSql),
-      client.runReadSql(greenSql),
-      client.runReadSql(busSql),
+      client.runReadSql(transitSql, [snapIdx]),
+      client.runReadSql(airSql, [snapIdx]),
+      client.runReadSql(greenSql, [snapIdx]),
+      client.runReadSql(busSql, [snapIdx]),
     ]);
     if (tRows[0]) {
       sqlTopComplex = `${String(tRows[0].file_path)} (Cx ${Number(tRows[0].max_complexity)})`;
@@ -62,9 +62,15 @@ export async function evaluateAdvisorMissions(
   const cycles = detectImportCycles(effectiveBundle.imports);
   const monoliths = files.filter((f) => f.sloc > 400 || f.max_complexity > 15);
   const transitRemaining = cycles.length + monoliths.length;
-  const transitTarget = files.find((f) => monoliths.includes(f))?.file_path ?? cycles[0]?.[0] ?? files[0]?.file_path ?? null;
+  const transitTarget =
+    files.find((f) => monoliths.includes(f))?.file_path ??
+    cycles[0]?.[0] ??
+    files[0]?.file_path ??
+    null;
   const transitCompleted = transitRemaining === 0;
-  const transitPct = transitCompleted ? 100 : Math.max(15, Math.round(100 / (1 + transitRemaining)));
+  const transitPct = transitCompleted
+    ? 100
+    : Math.max(15, Math.round(100 / (1 + transitRemaining)));
 
   const smogFiles = files.filter((f) => f.lint_issue_count > 0 || f.format_drift);
   const totalLintNow = files.reduce((acc, f) => acc + f.lint_issue_count, 0);
@@ -75,7 +81,10 @@ export async function evaluateAdvisorMissions(
     : Math.max(8, Math.round(((airDenom - smogFiles.length) / airDenom) * 100));
   const worstSmog = [...smogFiles].sort((a, b) => b.lint_issue_count - a.lint_issue_count)[0];
 
-  const totalSloc = Math.max(1, files.reduce((a, f) => a + f.sloc, 0));
+  const totalSloc = Math.max(
+    1,
+    files.reduce((a, f) => a + f.sloc, 0),
+  );
   const parkSloc = files
     .filter((f) => f.building_archetype === "park_stadium")
     .reduce((a, f) => a + f.sloc, 0);

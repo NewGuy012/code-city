@@ -22,7 +22,6 @@ export interface LoadedSpriteAtlas {
   ready: boolean;
   buildings: HTMLImageElement | null;
   emissive: HTMLImageElement | null;
-  props: HTMLImageElement | null;
 }
 
 class SpriteAtlasManager {
@@ -30,7 +29,6 @@ class SpriteAtlasManager {
     ready: false,
     buildings: null,
     emissive: null,
-    props: null,
   };
   private started = false;
   private tintCanvas: HTMLCanvasElement | null = null;
@@ -41,30 +39,22 @@ class SpriteAtlasManager {
     }
     this.started = true;
 
-    const loadImg = (src: string, onLoad: (img: HTMLImageElement) => void) => {
-      const img = new Image();
-      img.onload = () => onLoad(img);
-      img.src = src;
-    };
-
     let loadedCount = 0;
-    const markReady = () => {
-      loadedCount += 1;
-      if (loadedCount >= 2) {
-        this.state.ready = true;
-      }
+    const loadImg = (src: string, assign: (img: HTMLImageElement) => void) => {
+      const img = new Image();
+      img.onload = () => {
+        assign(img);
+        loadedCount += 1;
+        if (loadedCount >= 2) this.state.ready = true;
+      };
+      img.src = src;
     };
 
     loadImg("./sprites/buildings_atlas.png", (img) => {
       this.state.buildings = img;
-      markReady();
     });
     loadImg("./sprites/buildings_emissive.png", (img) => {
       this.state.emissive = img;
-      markReady();
-    });
-    loadImg("./sprites/props_atlas.png", (img) => {
-      this.state.props = img;
     });
 
     return this.state;

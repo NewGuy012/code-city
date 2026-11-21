@@ -1,7 +1,7 @@
 import { Building2, FolderGit2, Loader2, Search, ShieldAlert } from "lucide-react";
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { CityCanvas2D, type FocusTarget } from "./city/CityCanvas2D";
+import { CityCanvas2D } from "./city/CityCanvas2D";
 import { cameraStore, useUnifiedCameraHotkeys } from "./city/cameraStore";
 import type { GhostLot } from "./city/isoRenderer2D";
 import { deriveStreetLinesAndPlazas } from "./city/streetGrid";
@@ -22,6 +22,8 @@ import {
   CityDataClient,
   type HealthReportData,
   type TourLandmark,
+  buildHealthReport,
+  buildTourLandmarks,
 } from "./data/cityDataClient";
 import { type AdvisorMission, evaluateAdvisorMissions } from "./game/missions";
 import {
@@ -57,6 +59,7 @@ export function App() {
   }
   const sim = simRef.current;
   const [simState, setSimState] = useState<SimStateSnapshot>(() => sim.getSnapshot());
+  const analyzeEsRef = useRef<EventSource | null>(null);
 
   const [isStaticMode, setIsStaticMode] = useState(false);
   const [repos, setRepos] = useState<RepoRef[]>([]);
@@ -87,14 +90,27 @@ export function App() {
 
   useUnifiedCameraHotkeys(viewMode);
 
-  // Cinematic turntable orbit (Preset 5) + Follow Vehicle Cam (Preset 4)
+  // Close SSE streams and DuckDB-Wasm worker on unmount
+  useEffect(() => {
+    return () => {
+      analyzeEsRef.current?.close();
+      void client.close();
+    };
+  }, [client]);
+
+  // Demand-driven RAF for Cinematic Turntable Orbit (Preset 5) & Follow Vehicle Cam (Preset 4)
   useEffect(() => {
     let raf = 0;
     let last = performance.now();
+
     const tick = (now: number) => {
       const dt = Math.min(0.05, (now - last) / 1000);
       last = now;
       const st = cameraStore.getState();
+      if (!st.cinematicOrbit && !st.followVehicleId) {
+        raf = 0;
+        return;
+      }
       if (st.cinematicOrbit) {
         cameraStore.setState({ yaw: st.yaw + 0.18 * dt }, { cancelTween: false });
       } else if (st.followVehicleId) {
@@ -111,20 +127,30 @@ export function App() {
       }
       raf = requestAnimationFrame(tick);
     };
-    raf = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(raf);
+
+    const syncLoop = () => {
+      const st = cameraStore.getState();
+      if ((st.cinematicOrbit || st.followVehicleId) && raf === 0) {
+        last = performance.now();
+        raf = requestAnimationFrame(tick);
+      }
+    };
+
+    syncLoop();
+    const unsub = cameraStore.subscribe(syncLoop);
+    return () => {
+      unsub();
+      if (raf !== 0) cancelAnimationFrame(raf);
+    };
   }, [sim]);
 
-  // Decoupled 10Hz traffic & city-health simulation loop
+  // 10Hz traffic & city-health simulation loop (skips React state updates when paused)
   useEffect(() => {
     if (!effectiveBundle) return;
     setSimState(sim.step(effectiveBundle));
     const timer = setInterval(() => {
       const spd = sim.getSpeed();
-      if (spd === 0) {
-        setSimState(sim.getSnapshot());
-        return;
-      }
+      if (spd === 0) return;
       let next = sim.step(effectiveBundle);
       for (let extra = 1; extra < spd; extra++) {
         next = sim.step(effectiveBundle);
@@ -145,7 +171,6 @@ export function App() {
     }>
   >([]);
   const [annotations, setAnnotations] = useState<Annotation[]>([]);
-  const [focusTarget, setFocusTarget] = useState<FocusTarget | null>(null);
 
   const [isPlayingTime, setIsPlayingTime] = useState(false);
   const [tourStops, setTourStops] = useState<TourLandmark[]>([]);
@@ -167,9 +192,26 @@ export function App() {
   const [soundEnabled, setSoundEnabled] = useState(true);
   const [repoAuthors, setRepoAuthors] = useState<AuthorSummary[]>([]);
 
-  const showToast = useCallback((msg: string) => {
-    setToastMsg(msg);
-  }, []);
+  const showToast = useCallback((msg: string) => setToastMsg(msg), []);
+
+  const flyToLot = useCallback(
+    (lot: {
+      file_path: string;
+      layout_x: number;
+      layout_z: number;
+      layout_w: number;
+      layout_d: number;
+    }) => {
+      setSelectedFile(lot.file_path);
+      cameraStore.flyTo({
+        targetX: lot.layout_x + lot.layout_w * 0.5,
+        targetZ: lot.layout_z + lot.layout_d * 0.5,
+        zoom: Math.max(1.45, cameraStore.getState().zoom),
+        durationMs: 480,
+      });
+    },
+    [],
+  );
 
   // Re-evaluate SQL-driven Advisor Quests when effectiveBundle changes
   useEffect(() => {
@@ -186,7 +228,6 @@ export function App() {
     };
   }, [client, effectiveBundle]);
 
-  // Play milestone fanfare + celebratory popups when city levels up
   useEffect(() => {
     if (!simState.milestoneEvent) return;
     soundEngine.playMilestone();
@@ -218,20 +259,16 @@ export function App() {
       setErrorMsg(null);
       try {
         await client.loadParquetTables(baseUrl, `${owner}/${repo}:${baseUrl}`, force);
-        const snaps = await client.querySnapshots();
-        setSnapshots(snaps);
+        const [snaps, notes, sbx] = await Promise.all([
+          client.querySnapshots(),
+          client.queryAnnotations(),
+          client.querySandboxActions(),
+        ]);
         const latest = snaps[snaps.length - 1]?.snapshot_idx ?? 0;
+        setSnapshots(snaps);
         setSnapshotIdx(latest);
-        const nextBundle = await client.querySnapshotBundle(latest);
-        setBundle(nextBundle);
-        if (snaps.length > 1) {
-          const prevIdx = snaps[snaps.length - 2].snapshot_idx;
-          setPrevBundle(await client.querySnapshotBundle(prevIdx));
-        } else {
-          setPrevBundle(null);
-        }
-        setAnnotations(await client.queryAnnotations());
-        setSandboxActions(await client.querySandboxActions());
+        setAnnotations(notes);
+        setSandboxActions(sbx);
         setPendingTransitStart(null);
         setSelectedFile(null);
         setBlastRadius(null);
@@ -267,7 +304,7 @@ export function App() {
           await loadRepoData(
             first.owner,
             first.repo,
-            `/api/repos/${first.owner}/${first.repo}/parquet`,
+            `/api/repos/${encodeURIComponent(first.owner)}/${encodeURIComponent(first.repo)}/parquet`,
           );
         } else {
           setLoadingMsg(null);
@@ -287,15 +324,17 @@ export function App() {
     };
   }, [client, loadRepoData]);
 
-  // Reload current & previous snapshot bundles when scrubbing time
+  // Load current & previous snapshot bundles whenever active snapshot changes
   useEffect(() => {
     if (!activeRepo || snapshots.length === 0) return;
     let cancelled = false;
     const pos = snapshots.findIndex((s) => s.snapshot_idx === snapshotIdx);
     const prevSnap = pos > 0 ? snapshots[pos - 1] : null;
     Promise.all([
-      client.querySnapshotBundle(snapshotIdx),
-      prevSnap ? client.querySnapshotBundle(prevSnap.snapshot_idx) : Promise.resolve(null),
+      client.querySnapshotBundle(snapshotIdx, snapshots),
+      prevSnap
+        ? client.querySnapshotBundle(prevSnap.snapshot_idx, snapshots)
+        : Promise.resolve(null),
     ])
       .then(([cur, prev]) => {
         if (!cancelled) {
@@ -309,20 +348,17 @@ export function App() {
     };
   }, [activeRepo, client, snapshotIdx, snapshots]);
 
-  // Time-lapse playback loop
   useEffect(() => {
     if (!isPlayingTime || snapshots.length <= 1) return;
     const timer = setInterval(() => {
       setSnapshotIdx((cur) => {
         const pos = snapshots.findIndex((s) => s.snapshot_idx === cur);
-        const nextPos = (pos + 1) % snapshots.length;
-        return snapshots[nextPos].snapshot_idx;
+        return snapshots[(pos + 1) % snapshots.length].snapshot_idx;
       });
     }, 1150);
     return () => clearInterval(timer);
   }, [isPlayingTime, snapshots]);
 
-  // Inspector data: Blast Radius + Diagnostics + Historical Sparklines via DuckDB-Wasm
   useEffect(() => {
     if (!selectedFile || !bundle) {
       setBlastRadius(null);
@@ -349,7 +385,6 @@ export function App() {
     };
   }, [bundle, client, selectedFile]);
 
-  // Ghost diff sets comparing current snapshot vs previous snapshot + sandbox overlay
   const { addedFiles, removedLots } = useMemo(() => {
     const added = new Set<string>(overlayResult?.addedFiles ?? []);
     const removed: GhostLot[] = [...(overlayResult?.demolishedLots ?? [])];
@@ -387,33 +422,18 @@ export function App() {
 
   const handleFocusFile = useCallback(
     (filePath: string) => {
-      if (!effectiveBundle) return;
-      const f = effectiveBundle.files.find((item) => item.file_path === filePath);
-      if (!f) return;
-      setSelectedFile(f.file_path);
-      setFocusTarget({
-        x: f.layout_x + f.layout_w * 0.5,
-        z: f.layout_z + f.layout_d * 0.5,
-        zoom: 1.45,
-        nonce: Date.now(),
-      });
+      const f = effectiveBundle?.files.find((item) => item.file_path === filePath);
+      if (f) flyToLot(f);
     },
-    [effectiveBundle],
+    [effectiveBundle, flyToLot],
   );
 
-  // Multiplayer Co-Op Sandbox Sync over Quack + DuckLake
   useEffect(() => {
     if (!coopSyncEnabled || isStaticMode || !activeRepo) return;
     let cancelled = false;
     const syncOnce = async () => {
-      try {
-        const remote = await client.fetchRemoteSandboxActions(activeRepo.owner, activeRepo.repo);
-        if (!cancelled && Array.isArray(remote)) {
-          setSandboxActions(remote);
-        }
-      } catch {
-        // ignore transient poll errors
-      }
+      const remote = await client.fetchRemoteSandboxActions(activeRepo.owner, activeRepo.repo);
+      if (!cancelled) setSandboxActions(remote);
     };
     void syncOnce();
     const timer = setInterval(() => void syncOnce(), 2500);
@@ -432,7 +452,9 @@ export function App() {
         const check = validateToolOnFile(tool, file, effectiveBundle, null);
         if (!check.ok) {
           setPendingTransitStart(file.file_path);
-          showToast(`Selected ${file.file_path} — click a 2nd building to bridge with Interface Hub`);
+          showToast(
+            `Selected ${file.file_path} — click a 2nd building to bridge with Interface Hub`,
+          );
           return;
         }
       }
@@ -443,7 +465,6 @@ export function App() {
         return;
       }
 
-      const fanIn = effectiveBundle.imports.filter((i) => i.target_file === file.file_path).length;
       if (liveMode && !isStaticMode && activeRepo) {
         let confirmed = true;
         if (tool === "bulldozer") {
@@ -461,7 +482,6 @@ export function App() {
             target_path: file.file_path,
             secondary_path: validation.secondaryPath ?? null,
             district_path: file.district_path,
-            fan_in: fanIn,
             confirm: confirmed,
           });
           showToast(
@@ -498,28 +518,25 @@ export function App() {
       if (coopSyncEnabled && !isStaticMode && activeRepo) {
         const latestAct = nextList[nextList.length - 1];
         if (latestAct) {
-          void client.pushRemoteSandboxAction(activeRepo.owner, activeRepo.repo, latestAct).catch(() => {});
+          void client
+            .pushRemoteSandboxAction(activeRepo.owner, activeRepo.repo, latestAct)
+            .catch(() => {});
         }
       }
 
-      // Dispatch service vehicle & floating feedback popup
       const cx = file.layout_x + file.layout_w * 0.5;
       const cz = file.layout_z + file.layout_d * 0.5;
       sim.dispatchServiceUnit(tool === "sweeper" ? "sweeper" : "crew", file, effectiveBundle);
       sim.addVelocity(-validation.cost);
-      const badge =
-        tool === "sweeper"
-          ? "-Smog +Health"
-          : tool === "proving_park"
-            ? "+Park +Happiness"
-            : tool === "splitter"
-              ? "Split -Congestion"
-              : tool === "transit_hub"
-                ? "+Interface -Cycle"
-                : tool === "co_maintainer"
-                  ? "+Co-Maintainer"
-                  : "-Upkeep";
-      sim.spawnFloatingPopup(cx, cz, badge, tool === "bulldozer" ? "#fda4af" : "#4ade80");
+      const badgeMap: Record<Exclude<MayorToolId, "inspect">, string> = {
+        sweeper: "-Smog +Health",
+        proving_park: "+Park +Happiness",
+        splitter: "Split -Congestion",
+        transit_hub: "+Interface -Cycle",
+        co_maintainer: "+Co-Maintainer",
+        bulldozer: "-Upkeep",
+      };
+      sim.spawnFloatingPopup(cx, cz, badgeMap[tool], tool === "bulldozer" ? "#fda4af" : "#4ade80");
       soundEngine.playTool(tool);
       setSimState(sim.getSnapshot());
       if (!liveMode) {
@@ -574,86 +591,75 @@ export function App() {
     showToast("Sandbox reset to HEAD");
   }, [activeRepo, client, coopSyncEnabled, isStaticMode, showToast]);
 
-  async function handleOpenHealthModal() {
-    if (!bundle || !activeRepo) return;
+  const handleOpenHealthModal = useCallback(() => {
+    const targetBundle = effectiveBundle ?? bundle;
+    if (!targetBundle || !activeRepo) return;
     if (healthModalOpen) {
       setHealthModalOpen(false);
       return;
     }
-    const rep = await client.queryHealthReport(
-      activeRepo.owner,
-      activeRepo.repo,
-      bundle.snapshot.snapshot_idx,
-    );
-    setHealthReport(rep);
+    setHealthReport(buildHealthReport(activeRepo.owner, activeRepo.repo, targetBundle));
     setHealthModalOpen(true);
-  }
-  async function handleStartTour() {
-    if (!bundle) return;
+  }, [activeRepo, bundle, effectiveBundle, healthModalOpen]);
+
+  const handleStartTour = useCallback(() => {
+    const targetBundle = effectiveBundle ?? bundle;
+    if (!targetBundle) return;
     if (tourActive) {
       setTourActive(false);
       return;
     }
-    const stops = await client.queryTourLandmarks(bundle.snapshot.snapshot_idx);
+    const stops = buildTourLandmarks(targetBundle);
     if (stops.length === 0) return;
     setTourStops(stops);
     setTourStep(0);
     setTourActive(true);
     setTourAutoPlay(true);
-    const first = stops[0];
-    setSelectedFile(first.file_path);
-    setFocusTarget({
-      x: first.layout_x + first.layout_w * 0.5,
-      z: first.layout_z + first.layout_d * 0.5,
-      zoom: 1.45,
-      nonce: Date.now(),
-    });
-  }
+    flyToLot(stops[0]);
+  }, [bundle, effectiveBundle, flyToLot, tourActive]);
 
-  function handleSelectTourStep(idx: number) {
-    setTourStep(idx);
-    const stop = tourStops[idx];
-    if (stop) {
-      setSelectedFile(stop.file_path);
-      setFocusTarget({
-        x: stop.layout_x + stop.layout_w * 0.5,
-        z: stop.layout_z + stop.layout_d * 0.5,
-        zoom: 1.45,
-        nonce: Date.now(),
-      });
-    }
-  }
+  const handleSelectTourStep = useCallback(
+    (idx: number) => {
+      setTourStep(idx);
+      const stop = tourStops[idx];
+      if (stop) flyToLot(stop);
+    },
+    [flyToLot, tourStops],
+  );
 
   useEffect(() => {
-    if (!tourActive || !tourAutoPlay || tourStops.length <= 1) return;
+    if (
+      !tourActive ||
+      !tourAutoPlay ||
+      tourStops.length <= 1 ||
+      healthModalOpen ||
+      advisorsOpen ||
+      disastersOpen
+    ) {
+      return;
+    }
     const timer = setInterval(() => {
       setTourStep((prev) => {
         const next = (prev + 1) % tourStops.length;
         const stop = tourStops[next];
-        if (stop) {
-          setSelectedFile(stop.file_path);
-          setFocusTarget({
-            x: stop.layout_x + stop.layout_w * 0.5,
-            z: stop.layout_z + stop.layout_d * 0.5,
-            zoom: 1.45,
-            nonce: Date.now(),
-          });
-        }
+        if (stop) flyToLot(stop);
         return next;
       });
     }, 6500);
     return () => clearInterval(timer);
-  }, [tourActive, tourAutoPlay, tourStops]);
+  }, [advisorsOpen, disastersOpen, flyToLot, healthModalOpen, tourActive, tourAutoPlay, tourStops]);
 
   async function handleAnalyzeSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (!repoInput.trim() || isStaticMode) return;
+    analyzeEsRef.current?.close();
     setErrorMsg(null);
     setAnalyzePct(2);
     setLoadingMsg(`Starting analysis for ${repoInput.trim()}...`);
     try {
       const { job_id, owner, repo } = await client.startAnalyze(repoInput.trim(), 16);
-      const es = new EventSource(`/api/jobs/${job_id}/events`);
+      const es = new EventSource(`/api/jobs/${encodeURIComponent(job_id)}/events`);
+      analyzeEsRef.current = es;
       es.addEventListener("progress", (evt) => {
         const payload = JSON.parse((evt as MessageEvent).data) as {
           stage: string;
@@ -666,14 +672,21 @@ export function App() {
         setAnalyzePct(payload.percent);
         if (payload.stage === "completed") {
           es.close();
+          if (analyzeEsRef.current === es) analyzeEsRef.current = null;
           setAnalyzePct(null);
           void client.fetchRepos().then(setRepos);
           const o = payload.owner ?? owner;
           const r = payload.repo ?? repo;
           setActiveRepo({ owner: o, repo: r });
-          void loadRepoData(o, r, `/api/repos/${o}/${r}/parquet`, true);
+          void loadRepoData(
+            o,
+            r,
+            `/api/repos/${encodeURIComponent(o)}/${encodeURIComponent(r)}/parquet`,
+            true,
+          );
         } else if (payload.stage === "error") {
           es.close();
+          if (analyzeEsRef.current === es) analyzeEsRef.current = null;
           setAnalyzePct(null);
           setLoadingMsg(null);
           setErrorMsg(payload.message);
@@ -681,6 +694,7 @@ export function App() {
       });
       es.onerror = () => {
         es.close();
+        if (analyzeEsRef.current === es) analyzeEsRef.current = null;
       };
     } catch (err) {
       setAnalyzePct(null);
@@ -689,9 +703,29 @@ export function App() {
     }
   }
 
+  const fetchQuackSnippetCb = useCallback(() => {
+    if (!activeRepo) {
+      return Promise.resolve({ quack_uri: null, token: null, proxy_url: "", snippet: "" });
+    }
+    return client.fetchQuackSnippet(activeRepo.owner, activeRepo.repo);
+  }, [activeRepo, client]);
+
+  const fetchAnnotationChangesCb = useCallback(() => {
+    if (!activeRepo) return Promise.resolve([]);
+    return client.fetchAnnotationChanges(activeRepo.owner, activeRepo.repo);
+  }, [activeRepo, client]);
+
+  const triggerExportCb = useCallback(() => {
+    if (!activeRepo) return Promise.reject(new Error("No repository active"));
+    return client.triggerExport(activeRepo.owner, activeRepo.repo);
+  }, [activeRepo, client]);
+
+  const closeHealthModal = useCallback(() => setHealthModalOpen(false), []);
+  const closeAdvisorsModal = useCallback(() => setAdvisorsOpen(false), []);
+  const closeDisastersModal = useCallback(() => setDisastersOpen(false), []);
+
   return (
     <div className="relative h-screen w-screen overflow-hidden bg-slate-950 text-slate-100">
-      {/* Main 2D Isometric or Lazy 3D Skyline Canvas */}
       {effectiveBundle ? (
         viewMode === "2d" ? (
           <CityCanvas2D
@@ -705,7 +739,6 @@ export function App() {
             blastRadius={blastRadius}
             addedFiles={addedFiles}
             removedLots={removedLots}
-            focusTarget={focusTarget}
             showTraffic={showTraffic}
             vehicles={simState.vehicles}
             fireFiles={simState.fireFiles}
@@ -734,7 +767,6 @@ export function App() {
               dataMap={dataMap}
               selectedFile={selectedFile}
               blastRadius={blastRadius}
-              focusTarget={focusTarget}
               vehicles={simState.vehicles}
               fireFiles={simState.fireFiles}
               blackoutFiles={simState.blackoutFiles}
@@ -764,7 +796,7 @@ export function App() {
         </div>
       )}
 
-      {/* Top HUD Header */}
+      {/* Top HUD */}
       <header className="pointer-events-none absolute inset-x-0 top-0 z-20 flex flex-col gap-2 p-3">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="sim-panel pointer-events-auto flex items-center gap-3 rounded-2xl px-3.5 py-2">
@@ -781,7 +813,11 @@ export function App() {
                   const [o, r] = e.target.value.split("/");
                   if (o && r) {
                     setActiveRepo({ owner: o, repo: r });
-                    void loadRepoData(o, r, `/api/repos/${o}/${r}/parquet`);
+                    void loadRepoData(
+                      o,
+                      r,
+                      `/api/repos/${encodeURIComponent(o)}/${encodeURIComponent(r)}/parquet`,
+                    );
                   }
                 }}
                 className="rounded-lg border border-slate-700 bg-slate-900 px-2.5 py-1 text-xs font-medium text-slate-200"
@@ -851,8 +887,8 @@ export function App() {
               onChangeDataMap={setDataMap}
               viewMode={viewMode}
               onToggleViewMode={() => setViewMode((m) => (m === "2d" ? "3d" : "2d"))}
-              onStartTour={() => void handleStartTour()}
-              onOpenHealthModal={() => void handleOpenHealthModal()}
+              onStartTour={handleStartTour}
+              onOpenHealthModal={handleOpenHealthModal}
               tourActive={tourActive}
             />
           </div>
@@ -869,12 +905,7 @@ export function App() {
               onOpenAdvisors={() => setAdvisorsOpen(true)}
               onOpenDisasters={() => {
                 if (!isStaticMode && activeRepo) {
-                  void fetch(`/api/repos/${activeRepo.owner}/${activeRepo.repo}/authors`)
-                    .then((r) => (r.ok ? r.json() : []))
-                    .then((rows: AuthorSummary[]) => {
-                      if (Array.isArray(rows)) setRepoAuthors(rows);
-                    })
-                    .catch(() => {});
+                  void client.fetchAuthors(activeRepo.owner, activeRepo.repo).then(setRepoAuthors);
                 }
                 setDisastersOpen(true);
               }}
@@ -896,7 +927,6 @@ export function App() {
           )}
         </div>
 
-        {/* Active Chaos Disaster Alert Banner */}
         {simState.activeDisaster && !simState.activeDisaster.resolved && (
           <div
             data-testid="active-disaster-banner"
@@ -931,7 +961,6 @@ export function App() {
         )}
       </header>
 
-      {/* Interactive Mayor Toolbar (Left Dock) */}
       {effectiveBundle && (
         <MayorToolbar
           activeTool={activeTool}
@@ -972,7 +1001,6 @@ export function App() {
         />
       )}
 
-      {/* Toast Notification Banner */}
       {toastMsg && (
         <div
           data-testid="mayor-toast"
@@ -982,7 +1010,6 @@ export function App() {
         </div>
       )}
 
-      {/* Guided Onboarding Tour Overlay */}
       {tourActive && (
         <OnboardingTour
           stops={tourStops}
@@ -994,7 +1021,6 @@ export function App() {
         />
       )}
 
-      {/* Building Blueprint Inspector Drawer */}
       <InspectorDrawer
         file={selectedFileMetric}
         blastRadius={blastRadius}
@@ -1023,7 +1049,6 @@ export function App() {
         onClose={() => setSelectedFile(null)}
       />
 
-      {/* Bottom HUD: Camera Controls + Time-Machine Scrubber + Radar Minimap */}
       {bundle && snapshots.length > 0 && (
         <footer className="pointer-events-none absolute inset-x-0 bottom-0 z-20 flex items-end justify-between gap-3 p-3">
           <CameraControlsHUD
@@ -1056,48 +1081,18 @@ export function App() {
         </footer>
       )}
 
-      {/* Shareable Health Report, Quack CLI Snippet & Static Postcard Export Modal */}
       <HealthCardModal
         open={healthModalOpen}
         report={healthReport}
         annotations={annotations}
         isStaticMode={isStaticMode}
-        onFetchQuackSnippet={() => {
-          if (!activeRepo) {
-            return Promise.resolve({
-              quack_uri: null,
-              token: null,
-              proxy_url: "",
-              snippet: "",
-            });
-          }
-          return client.fetchQuackSnippet(activeRepo.owner, activeRepo.repo);
-        }}
-        onFetchAnnotationChanges={() => {
-          if (!activeRepo) return Promise.resolve([]);
-          return client.fetchAnnotationChanges(activeRepo.owner, activeRepo.repo);
-        }}
-        onTriggerExport={async () => {
-          if (!activeRepo) {
-            throw new Error("No repository active");
-          }
-          const resp = await fetch(`/api/repos/${activeRepo.owner}/${activeRepo.repo}/export`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ with_postcard: true }),
-          });
-          if (!resp.ok) throw new Error(`Export failed: ${resp.status}`);
-          return (await resp.json()) as {
-            output_dir: string;
-            badge_url: string;
-            postcard_url: string | null;
-          };
-        }}
+        onFetchQuackSnippet={fetchQuackSnippetCb}
+        onFetchAnnotationChanges={fetchAnnotationChangesCb}
+        onTriggerExport={triggerExportCb}
         onFocusFile={handleFocusFile}
-        onClose={() => setHealthModalOpen(false)}
+        onClose={closeHealthModal}
       />
 
-      {/* 4 Interactive City Advisors & SQL Quests Modal */}
       <AdvisorCouncilModal
         open={advisorsOpen}
         missions={missions}
@@ -1111,17 +1106,15 @@ export function App() {
           showToast(`Quest Completed: ${m.title} (+${m.rewardVelocity} Velocity)`);
         }}
         onFocusFile={handleFocusFile}
-        onClose={() => setAdvisorsOpen(false)}
+        onClose={closeAdvisorsModal}
       />
 
-      {/* 4 Playable Chaos Disasters Modal */}
       <DisastersMenu
         open={disastersOpen}
         bundle={effectiveBundle}
         authors={repoAuthors}
         onTriggerPowerOutage={(targetFile) => {
           if (!effectiveBundle) return;
-          // BFS downstream transitive dependents along effective imports
           const visited = new Set<string>();
           const queue = [targetFile];
           while (queue.length > 0) {
@@ -1164,7 +1157,7 @@ export function App() {
           sim.clearDisaster();
           setSimState(sim.getSnapshot());
         }}
-        onClose={() => setDisastersOpen(false)}
+        onClose={closeDisastersModal}
       />
     </div>
   );

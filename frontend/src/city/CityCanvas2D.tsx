@@ -9,12 +9,7 @@ import type {
   FileImport,
   FileMetric,
 } from "../types/city";
-import {
-  MAX_ZOOM,
-  MIN_ZOOM,
-  cameraStore,
-  useCameraStore,
-} from "./cameraStore";
+import { MAX_ZOOM, MIN_ZOOM, cameraStore } from "./cameraStore";
 import {
   type FloatingStatPopup,
   type GhostLot,
@@ -24,13 +19,6 @@ import {
   renderCityScene,
   screenToWorldGround,
 } from "./isoRenderer2D";
-
-export interface FocusTarget {
-  x: number;
-  z: number;
-  zoom?: number;
-  nonce: number;
-}
 
 interface CityCanvas2DProps {
   districts: District[];
@@ -43,7 +31,6 @@ interface CityCanvas2DProps {
   blastRadius: BlastRadiusResult | null;
   addedFiles: Set<string>;
   removedLots: GhostLot[];
-  focusTarget: FocusTarget | null;
   showTraffic: boolean;
   vehicles?: SimVehicleRender[];
   fireFiles?: Set<string>;
@@ -67,7 +54,6 @@ export function CityCanvas2D({
   blastRadius,
   addedFiles,
   removedLots,
-  focusTarget,
   showTraffic,
   vehicles = [],
   fireFiles,
@@ -83,7 +69,6 @@ export function CityCanvas2D({
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const hitsRef = useRef<HitBuilding[]>([]);
   const hasAutoFitRef = useRef(false);
-  const cam = useCameraStore();
 
   const dragRef = useRef<{
     active: boolean;
@@ -119,22 +104,11 @@ export function CityCanvas2D({
       hasAutoFitRef.current = true;
       const fitZoom = Math.max(
         0.48,
-        Math.min(1.0, Math.min(clientWidth / 1900, clientHeight / 1120) * 1.0),
+        Math.min(1.0, Math.min(clientWidth / 1900, clientHeight / 1120)),
       );
       cameraStore.setState({ zoom: Number(fitZoom.toFixed(2)) }, { cancelTween: false });
     }
   }, []);
-
-  // Fly smoothly to guided tour / advisor / inspector target
-  useEffect(() => {
-    if (!focusTarget) return;
-    cameraStore.flyTo({
-      targetX: focusTarget.x,
-      targetZ: focusTarget.z,
-      zoom: focusTarget.zoom ?? Math.max(1.25, cameraStore.getState().zoom),
-      durationMs: 480,
-    });
-  }, [focusTarget]);
 
   const propsRef = useRef({
     districts,
@@ -199,17 +173,11 @@ export function CityCanvas2D({
           }
 
           const state = cameraStore.getState();
-
-          // Optional screen-edge scroll
           if (state.edgeScrollEnabled && edgeMouseRef.current && !dragRef.current.active) {
             const { x: mx, y: my } = edgeMouseRef.current;
             const margin = 28;
-            let right = 0;
-            let fwd = 0;
-            if (mx < margin) right -= 1;
-            else if (mx > w - margin) right += 1;
-            if (my < margin) fwd += 1;
-            else if (my > h - margin) fwd -= 1;
+            const right = mx < margin ? -1 : mx > w - margin ? 1 : 0;
+            const fwd = my < margin ? 1 : my > h - margin ? -1 : 0;
             if (right !== 0 || fwd !== 0) {
               const spd = (32 / Math.max(0.4, state.zoom)) * dt;
               cameraStore.panRelative(right * spd, fwd * spd);
@@ -264,6 +232,48 @@ export function CityCanvas2D({
     };
     raf = requestAnimationFrame(frame);
     return () => cancelAnimationFrame(raf);
+  }, []);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      const state = cameraStore.getState();
+
+      if (!e.ctrlKey && (Math.abs(e.deltaX) > 2 || e.shiftKey)) {
+        const panSpeed = 0.08 / Math.max(0.35, state.zoom);
+        cameraStore.panRelative(e.deltaX * panSpeed, -e.deltaY * panSpeed);
+        return;
+      }
+
+      const step = e.ctrlKey ? Math.exp(-e.deltaY * 0.01) : e.deltaY < 0 ? 1.12 : 0.89;
+      const nextZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, state.zoom * step));
+      const rect = canvas.getBoundingClientRect();
+      const lx = e.clientX - rect.left;
+      const ly = e.clientY - rect.top;
+      const beforePt = screenToWorldGround(
+        lx,
+        ly,
+        rect.width,
+        rect.height,
+        cameraFromTarget(state.targetX, state.targetZ, state.zoom, state.yaw, state.pitch),
+      );
+      const afterPt = screenToWorldGround(
+        lx,
+        ly,
+        rect.width,
+        rect.height,
+        cameraFromTarget(state.targetX, state.targetZ, nextZoom, state.yaw, state.pitch),
+      );
+      cameraStore.setState({
+        zoom: nextZoom,
+        targetX: state.targetX + (beforePt.x - afterPt.x),
+        targetZ: state.targetZ + (beforePt.z - afterPt.z),
+      });
+    };
+    canvas.addEventListener("wheel", onWheel, { passive: false });
+    return () => canvas.removeEventListener("wheel", onWheel);
   }, []);
 
   function findHitAt(clientX: number, clientY: number): HitBuilding | null {
@@ -382,58 +392,6 @@ export function CityCanvas2D({
     }
   }
 
-  function handleWheel(e: React.WheelEvent<HTMLCanvasElement>) {
-    e.preventDefault();
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const state = cameraStore.getState();
-
-    // Two-finger trackpad horizontal pan or Shift+wheel pan
-    if (!e.ctrlKey && (Math.abs(e.deltaX) > 2 || e.shiftKey)) {
-      const panSpeed = 0.08 / Math.max(0.35, state.zoom);
-      cameraStore.panRelative(e.deltaX * panSpeed, -e.deltaY * panSpeed);
-      return;
-    }
-
-    // Pinch-to-zoom (ctrlKey) or standard vertical scroll zoom toward cursor
-    const step = e.ctrlKey ? Math.exp(-e.deltaY * 0.01) : e.deltaY < 0 ? 1.12 : 0.89;
-    const nextZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, state.zoom * step));
-    const rect = canvas.getBoundingClientRect();
-    const camBefore = cameraFromTarget(
-      state.targetX,
-      state.targetZ,
-      state.zoom,
-      state.yaw,
-      state.pitch,
-    );
-    const beforePt = screenToWorldGround(
-      e.clientX - rect.left,
-      e.clientY - rect.top,
-      rect.width,
-      rect.height,
-      camBefore,
-    );
-    const camAfter = cameraFromTarget(
-      state.targetX,
-      state.targetZ,
-      nextZoom,
-      state.yaw,
-      state.pitch,
-    );
-    const afterPt = screenToWorldGround(
-      e.clientX - rect.left,
-      e.clientY - rect.top,
-      rect.width,
-      rect.height,
-      camAfter,
-    );
-    cameraStore.setState({
-      zoom: nextZoom,
-      targetX: state.targetX + (beforePt.x - afterPt.x),
-      targetZ: state.targetZ + (beforePt.z - afterPt.z),
-    });
-  }
-
   return (
     <div ref={containerRef} className="relative h-full w-full overflow-hidden">
       <canvas
@@ -449,10 +407,8 @@ export function CityCanvas2D({
           setHoveredHit(null);
           edgeMouseRef.current = null;
         }}
-        onWheel={handleWheel}
       />
 
-      {/* Hover Tooltip */}
       {hoveredHit && (
         <div
           className="pointer-events-none absolute z-20 max-w-xs rounded-xl border border-slate-600/50 bg-slate-900/95 px-3 py-2 text-xs shadow-xl backdrop-blur"
@@ -488,7 +444,8 @@ export function CityCanvas2D({
             </div>
           )}
           <div className="mt-1 text-[10px] text-slate-400">
-            Heading {cameraStore.getCompassLabel()} · Pitch {Math.round(cam.pitch)}°
+            Heading {cameraStore.getCompassLabel()} · Pitch{" "}
+            {Math.round(cameraStore.getState().pitch)}°
           </div>
         </div>
       )}

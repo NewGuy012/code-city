@@ -1,13 +1,11 @@
 import type {
   BlastRadiusResult,
-  BuildingArchetype,
   CochangePair,
   DataMapMode,
   District,
   ExternalDep,
   FileImport,
   FileMetric,
-  ZoneType,
 } from "../types/city";
 import {
   DEFAULT_PITCH,
@@ -16,6 +14,13 @@ import {
   WORLD_CENTER_X,
   WORLD_CENTER_Z,
 } from "./cameraStore";
+import {
+  type ShadePalette,
+  ZONE_PALETTES,
+  buildingPalette,
+  computeBuildingHeight,
+  vehicleColor,
+} from "./cityTheme";
 import {
   ATLAS_ANCHOR_X,
   ATLAS_ANCHOR_Y,
@@ -83,8 +88,6 @@ export interface RenderCitySceneArgs {
   plazas?: Array<{ x: number; z: number; w: number; d: number; kind: string }>;
   streetLines?: { xLines: number[]; zLines: number[] };
   floatingPopups?: FloatingStatPopup[];
-  /** Optional hook allowing sprite atlas drawing in Phase B+ */
-  drawSpriteOverride?: boolean;
 }
 
 export interface HitBuilding {
@@ -200,107 +203,6 @@ export function screenToWorldGround(
     x: dx + WORLD_CENTER_X,
     z: dz + WORLD_CENTER_Z,
   };
-}
-
-interface ShadePalette {
-  roof: string;
-  left: string;
-  right: string;
-  accent: string;
-}
-
-const ZONE_GROUND: Record<ZoneType, { fill: string; border: string; label: string }> = {
-  harbor_gates: { fill: "#18334e", border: "#38bdf8", label: "Harbor & Gates" },
-  downtown_core: { fill: "#1e293b", border: "#fbbf24", label: "Downtown Core" },
-  vaults_reservoir: { fill: "#28263b", border: "#a78bfa", label: "Vaults & Reservoir" },
-  industrial_quarter: { fill: "#2b251c", border: "#f97316", label: "Industrial Quarter" },
-  gallery_storefront: { fill: "#1d2d44", border: "#f472b6", label: "Gallery District" },
-  civic_utilities: { fill: "#1a2f35", border: "#2dd4bf", label: "Civic & Utilities" },
-  greenbelt_parks: { fill: "#153625", border: "#4ade80", label: "Greenbelt Parks" },
-  supply_docks: { fill: "#172b3e", border: "#60a5fa", label: "Supply Docks" },
-};
-
-const ARCHETYPE_PALETTES: Record<BuildingArchetype, ShadePalette> = {
-  grand_terminal: { roof: "#38bdf8", left: "#0284c7", right: "#075985", accent: "#fef08a" },
-  city_hall: { roof: "#fde68a", left: "#d97706", right: "#92400e", accent: "#fffbeb" },
-  archive_vault: { roof: "#cbd5e1", left: "#94a3b8", right: "#475569", accent: "#a78bfa" },
-  twin_silos: { roof: "#a5b4fc", left: "#6366f1", right: "#3730a3", accent: "#e0e7ff" },
-  factory: { roof: "#fdba74", left: "#ea580c", right: "#9a3412", accent: "#fed7aa" },
-  office_tower: { roof: "#93c5fd", left: "#3b82f6", right: "#1e40af", accent: "#dbeafe" },
-  glass_pavilion: { roof: "#67e8f9", left: "#06b6d4", right: "#155e75", accent: "#f472b6" },
-  watchtower: { roof: "#5eead4", left: "#0d9488", right: "#115e59", accent: "#99f6e4" },
-  civic_kiosk: { roof: "#94a3b8", left: "#64748b", right: "#334155", accent: "#e2e8f0" },
-  park_stadium: { roof: "#4ade80", left: "#16a34a", right: "#14532d", accent: "#bbf7d0" },
-};
-
-const LANGUAGE_PALETTES: Record<string, ShadePalette> = {
-  python: { roof: "#60a5fa", left: "#2563eb", right: "#1e3a8a", accent: "#fde047" },
-  typescript: { roof: "#fde047", left: "#eab308", right: "#854d0e", accent: "#fef9c3" },
-  javascript: { roof: "#fcd34d", left: "#d97706", right: "#78350f", accent: "#fef3c7" },
-  rust: { roof: "#fdba74", left: "#ea580c", right: "#7c2d12", accent: "#ffedd5" },
-  go: { roof: "#67e8f9", left: "#06b6d4", right: "#155e75", accent: "#cffafe" },
-  other: { roof: "#cbd5e1", left: "#64748b", right: "#334155", accent: "#f1f5f9" },
-};
-
-export function buildingPalette(file: FileMetric, dataMap: DataMapMode): ShadePalette {
-  if (dataMap === "living") {
-    return ARCHETYPE_PALETTES[file.building_archetype] ?? ARCHETYPE_PALETTES.office_tower;
-  }
-  if (dataMap === "languages") {
-    return LANGUAGE_PALETTES[file.language] ?? LANGUAGE_PALETTES.other;
-  }
-  if (dataMap === "hotspots") {
-    if (file.hotspot_score >= 16) {
-      return { roof: "#fca5a5", left: "#ef4444", right: "#991b1b", accent: "#fef2f2" };
-    }
-    if (file.hotspot_score >= 6) {
-      return { roof: "#fdba74", left: "#f97316", right: "#9a3412", accent: "#fff7ed" };
-    }
-    if (file.hotspot_score >= 1.5) {
-      return { roof: "#fde68a", left: "#eab308", right: "#854d0e", accent: "#fefce8" };
-    }
-    return { roof: "#64748b", left: "#475569", right: "#1e293b", accent: "#94a3b8" };
-  }
-  if (dataMap === "pollution") {
-    const debt = file.lint_issue_count + (file.format_drift ? 2 : 0);
-    if (debt >= 5) {
-      return { roof: "#e879f9", left: "#a855f7", right: "#581c87", accent: "#fae8ff" };
-    }
-    if (debt >= 1) {
-      return { roof: "#fcd34d", left: "#d97706", right: "#78350f", accent: "#fef3c7" };
-    }
-    return { roof: "#6ee7b7", left: "#10b981", right: "#065f46", accent: "#d1fae5" };
-  }
-  if (dataMap === "bus_factor") {
-    if (file.distinct_authors_90d <= 1) {
-      return file.condition_flags?.lone_keeper
-        ? { roof: "#fda4af", left: "#e11d48", right: "#881337", accent: "#ffe4e6" }
-        : { roof: "#fde047", left: "#ca8a04", right: "#713f12", accent: "#fef9c3" };
-    }
-    if (file.distinct_authors_90d === 2) {
-      return { roof: "#93c5fd", left: "#3b82f6", right: "#1e3a8a", accent: "#dbeafe" };
-    }
-    return { roof: "#5eead4", left: "#0d9488", right: "#134e4a", accent: "#ccfbf1" };
-  }
-  return file.format_drift
-    ? { roof: "#f0abfc", left: "#c026d3", right: "#701a75", accent: "#fdf4ff" }
-    : { roof: "#7dd3fc", left: "#0284c7", right: "#0c4a6e", accent: "#e0f2fe" };
-}
-
-export function computeBuildingHeight(file: FileMetric): number {
-  if (file.building_archetype === "park_stadium") {
-    return 6;
-  }
-  const slocFactor = Math.log2(Math.max(8, file.sloc)) * 4.2;
-  const compFactor = Math.min(26, file.max_complexity * 2.1);
-  const symbolFactor = Math.min(12, file.symbol_count * 0.9);
-  const roleBoost =
-    file.building_archetype === "city_hall"
-      ? 14
-      : file.building_archetype === "grand_terminal"
-        ? 8
-        : 0;
-  return Math.max(12, Math.min(86, slocFactor + compFactor + symbolFactor + roleBoost));
 }
 
 function drawQuad(
@@ -420,19 +322,7 @@ function drawCastShadow(
   const sz = bz + bd * 0.12 + height * shadowReach * 0.55;
   ctx.save();
   ctx.globalAlpha *= timeOfDay === "night" ? 0.22 : 0.32;
-  drawGroundQuad(
-    ctx,
-    sx,
-    sz,
-    bw,
-    bd,
-    0.35,
-    "#020617",
-    null,
-    wScreen,
-    hScreen,
-    cam,
-  );
+  drawGroundQuad(ctx, sx, sz, bw, bd, 0.35, "#020617", null, wScreen, hScreen, cam);
   ctx.restore();
 }
 
@@ -507,13 +397,7 @@ function drawConditionSignals(
       const flicker = Math.sin(timeSec * 9 + i * 1.9 + bx) * 3.2 * zoom;
       const fy = roofCenter.y - (4 + ((timeSec * 14 + i * 5) % 14)) * zoom;
       ctx.beginPath();
-      ctx.arc(
-        roofCenter.x + flicker,
-        fy,
-        Math.max(2.2, (5 - i * 0.8) * zoom),
-        0,
-        Math.PI * 2,
-      );
+      ctx.arc(roofCenter.x + flicker, fy, Math.max(2.2, (5 - i * 0.8) * zoom), 0, Math.PI * 2);
       ctx.fillStyle = i % 2 === 0 ? "rgba(249, 115, 22, 0.86)" : "rgba(250, 204, 21, 0.78)";
       ctx.fill();
     }
@@ -546,11 +430,9 @@ function drawBuildingDetails(
 
   // Try pre-rendered 30-sprite isometric atlas when ready & in isometric pitch range
   const atlas = spriteAtlas.ensureLoaded();
-  const compassStep = ((((Math.round(((cam.yaw ?? DEFAULT_YAW) - DEFAULT_YAW) / (Math.PI / 2)) % 4) + 4) % 4) as
-    | 0
-    | 1
-    | 2
-    | 3);
+  const compassStep = (((Math.round(((cam.yaw ?? DEFAULT_YAW) - DEFAULT_YAW) / (Math.PI / 2)) % 4) +
+    4) %
+    4) as 0 | 1 | 2 | 3;
   const canUseSprite =
     atlas.ready &&
     atlas.buildings !== null &&
@@ -691,7 +573,7 @@ function drawBuildingDetails(
     const vx = Math.sin(yaw) >= 0 ? bx + bw : bx;
     const vz = Math.cos(yaw) >= 0 ? bz + bd : bz;
     for (let fl = 1; fl < floors; fl++) {
-      const fy = (height * (fl / floors)) * zoom;
+      const fy = height * (fl / floors) * zoom;
       const pA = worldToScreen(bx + bw * 0.14, vz, fy, wScreen, hScreen, cam);
       const pB = worldToScreen(bx + bw * 0.86, vz, fy, wScreen, hScreen, cam);
       ctx.beginPath();
@@ -1045,7 +927,9 @@ export function renderCityScene(args: RenderCitySceneArgs): HitBuilding[] {
           const sig = worldToScreen(ix + 1.2, iz + 1.2, 2.2 * camera.zoom, width, height, camera);
           ctx.beginPath();
           ctx.arc(sig.x, sig.y, Math.max(1.2, 1.8 * camera.zoom), 0, Math.PI * 2);
-          ctx.fillStyle = (phase ? (xi + zi) % 2 === 0 : (xi + zi) % 2 === 1) ? "#4ade80" : "#ef4444";
+          ctx.fillStyle = (phase ? (xi + zi) % 2 === 0 : (xi + zi) % 2 === 1)
+            ? "#4ade80"
+            : "#ef4444";
           ctx.fill();
         }
       }
@@ -1103,7 +987,7 @@ export function renderCityScene(args: RenderCitySceneArgs): HitBuilding[] {
 
   // 4. Concrete Sidewalk Plates & Zoned District Neighborhoods
   for (const dist of districts) {
-    const zStyle = ZONE_GROUND[dist.zone_type] ?? ZONE_GROUND.downtown_core;
+    const zStyle = ZONE_PALETTES[dist.zone_type] ?? ZONE_PALETTES.downtown_core;
     drawGroundQuad(
       ctx,
       dist.bounds_x - 0.35,
@@ -1254,21 +1138,7 @@ export function renderCityScene(args: RenderCitySceneArgs): HitBuilding[] {
       } else {
         ctx.arc(p.x, p.y, size, 0, Math.PI * 2);
       }
-      ctx.fillStyle = v.jammed
-        ? "#ef4444"
-        : v.type === "fire_truck"
-          ? timeSec % 0.4 < 0.2
-            ? "#f43f5e"
-            : "#fef08a"
-          : v.type === "sweeper"
-            ? "#4ade80"
-            : v.type === "crew"
-              ? "#fb923c"
-              : v.type === "cycle_car"
-                ? "#e879f9"
-                : v.type === "cargo_ship"
-                  ? "#fbbf24"
-                  : "#7dd3fc";
+      ctx.fillStyle = vehicleColor(v.type, v.jammed, timeSec % 0.4 >= 0.2);
       ctx.fill();
     }
     ctx.restore();
@@ -1463,7 +1333,7 @@ export function renderCityScene(args: RenderCitySceneArgs): HitBuilding[] {
       const tw = ctx.measureText(label).width + 10;
       ctx.fillStyle = "rgba(7, 11, 20, 0.72)";
       ctx.fillRect(center.x - tw * 0.5, center.y - 8, tw, 15);
-      ctx.fillStyle = ZONE_GROUND[dist.zone_type]?.border ?? "#e2e8f0";
+      ctx.fillStyle = ZONE_PALETTES[dist.zone_type]?.border ?? "#e2e8f0";
       ctx.fillText(label, center.x, center.y + 3);
     }
     ctx.restore();

@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 
-import type { District, FileMetric, ZoneType } from "../types/city";
+import type { District, FileMetric } from "../types/city";
+import { ZONE_PALETTES } from "../city/cityTheme";
 import { cameraStore, useCameraStore } from "../city/cameraStore";
 import type { SimVehicleRender } from "../city/isoRenderer2D";
 
@@ -11,17 +12,6 @@ interface Minimap2DProps {
   fireFiles?: Set<string>;
   blackoutFiles?: Set<string>;
 }
-
-const ZONE_COLORS: Record<ZoneType, string> = {
-  harbor_gates: "#38bdf8",
-  downtown_core: "#fbbf24",
-  vaults_reservoir: "#a78bfa",
-  industrial_quarter: "#f97316",
-  gallery_storefront: "#f472b6",
-  civic_utilities: "#2dd4bf",
-  greenbelt_parks: "#4ade80",
-  supply_docks: "#60a5fa",
-};
 
 const MAP_W = 176;
 const MAP_H = 128;
@@ -63,7 +53,7 @@ export function Minimap2D({
 
     // Districts
     for (const d of districts) {
-      const col = ZONE_COLORS[d.zone_type] ?? "#94a3b8";
+      const col = ZONE_PALETTES[d.zone_type]?.border ?? "#94a3b8";
       ctx.fillStyle = `${col}26`;
       ctx.strokeStyle = `${col}88`;
       ctx.lineWidth = 0.8;

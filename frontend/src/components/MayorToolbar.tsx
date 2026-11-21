@@ -14,7 +14,6 @@ import {
   Trees,
   Undo2,
   UserPlus,
-  X,
 } from "lucide-react";
 import { useState } from "react";
 
@@ -25,6 +24,7 @@ import {
   TOOL_COSTS,
   generateRefactorBlueprintMarkdown,
 } from "../game/sandboxOverlay";
+import { ModalShell } from "./ModalShell";
 
 interface MayorToolbarProps {
   activeTool: MayorToolId;
@@ -213,7 +213,9 @@ export function MayorToolbar({
               }`}
             >
               <span className="flex items-center gap-1.5">
-                <Icon className={`h-3.5 w-3.5 ${active ? t.accent : "text-slate-400 group-hover:text-slate-200"}`} />
+                <Icon
+                  className={`h-3.5 w-3.5 ${active ? t.accent : "text-slate-400 group-hover:text-slate-200"}`}
+                />
                 <span className="hidden text-[11px] font-medium md:inline">{t.label}</span>
               </span>
               {cost !== null && (
@@ -285,41 +287,17 @@ export function MayorToolbar({
         </button>
       </aside>
 
-      {/* Refactor Blueprint Modal */}
-      {blueprintOpen && (
-        <div
-          data-testid="blueprint-modal"
-          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/75 p-4 backdrop-blur-sm"
-        >
-          <div className="sim-panel flex max-h-[85vh] w-full max-w-2xl flex-col overflow-hidden rounded-3xl">
-            <div className="flex items-center justify-between border-b border-slate-700/70 px-6 py-4">
-              <div className="flex items-center gap-2">
-                <FileText className="h-5 w-5 text-amber-400" />
-                <div>
-                  <h2 className="text-base font-bold text-white">
-                    Mayor&apos;s Refactor Blueprint
-                  </h2>
-                  <p className="text-xs text-slate-400">
-                    Markdown checklist &amp; GitHub Issues plan from DuckDB-Wasm sandbox_actions
-                  </p>
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={() => setBlueprintOpen(false)}
-                className="rounded-xl p-1.5 text-slate-400 hover:bg-slate-800 hover:text-white"
-              >
-                <X className="h-5 w-5" />
-              </button>
-            </div>
-
-            <div className="flex-1 overflow-y-auto p-6">
-              <pre className="whitespace-pre-wrap rounded-2xl border border-slate-700 bg-slate-950 p-4 font-mono text-xs leading-relaxed text-slate-200">
-                {blueprintMd}
-              </pre>
-            </div>
-
-            <div className="flex items-center justify-end gap-2 border-t border-slate-800 px-6 py-3">
+      <ModalShell
+        open={blueprintOpen}
+        testId="blueprint-modal"
+        title="Mayor's Refactor Blueprint"
+        subtitle="Markdown checklist & GitHub Issues plan from DuckDB-Wasm sandbox_actions"
+        icon={<FileText className="h-5 w-5 text-amber-400" />}
+        onClose={() => setBlueprintOpen(false)}
+        footer={
+          <>
+            <span />
+            <div className="flex items-center gap-2">
               <button
                 type="button"
                 onClick={() => {
@@ -329,7 +307,11 @@ export function MayorToolbar({
                 }}
                 className="flex items-center gap-1.5 rounded-xl bg-slate-800 px-3 py-1.5 text-xs font-semibold text-slate-200 hover:bg-slate-700"
               >
-                {copied ? <Check className="h-3.5 w-3.5 text-emerald-400" /> : <Copy className="h-3.5 w-3.5" />}
+                {copied ? (
+                  <Check className="h-3.5 w-3.5 text-emerald-400" />
+                ) : (
+                  <Copy className="h-3.5 w-3.5" />
+                )}
                 <span>{copied ? "Copied!" : "Copy Markdown"}</span>
               </button>
               <button
@@ -341,9 +323,15 @@ export function MayorToolbar({
                 <span>Download .md</span>
               </button>
             </div>
-          </div>
+          </>
+        }
+      >
+        <div className="flex-1 overflow-y-auto p-6">
+          <pre className="whitespace-pre-wrap rounded-2xl border border-slate-700 bg-slate-950 p-4 font-mono text-xs leading-relaxed text-slate-200">
+            {blueprintMd}
+          </pre>
         </div>
-      )}
+      </ModalShell>
     </>
   );
 }

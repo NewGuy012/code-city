@@ -1,14 +1,4 @@
-import {
-  Flame,
-  Pause,
-  Play,
-  Smile,
-  Sparkles,
-  Users,
-  Volume2,
-  VolumeX,
-  Zap,
-} from "lucide-react";
+import { Flame, Pause, Play, Smile, Sparkles, Users, Volume2, VolumeX, Zap } from "lucide-react";
 
 import type { SimSpeed, SimStateSnapshot } from "../game/simEngine";
 
