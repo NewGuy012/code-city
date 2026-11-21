@@ -60,9 +60,7 @@ class QuackServerManager:
             con = self.lakehouse.connect()
             try:
                 tok = self.token.replace("'", "''")
-                con.execute(
-                    f"CALL quack_serve('{quack_uri}', disable_ssl=true, token='{tok}');"
-                )
+                con.execute(f"CALL quack_serve('{quack_uri}', disable_ssl=true, token='{tok}');")
             except Exception:
                 con.close()
                 raise
