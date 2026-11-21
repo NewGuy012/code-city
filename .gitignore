@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+.ruff_cache/
+dist/
+build/
+
+# Frontend / Bun
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+playwright-report/
+test-results/
+
+# Local CodeCity lakehouse data / exports
+.codecity/
+*.ducklake
+*.ducklake.wal
+*.duckdb
+*.duckdb.wal
+export-dist/
+
+# OS / Editors
+.DS_Store
+*.swp
