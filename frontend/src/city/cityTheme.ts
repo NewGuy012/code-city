@@ -1,4 +1,11 @@
-import type { BuildingArchetype, DataMapMode, FileMetric, ZoneType } from "../types/city";
+import type {
+  BlastRadiusResult,
+  BuildingArchetype,
+  CochangePair,
+  DataMapMode,
+  FileMetric,
+  ZoneType,
+} from "../types/city";
 
 export interface ShadePalette {
   roof: string;
@@ -18,7 +25,7 @@ export const ZONE_PALETTES: Record<ZoneType, { fill: string; border: string; lab
   supply_docks: { fill: "#172b3e", border: "#60a5fa", label: "Supply Docks" },
 };
 
-export const ARCHETYPE_PALETTES: Record<BuildingArchetype, ShadePalette> = {
+const ARCHETYPE_PALETTES: Record<BuildingArchetype, ShadePalette> = {
   grand_terminal: { roof: "#38bdf8", left: "#0284c7", right: "#075985", accent: "#fef08a" },
   city_hall: { roof: "#fde68a", left: "#d97706", right: "#92400e", accent: "#fffbeb" },
   archive_vault: { roof: "#cbd5e1", left: "#94a3b8", right: "#475569", accent: "#a78bfa" },
@@ -111,4 +118,31 @@ export function vehicleColor(
   if (type === "cycle_car") return "#e879f9";
   if (type === "cargo_ship") return "#fbbf24";
   return "#38bdf8";
+}
+
+export function buildImpactedHopMap(blastRadius: BlastRadiusResult | null): Map<string, number> {
+  const map = new Map<string, number>();
+  if (blastRadius) {
+    for (const node of blastRadius.impacted_files) {
+      map.set(node.file_path, node.hop_distance);
+    }
+  }
+  return map;
+}
+
+export function selectFaultLines(
+  cochanges: CochangePair[],
+  selectedFile: string | null,
+  blastRadius: BlastRadiusResult | null,
+): CochangePair[] {
+  if (blastRadius?.fault_lines?.length) return blastRadius.fault_lines;
+  if (selectedFile) {
+    return cochanges.filter((c) => c.file_a === selectedFile || c.file_b === selectedFile);
+  }
+  return cochanges.slice(0, 8);
+}
+
+export function canvasCursorClass(activeTool: string, hasHover: boolean): string {
+  if (activeTool !== "inspect") return "cursor-crosshair";
+  return hasHover ? "cursor-pointer" : "cursor-grab active:cursor-grabbing";
 }

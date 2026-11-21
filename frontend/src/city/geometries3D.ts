@@ -1,12 +1,30 @@
 import * as THREE from "three";
 
 import type { BuildingArchetype, DataMapMode, FileMetric } from "../types/city";
+import { WORLD_CENTER_X, WORLD_CENTER_Z } from "./cameraStore";
 import { buildingPalette, computeBuildingHeight } from "./cityTheme";
 import type { FacadeStyle } from "./textures3D";
 
 export function buildingHeight3D(file: FileMetric): number {
   if (file.building_archetype === "park_stadium") return 1.2;
   return Math.max(2.5, Math.min(28, computeBuildingHeight(file) * 0.34));
+}
+
+export function buildingFootprint3D(file: FileMetric): {
+  bw: number;
+  bd: number;
+  h: number;
+  cx: number;
+  cz: number;
+} {
+  const pad = Math.min(0.45, Math.min(file.layout_w, file.layout_d) * 0.14);
+  return {
+    bw: Math.max(0.8, file.layout_w - pad * 2),
+    bd: Math.max(0.8, file.layout_d - pad * 2),
+    h: buildingHeight3D(file),
+    cx: file.layout_x + file.layout_w * 0.5 - WORLD_CENTER_X,
+    cz: file.layout_z + file.layout_d * 0.5 - WORLD_CENTER_Z,
+  };
 }
 
 export function buildingColor3D(
@@ -38,7 +56,6 @@ export interface ArchetypePartSpec {
   /** Scale as fraction of (bw, h, bd); fixedY overrides Y when > 0 */
   scale: [number, number, number];
   fixedY?: number;
-  fixedXZ?: number;
   rotY?: number;
   facadeStyle?: FacadeStyle;
   tintHex?: string;

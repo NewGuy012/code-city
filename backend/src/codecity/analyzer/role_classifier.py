@@ -71,6 +71,21 @@ _GRADE_THRESHOLDS: tuple[tuple[float, str], ...] = (
 )
 
 
+_ENTRYPOINT_NAMES = frozenset(
+    {"main.py", "cli.py", "app.py", "main.go", "main.rs", "lib.rs", "index.ts", "server.ts"}
+)
+
+
+def hint_zone_for_path(rel_path: str, language: str) -> ZoneType:
+    """Lightweight pre-AST zone hint for stable layout grouping."""
+    low = rel_path.lower()
+    if Path(low).name in _ENTRYPOINT_NAMES:
+        return ZoneType.HARBOR_GATES
+    if language == "config":
+        return ZoneType.CIVIC_UTILITIES
+    return classify_district_zone(low, [])
+
+
 def classify_district_zone(
     district_path: str,
     file_zones: list[ZoneType],
@@ -166,8 +181,7 @@ def classify_building_archetype(
         sig.get("has_main")
         or sig.get("route_hints")
         or sig.get("cli_hints")
-        or name
-        in {"main.py", "cli.py", "app.py", "main.go", "main.rs", "lib.rs", "index.ts", "server.ts"}
+        or name in _ENTRYPOINT_NAMES
         or any(k in low for k in ("/routes", "/router", "/api/", "/cmd/", "endpoint"))
     ):
         return _match(

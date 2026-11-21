@@ -234,11 +234,11 @@ def should_skip_path(rel_path: str) -> bool:
     parts = Path(rel_path).parts
     if any(part in SKIP_DIRS or part.startswith(".git") for part in parts[:-1]):
         return True
+    name = parts[-1] if parts else ""
+    if name in SKIP_DIRS or name in SKIP_FILENAMES:
+        return True
     suffix = Path(rel_path).suffix.lower()
     if suffix in SKIP_EXTENSIONS:
-        return True
-    name = parts[-1] if parts else ""
-    if name in SKIP_FILENAMES:
         return True
     return name.endswith(".min.js") or name.endswith(".min.css")
 

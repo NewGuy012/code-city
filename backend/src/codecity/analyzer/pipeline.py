@@ -11,8 +11,8 @@ from typing import Any
 from codecity.analyzer.git_history import KeyframeSpec, parse_git_history, resolve_git_repo
 from codecity.analyzer.layout import compute_stable_city_layout
 from codecity.analyzer.plugins import run_all_plugins
-from codecity.analyzer.role_classifier import build_snapshot_metrics, classify_district_zone
-from codecity.analyzer.treesitter_core import scan_worktree_ast
+from codecity.analyzer.role_classifier import build_snapshot_metrics, hint_zone_for_path
+from codecity.analyzer.treesitter_core import detect_language, scan_worktree_ast
 from codecity.analyzer.worktree import WorktreeManager, list_keyframe_file_sizes
 from codecity.models import RepoRef
 from codecity.storage.lakehouse import LakehouseManager, infer_owner_repo
@@ -74,7 +74,7 @@ def analyze_repository(
         total_keyframes=len(history.keyframes),
     )
     union_weights = list_keyframe_file_sizes(repo_path, history.keyframes)
-    zone_hints = {p: [classify_district_zone(p, [])] for p in union_weights}
+    zone_hints = {p: [hint_zone_for_path(p, detect_language(p)[0])] for p in union_weights}
     file_layout, district_layout = compute_stable_city_layout(union_weights, zone_hints)
 
     wt_mgr = WorktreeManager(repo_path)

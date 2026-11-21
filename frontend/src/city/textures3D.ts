@@ -53,15 +53,7 @@ export function getFacadeTextureSet(style: FacadeStyle): FacadeTextureSet | null
   const bCtx = bumpCanvas.getContext("2d")!;
   const eCtx = emCanvas.getContext("2d")!;
 
-  // Base fill per architectural style
-  cCtx.fillStyle =
-    style === "glass"
-      ? "#94a3b8"
-      : style === "stone"
-        ? "#e2e8f0"
-        : style === "industrial"
-          ? "#cbd5e1"
-          : "#cbd5e1";
+  cCtx.fillStyle = style === "glass" ? "#94a3b8" : style === "stone" ? "#e2e8f0" : "#cbd5e1";
   cCtx.fillRect(0, 0, size, size);
 
   rCtx.fillStyle = style === "glass" ? "#b8b8b8" : "#d8d8d8";
