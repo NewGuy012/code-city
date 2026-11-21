@@ -1,4 +1,4 @@
-import { Building2, FolderGit2, Loader2, Search, ShieldAlert } from "lucide-react";
+import { Box, Building2, Eye, FolderGit2, Loader2, ShieldAlert } from "lucide-react";
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { CityCanvas2D } from "./city/CityCanvas2D";
@@ -6,7 +6,6 @@ import { cameraStore, useUnifiedCameraHotkeys } from "./city/cameraStore";
 import type { GhostLot } from "./city/isoRenderer2D";
 import { deriveStreetLinesAndPlazas } from "./city/streetGrid";
 import { AdvisorCouncilModal } from "./components/AdvisorCouncilModal";
-import { AdvisorTicker } from "./components/AdvisorTicker";
 import { CameraControlsHUD } from "./components/CameraControlsHUD";
 import { DataMapBar } from "./components/DataMapBar";
 import { type AuthorSummary, DisastersMenu } from "./components/DisastersMenu";
@@ -16,7 +15,13 @@ import { InspectorDrawer } from "./components/InspectorDrawer";
 import { MayorToolbar } from "./components/MayorToolbar";
 import { Minimap2D } from "./components/Minimap2D";
 import { OnboardingTour } from "./components/OnboardingTour";
+import { RepoAnalyzePopover } from "./components/RepoAnalyzePopover";
 import { TimeScrubber } from "./components/TimeScrubber";
+import {
+  type HudPopoverId,
+  isTypingTarget,
+  usePopoverOutsideDismiss,
+} from "./components/hudPopover";
 import {
   type CitySnapshotBundle,
   CityDataClient,
@@ -192,6 +197,16 @@ export function App() {
   const [soundEnabled, setSoundEnabled] = useState(true);
   const [repoAuthors, setRepoAuthors] = useState<AuthorSummary[]>([]);
 
+  const [openPopover, setOpenPopover] = useState<HudPopoverId>(null);
+  const [radarOpen, setRadarOpen] = useState(false);
+  const [zenMode, setZenMode] = useState(false);
+
+  const togglePopover = useCallback((id: Exclude<HudPopoverId, null>) => {
+    setOpenPopover((cur) => (cur === id ? null : id));
+  }, []);
+  const closePopover = useCallback(() => setOpenPopover(null), []);
+  usePopoverOutsideDismiss(openPopover, closePopover);
+
   const showToast = useCallback((msg: string) => setToastMsg(msg), []);
 
   const flyToLot = useCallback(
@@ -245,13 +260,47 @@ export function App() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
-        setActiveTool("inspect");
-        setPendingTransitStart(null);
+        if (healthModalOpen || advisorsOpen || disastersOpen) return;
+        if (document.querySelector('[data-testid="blueprint-modal"]')) return;
+        if (openPopover !== null) {
+          setOpenPopover(null);
+          return;
+        }
+        if (activeTool !== "inspect") {
+          setActiveTool("inspect");
+          setPendingTransitStart(null);
+          return;
+        }
+        if (selectedFile !== null) {
+          setSelectedFile(null);
+          return;
+        }
+        if (zenMode) {
+          setZenMode(false);
+        }
+        return;
+      }
+
+      if (isTypingTarget(e.target) || e.metaKey || e.ctrlKey || e.altKey) return;
+      const key = e.key.toLowerCase();
+      if (key === "h" && !e.repeat) {
+        setZenMode((v) => !v);
+        setOpenPopover(null);
+      } else if (key === "m" && !e.repeat) {
+        setRadarOpen((v) => !v);
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  }, [
+    activeTool,
+    advisorsOpen,
+    disastersOpen,
+    healthModalOpen,
+    openPopover,
+    selectedFile,
+    zenMode,
+  ]);
 
   const loadRepoData = useCallback(
     async (owner: string, repo: string, baseUrl: string, force = false) => {
@@ -785,8 +834,18 @@ export function App() {
             <h2 className="text-lg font-bold">Welcome to CodeCity</h2>
             <p className="text-sm text-slate-300">
               {loadingMsg ??
-                "Analyze any local repository or GitHub URL above to transform its Git history into a living city."}
+                "Analyze a local repository or GitHub URL to transform its Git history into a living city."}
             </p>
+            {!loadingMsg && !isStaticMode && (
+              <button
+                type="button"
+                onClick={() => setOpenPopover("repo")}
+                className="mt-1 flex items-center gap-1.5 rounded-xl bg-amber-500 px-3.5 py-1.5 text-xs font-semibold text-slate-950 transition hover:bg-amber-400"
+              >
+                <FolderGit2 className="h-3.5 w-3.5" />
+                <span>Analyze Repository</span>
+              </button>
+            )}
             {errorMsg && (
               <div className="rounded-lg border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-xs text-rose-200">
                 {errorMsg}
@@ -796,170 +855,142 @@ export function App() {
         </div>
       )}
 
+      {zenMode && (
+        <button
+          type="button"
+          data-testid="exit-zen-btn"
+          onClick={() => setZenMode(false)}
+          className="sim-panel fixed top-3 right-3 z-30 flex items-center gap-1.5 rounded-xl px-2.5 py-1.5 text-[11px] font-medium text-slate-300 opacity-45 transition hover:text-white hover:opacity-100"
+          title="Restore UI (H or Esc)"
+        >
+          <Eye className="h-3.5 w-3.5" />
+          <span>Show UI (H)</span>
+        </button>
+      )}
+
       {/* Top HUD */}
-      <header className="pointer-events-none absolute inset-x-0 top-0 z-20 flex flex-col gap-2 p-3">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="sim-panel pointer-events-auto flex items-center gap-3 rounded-2xl px-3.5 py-2">
-            <div className="flex items-center gap-2">
-              <Building2 className="h-5 w-5 text-amber-400" />
-              <span className="font-bold tracking-tight text-white">CodeCity</span>
-            </div>
+      {!zenMode && (
+        <header className="pointer-events-none absolute inset-x-0 top-0 z-20 flex flex-col gap-2 p-3">
+          <div className="flex items-center justify-between gap-2">
+            <RepoAnalyzePopover
+              repos={repos}
+              activeRepo={activeRepo}
+              isStaticMode={isStaticMode}
+              snapshot={effectiveBundle?.snapshot ?? null}
+              simCityLevel={simState.cityLevel}
+              repoInput={repoInput}
+              analyzePct={analyzePct}
+              isOpen={openPopover === "repo"}
+              onToggleOpen={() => togglePopover("repo")}
+              onClose={closePopover}
+              onSelectRepo={(o, r) => {
+                setActiveRepo({ owner: o, repo: r });
+                void loadRepoData(
+                  o,
+                  r,
+                  `/api/repos/${encodeURIComponent(o)}/${encodeURIComponent(r)}/parquet`,
+                );
+              }}
+              onChangeRepoInput={setRepoInput}
+              onAnalyzeSubmit={(e) => void handleAnalyzeSubmit(e)}
+              onOpenHealthModal={handleOpenHealthModal}
+            />
 
-            {!isStaticMode && repos.length > 0 && (
-              <select
-                data-testid="repo-selector"
-                value={activeRepo ? `${activeRepo.owner}/${activeRepo.repo}` : ""}
-                onChange={(e) => {
-                  const [o, r] = e.target.value.split("/");
-                  if (o && r) {
-                    setActiveRepo({ owner: o, repo: r });
-                    void loadRepoData(
-                      o,
-                      r,
-                      `/api/repos/${encodeURIComponent(o)}/${encodeURIComponent(r)}/parquet`,
-                    );
-                  }
-                }}
-                className="rounded-lg border border-slate-700 bg-slate-900 px-2.5 py-1 text-xs font-medium text-slate-200"
-              >
-                {repos.map((r) => (
-                  <option key={`${r.owner}/${r.repo}`} value={`${r.owner}/${r.repo}`}>
-                    {r.owner}/{r.repo} ({r.latest_grade})
-                  </option>
-                ))}
-              </select>
-            )}
-
-            {effectiveBundle && (
-              <div className="flex items-center gap-2 border-l border-slate-700 pl-3 text-xs">
-                <span
-                  data-testid="city-grade-badge"
-                  className="rounded-lg bg-amber-400/20 px-2 py-0.5 font-extrabold text-amber-300 ring-1 ring-amber-400/40"
-                >
-                  {effectiveBundle.snapshot.health_grade}
-                </span>
-                <span className="hidden font-medium text-slate-200 md:inline">
-                  {effectiveBundle.snapshot.city_archetype_title}
-                </span>
-                <span className="text-slate-400">
-                  {effectiveBundle.snapshot.total_files} files ·{" "}
-                  {effectiveBundle.snapshot.total_sloc.toLocaleString()} SLOC
-                </span>
-              </div>
-            )}
-          </div>
-
-          {!isStaticMode && (
-            <form
-              onSubmit={(e) => void handleAnalyzeSubmit(e)}
-              className="sim-panel pointer-events-auto flex items-center gap-2 rounded-2xl px-3 py-1.5"
-            >
-              <FolderGit2 className="h-4 w-4 text-sky-400" />
-              <input
-                type="text"
-                data-testid="analyze-source-input"
-                value={repoInput}
-                onChange={(e) => setRepoInput(e.target.value)}
-                placeholder="Path or GitHub URL (e.g. . or https://...)"
-                className="w-52 bg-transparent text-xs text-slate-100 placeholder-slate-500 focus:outline-none sm:w-64"
+            <div className="flex items-center gap-1.5">
+              <DataMapBar
+                dataMap={dataMap}
+                onChangeDataMap={setDataMap}
+                isPopoverOpen={openPopover === "datamap"}
+                onTogglePopover={() => togglePopover("datamap")}
+                onClosePopover={closePopover}
               />
               <button
-                type="submit"
-                data-testid="analyze-submit-btn"
-                disabled={analyzePct !== null}
-                className="flex items-center gap-1 rounded-xl bg-amber-500 px-3 py-1 text-xs font-semibold text-slate-950 transition hover:bg-amber-400 disabled:opacity-60"
+                type="button"
+                data-testid="toggle-2d-3d"
+                onClick={() => setViewMode((m) => (m === "2d" ? "3d" : "2d"))}
+                className="sim-panel pointer-events-auto flex h-10 items-center gap-1.5 rounded-xl px-2.5 text-xs font-semibold text-sky-300 transition hover:bg-white/[0.06]"
               >
-                {analyzePct !== null ? (
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                ) : (
-                  <Search className="h-3.5 w-3.5" />
-                )}
-                <span>Analyze</span>
+                <Box className="h-3.5 w-3.5" />
+                <span>{viewMode === "2d" ? "2D" : "3D"}</span>
               </button>
-            </form>
-          )}
-        </div>
+            </div>
 
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="pointer-events-auto">
-            <DataMapBar
-              dataMap={dataMap}
-              onChangeDataMap={setDataMap}
-              viewMode={viewMode}
-              onToggleViewMode={() => setViewMode((m) => (m === "2d" ? "3d" : "2d"))}
-              onStartTour={handleStartTour}
-              onOpenHealthModal={handleOpenHealthModal}
-              tourActive={tourActive}
-            />
-          </div>
-
-          {effectiveBundle && (
-            <EconomyBar
-              simState={simState}
-              activeQuestCount={missions.filter((m) => !m.completed).length}
-              soundEnabled={soundEnabled}
-              onChangeSpeed={(spd: SimSpeed) => {
-                sim.setSpeed(spd);
-                setSimState(sim.getSnapshot());
-              }}
-              onOpenAdvisors={() => setAdvisorsOpen(true)}
-              onOpenDisasters={() => {
-                if (!isStaticMode && activeRepo) {
-                  void client.fetchAuthors(activeRepo.owner, activeRepo.repo).then(setRepoAuthors);
-                }
-                setDisastersOpen(true);
-              }}
-              onToggleSound={() => {
-                const next = !soundEnabled;
-                setSoundEnabled(next);
-                soundEngine.setEnabled(next);
-              }}
-            />
-          )}
-
-          {bundle && (
-            <div className="pointer-events-auto">
-              <AdvisorTicker
-                alerts={bundle.snapshot.advisor_alerts}
+            {effectiveBundle && (
+              <EconomyBar
+                simState={simState}
+                alerts={bundle?.snapshot.advisor_alerts ?? []}
+                activeQuestCount={missions.filter((m) => !m.completed).length}
+                grade={effectiveBundle.snapshot.health_grade}
+                soundEnabled={soundEnabled}
+                tourActive={tourActive}
+                radarOpen={radarOpen}
+                openPopover={openPopover}
+                onTogglePopover={togglePopover}
+                onClosePopover={closePopover}
+                onChangeSpeed={(spd: SimSpeed) => {
+                  sim.setSpeed(spd);
+                  setSimState(sim.getSnapshot());
+                }}
+                onOpenAdvisors={() => setAdvisorsOpen(true)}
+                onOpenDisasters={() => {
+                  if (!isStaticMode && activeRepo) {
+                    void client
+                      .fetchAuthors(activeRepo.owner, activeRepo.repo)
+                      .then(setRepoAuthors);
+                  }
+                  setDisastersOpen(true);
+                }}
                 onFocusFile={handleFocusFile}
+                onOpenHealthModal={handleOpenHealthModal}
+                onStartTour={handleStartTour}
+                onToggleSound={() => {
+                  const next = !soundEnabled;
+                  setSoundEnabled(next);
+                  soundEngine.setEnabled(next);
+                }}
+                onToggleRadar={() => setRadarOpen((v) => !v)}
+                onToggleZenMode={() => {
+                  setZenMode(true);
+                  closePopover();
+                }}
               />
-            </div>
-          )}
-        </div>
-
-        {simState.activeDisaster && !simState.activeDisaster.resolved && (
-          <div
-            data-testid="active-disaster-banner"
-            className="sim-panel pointer-events-auto flex items-center justify-between gap-3 self-center rounded-xl border-rose-500/50 bg-rose-950/75 px-4 py-1.5 text-xs text-rose-100"
-          >
-            <div className="flex items-center gap-2">
-              <ShieldAlert className="h-4 w-4 animate-pulse text-rose-400" />
-              <span className="font-bold">{simState.activeDisaster.title}:</span>
-              <span className="text-rose-200">{simState.activeDisaster.detail}</span>
-            </div>
-            <button
-              type="button"
-              onClick={() => {
-                sim.clearDisaster();
-                setSimState(sim.getSnapshot());
-              }}
-              className="rounded-lg bg-rose-500/30 px-2.5 py-0.5 text-[11px] font-semibold text-white hover:bg-rose-500/50"
-            >
-              Resolve
-            </button>
-          </div>
-        )}
-
-        {loadingMsg && (
-          <div className="sim-panel pointer-events-auto flex items-center gap-2 self-start rounded-xl px-3 py-1.5 text-xs text-sky-200">
-            <Loader2 className="h-3.5 w-3.5 animate-spin text-sky-400" />
-            <span>{loadingMsg}</span>
-            {analyzePct !== null && (
-              <span className="font-mono text-amber-300">{analyzePct.toFixed(0)}%</span>
             )}
           </div>
-        )}
-      </header>
+
+          {simState.activeDisaster && !simState.activeDisaster.resolved && (
+            <div
+              data-testid="active-disaster-banner"
+              className="sim-panel pointer-events-auto flex items-center justify-between gap-3 self-center rounded-xl border-rose-500/45 bg-rose-950/75 px-3.5 py-1.5 text-xs text-rose-100"
+            >
+              <div className="flex items-center gap-2">
+                <ShieldAlert className="h-4 w-4 animate-pulse text-rose-400" />
+                <span className="font-bold">{simState.activeDisaster.title}:</span>
+                <span className="text-rose-200">{simState.activeDisaster.detail}</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  sim.clearDisaster();
+                  setSimState(sim.getSnapshot());
+                }}
+                className="rounded-lg bg-rose-500/30 px-2.5 py-0.5 text-[11px] font-semibold text-white hover:bg-rose-500/50"
+              >
+                Resolve
+              </button>
+            </div>
+          )}
+
+          {loadingMsg && (
+            <div className="sim-panel pointer-events-auto flex items-center gap-2 self-center rounded-xl px-3 py-1.5 text-xs text-sky-200">
+              <Loader2 className="h-3.5 w-3.5 animate-spin text-sky-400" />
+              <span>{loadingMsg}</span>
+              {analyzePct !== null && (
+                <span className="font-mono text-amber-300">{analyzePct.toFixed(0)}%</span>
+              )}
+            </div>
+          )}
+        </header>
+      )}
 
       {effectiveBundle && (
         <MayorToolbar
