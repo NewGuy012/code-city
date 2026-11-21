@@ -5,6 +5,8 @@ from __future__ import annotations
 import secrets
 import socket
 import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 import duckdb
@@ -98,6 +100,18 @@ class QuackServerManager:
         )
         client.execute(f"ATTACH '{ep.quack_uri}' AS {alias} (DISABLE_SSL true);")
         return client
+
+    @contextmanager
+    def host_cursor(self) -> Iterator[duckdb.DuckDBPyConnection]:
+        """Yield a cursor on the host DuckDB connection holding the DuckLake catalog."""
+        self.start()
+        with self._lock:
+            assert self._con is not None
+            cur = self._con.cursor()
+        try:
+            yield cur
+        finally:
+            cur.close()
 
     def attach_snippet(self, owner: str, repo: str, *, proxy_url: str | None = None) -> str:
         """Render a copy-paste DuckDB CLI snippet to query or annotate the live DuckLake."""

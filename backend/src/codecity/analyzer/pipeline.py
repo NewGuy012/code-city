@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any
 
@@ -48,6 +49,7 @@ def analyze_repository(
     source: str,
     *,
     lakehouse: LakehouseManager | None = None,
+    quack_server: QuackServerManager | None = None,
     owner: str | None = None,
     repo: str | None = None,
     max_keyframes: int = 16,
@@ -90,20 +92,25 @@ def analyze_repository(
     zone_hints = {p: [_hint_zone_from_path(p)] for p in union_weights}
     file_layout, district_layout = compute_stable_city_layout(union_weights, zone_hints)
 
-    with lake.session() as con:
-        schema_path = lake.ensure_repo_schema(
-            con,
-            resolved_owner,
-            resolved_repo,
-            str(source),
-        )
-        lake.clear_repo_analysis_data(con, resolved_owner, resolved_repo, preserve_annotations=True)
-
     wt_mgr = WorktreeManager(repo_path)
     total_kf = len(history.keyframes)
     latest_files_count = 0
 
-    with QuackServerManager(lake) as qsrv:
+    server_ctx = nullcontext(quack_server) if quack_server is not None else QuackServerManager(lake)
+    with server_ctx as qsrv:
+        with qsrv.host_cursor() as con:
+            schema_path = lake.ensure_repo_schema(
+                con,
+                resolved_owner,
+                resolved_repo,
+                str(source),
+            )
+            lake.clear_repo_analysis_data(
+                con,
+                resolved_owner,
+                resolved_repo,
+                preserve_annotations=True,
+            )
 
         def process_keyframe(kf: KeyframeSpec) -> tuple[int, int]:
             with wt_mgr.checkout(kf.commit_sha) as wt_dir:
@@ -168,8 +175,8 @@ def analyze_repository(
                     total_keyframes=total_kf,
                 )
 
-    with lake.session(read_only=True) as con:
-        repos = lake.list_repos(con)
+        with qsrv.host_cursor() as con:
+            repos = lake.list_repos(con)
         matched = next(
             (r for r in repos if r.owner == resolved_owner and r.repo == resolved_repo),
             RepoRef(
