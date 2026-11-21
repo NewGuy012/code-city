@@ -129,31 +129,38 @@ def classify_building_archetype(
     low = info.file_path.lower()
     name = Path(low).name
     sig = info.signals
-    reasons: list[str] = []
 
-    # 1. Tests / Benchmarks -> Park / Proving Stadium
-    if sig.get("is_test") or info.file_path.endswith("_test.go"):
-        reasons.append("Test or benchmark file pattern")
+    def _match(
+        archetype: BuildingArchetype,
+        zone: ZoneType,
+        confidence: float,
+        reason: str,
+    ) -> tuple[BuildingArchetype, ZoneType, float, dict[str, Any]]:
         return (
+            archetype,
+            zone,
+            confidence,
+            {"reasons": [reason], "fan_in": fan_in, "fan_out": fan_out, "pagerank": pagerank},
+        )
+
+    if sig.get("is_test") or info.file_path.endswith("_test.go"):
+        return _match(
             BuildingArchetype.PARK_STADIUM,
             ZoneType.GREENBELT_PARKS,
             0.96,
-            {"reasons": reasons, "fan_in": fan_in, "fan_out": fan_out, "pagerank": pagerank},
+            "Test or benchmark file pattern",
         )
 
-    # 2. UI Component / View -> Glass Pavilion
     if sig.get("ui_hints") or any(
         k in low for k in ("/components/", "/views/", "/pages/", "/city/", ".css")
     ):
-        reasons.append("UI component / JSX / view layer")
-        return (
+        return _match(
             BuildingArchetype.GLASS_PAVILION,
             ZoneType.GALLERY_STOREFRONT,
             0.9,
-            {"reasons": reasons, "fan_in": fan_in, "fan_out": fan_out, "pagerank": pagerank},
+            "UI component / JSX / view layer",
         )
 
-    # 3. Entrypoint / Router / CLI -> Grand Terminal / Lighthouse
     if (
         sig.get("has_main")
         or sig.get("route_hints")
@@ -162,15 +169,13 @@ def classify_building_archetype(
         in {"main.py", "cli.py", "app.py", "main.go", "main.rs", "lib.rs", "index.ts", "server.ts"}
         or any(k in low for k in ("/routes", "/router", "/api/", "/cmd/", "endpoint"))
     ):
-        reasons.append("Entrypoint, HTTP router, or CLI handler")
-        return (
+        return _match(
             BuildingArchetype.GRAND_TERMINAL,
             ZoneType.HARBOR_GATES,
             0.88,
-            {"reasons": reasons, "fan_in": fan_in, "fan_out": fan_out, "pagerank": pagerank},
+            "Entrypoint, HTTP router, or CLI handler",
         )
 
-    # 4. Storage / DB / IO -> Twin Silos / Reservoir
     if sig.get("db_hints") or any(
         k in low
         for k in (
@@ -185,29 +190,25 @@ def classify_building_archetype(
             "cache",
         )
     ):
-        reasons.append("Storage, database, lakehouse, or persistence IO")
-        return (
+        return _match(
             BuildingArchetype.TWIN_SILOS,
             ZoneType.VAULTS_RESERVOIR,
             0.87,
-            {"reasons": reasons, "fan_in": fan_in, "fan_out": fan_out, "pagerank": pagerank},
+            "Storage, database, lakehouse, or persistence IO",
         )
 
-    # 5. Schemas / Models / Types -> Archive / Bank Vault
     type_defs = int(sig.get("type_def_count") or 0)
     funcs = int(sig.get("func_count") or 0)
     if any(k in low for k in ("models", "schema", "types", "dto", "entities", "contracts")) or (
         type_defs >= 2 and info.max_complexity <= 3 and type_defs >= funcs
     ):
-        reasons.append("High type/model density with low branching")
-        return (
+        return _match(
             BuildingArchetype.ARCHIVE_VAULT,
             ZoneType.VAULTS_RESERVOIR,
             0.85,
-            {"reasons": reasons, "fan_in": fan_in, "fan_out": fan_out, "pagerank": pagerank},
+            "High type/model density with low branching",
         )
 
-    # 6. Auth / Config / Middleware -> Watchtower / Substation
     if (
         sig.get("auth_hints")
         or any(
@@ -216,25 +217,21 @@ def classify_building_archetype(
         )
         or info.language == "config"
     ):
-        reasons.append("Auth, security guard, middleware, or configuration")
-        return (
+        return _match(
             BuildingArchetype.WATCHTOWER,
             ZoneType.CIVIC_UTILITIES,
             0.84,
-            {"reasons": reasons, "fan_in": fan_in, "fan_out": fan_out, "pagerank": pagerank},
+            "Auth, security guard, middleware, or configuration",
         )
 
-    # 7. Core Hub / Orchestrator -> City Hall / Landmark Spire
     if pagerank >= 0.55 or fan_in >= 5 or (fan_in >= 3 and fan_out >= 3):
-        reasons.append(f"High import centrality (fan-in {fan_in}, PageRank {pagerank:.2f})")
-        return (
+        return _match(
             BuildingArchetype.CITY_HALL,
             ZoneType.DOWNTOWN_CORE,
             0.86,
-            {"reasons": reasons, "fan_in": fan_in, "fan_out": fan_out, "pagerank": pagerank},
+            f"High import centrality (fan-in {fan_in}, PageRank {pagerank:.2f})",
         )
 
-    # 8. Compute / Pipeline / Worker -> Factory / Power Plant
     loops = int(sig.get("loop_count") or 0)
     if (
         info.max_complexity >= 7
@@ -244,33 +241,28 @@ def classify_building_archetype(
             for k in ("worker", "pipeline", "parser", "analyzer", "compiler", "engine", "layout")
         )
     ):
-        reasons.append(f"Compute/pipeline logic (complexity {info.max_complexity}, loops {loops})")
-        return (
+        return _match(
             BuildingArchetype.FACTORY,
             ZoneType.INDUSTRIAL_QUARTER,
             0.82,
-            {"reasons": reasons, "fan_in": fan_in, "fan_out": fan_out, "pagerank": pagerank},
+            f"Compute/pipeline logic (complexity {info.max_complexity}, loops {loops})",
         )
 
-    # 9. Shared Utilities / Helpers -> Civic Kiosk / Bridge Hub
     if any(k in low for k in ("util", "helper", "common", "shared", "format", "slug")) or (
         info.sloc <= 120 and fan_in >= 2
     ):
-        reasons.append("Compact shared utility or helper module")
-        return (
+        return _match(
             BuildingArchetype.CIVIC_KIOSK,
             ZoneType.CIVIC_UTILITIES,
             0.78,
-            {"reasons": reasons, "fan_in": fan_in, "fan_out": fan_out, "pagerank": pagerank},
+            "Compact shared utility or helper module",
         )
 
-    # 10. Default Domain Service / Logic -> Office Tower
-    reasons.append("General domain service / business logic module")
-    return (
+    return _match(
         BuildingArchetype.OFFICE_TOWER,
         ZoneType.DOWNTOWN_CORE,
         0.72,
-        {"reasons": reasons, "fan_in": fan_in, "fan_out": fan_out, "pagerank": pagerank},
+        "General domain service / business logic module",
     )
 
 

@@ -9,8 +9,13 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
-from codecity.analyzer.plugins.python import _ruff_cmd
-from codecity.analyzer.plugins.typescript import _TS_EXTS, _find_bun, _find_local_oxlint
+from codecity.analyzer.plugins.base import (
+    TS_EXTS,
+    find_bun,
+    find_local_oxlint,
+    ruff_cmd,
+    safe_repo_target,
+)
 
 MAYOR_BRANCH = "codecity/mayor-session"
 
@@ -34,14 +39,6 @@ def _run_git(
     )
 
 
-def _safe_repo_target(repo_path: Path, rel_path: str) -> Path:
-    root = repo_path.resolve()
-    cand = (root / rel_path).resolve()
-    if cand != root and root not in cand.parents:
-        raise ValueError(f"Unsafe target path outside repo root: {rel_path}")
-    return cand
-
-
 def _current_branch(repo_path: Path) -> str:
     proc = _run_git(repo_path, ["rev-parse", "--abbrev-ref", "HEAD"])
     return proc.stdout.strip()
@@ -58,11 +55,14 @@ def ensure_mayor_branch(repo_path: Path) -> dict[str, Any]:
                 f"Working tree on `{cur}` has uncommitted changes. "
                 "Commit or stash before starting Live Mayor Mode."
             )
-        exists = _run_git(
-            repo_path,
-            ["show-ref", "--verify", "--quiet", f"refs/heads/{MAYOR_BRANCH}"],
-            check=False,
-        ).returncode == 0
+        exists = (
+            _run_git(
+                repo_path,
+                ["show-ref", "--verify", "--quiet", f"refs/heads/{MAYOR_BRANCH}"],
+                check=False,
+            ).returncode
+            == 0
+        )
         if exists:
             _run_git(repo_path, ["checkout", MAYOR_BRANCH])
         else:
@@ -165,38 +165,38 @@ def execute_live_mayor_tool(
 ) -> dict[str, Any]:
     """Execute a Mayor tool safely on the `codecity/mayor-session` branch."""
     ensure_mayor_branch(repo_path)
-    target = _safe_repo_target(repo_path, target_path)
+    target = safe_repo_target(repo_path, target_path)
 
     if tool == "sweeper":
         if not target.exists():
             raise FileNotFoundError(f"Target file not found: {target_path}")
         if target_path.endswith((".py", ".pyi")):
-            ruff = _ruff_cmd()
+            ruff = ruff_cmd()
             subprocess.run(
-                [*ruff, "check", "--no-cache", "--fix", target_path],
+                [*ruff, "check", "--no-cache", "--fix", "--", target_path],
                 cwd=repo_path,
                 capture_output=True,
                 timeout=15,
             )
             subprocess.run(
-                [*ruff, "format", "--no-cache", target_path],
+                [*ruff, "format", "--no-cache", "--", target_path],
                 cwd=repo_path,
                 capture_output=True,
                 timeout=15,
             )
-        elif target_path.endswith(_TS_EXTS):
-            oxlint_bin = _find_local_oxlint()
-            bun_bin = _find_bun()
+        elif target_path.endswith(TS_EXTS):
+            oxlint_bin = find_local_oxlint()
+            bun_bin = find_bun()
             if bun_bin and oxlint_bin:
                 subprocess.run(
-                    [bun_bin, "run", oxlint_bin, "--fix", str(target)],
+                    [bun_bin, "run", oxlint_bin, "--fix", "--", str(target)],
                     cwd=repo_path,
                     capture_output=True,
                     timeout=15,
                 )
             if bun_bin:
                 subprocess.run(
-                    [bun_bin, "fmt", "--no-script", str(target)],
+                    [bun_bin, "fmt", "--no-script", "--", str(target)],
                     cwd=repo_path,
                     capture_output=True,
                     timeout=15,
@@ -222,8 +222,10 @@ def execute_live_mayor_tool(
     if tool == "proving_park":
         stem = re.sub(r"[^a-zA-Z0-9_]+", "_", Path(target_path).stem).strip("_") or "module"
         if target_path.endswith((".ts", ".tsx", ".js", ".jsx")):
-            rel_test = f"{Path(target_path).parent.as_posix()}/{stem}.mayor.test.ts".lstrip("./")
-            test_file = _safe_repo_target(repo_path, rel_test)
+            rel_test = f"{Path(target_path).parent.as_posix()}/{stem}.mayor.test.ts".removeprefix(
+                "./"
+            )
+            test_file = safe_repo_target(repo_path, rel_test)
             test_file.parent.mkdir(parents=True, exist_ok=True)
             if not test_file.exists():
                 test_file.write_text(
@@ -237,7 +239,7 @@ def execute_live_mayor_tool(
                 )
         else:
             rel_test = f"tests/test_{stem}_mayor.py"
-            test_file = _safe_repo_target(repo_path, rel_test)
+            test_file = safe_repo_target(repo_path, rel_test)
             test_file.parent.mkdir(parents=True, exist_ok=True)
             if not test_file.exists():
                 test_file.write_text(
@@ -264,7 +266,7 @@ def execute_live_mayor_tool(
 
     if tool == "co_maintainer":
         owners_rel = ".github/CODEOWNERS"
-        owners_file = _safe_repo_target(repo_path, owners_rel)
+        owners_file = safe_repo_target(repo_path, owners_rel)
         owners_file.parent.mkdir(parents=True, exist_ok=True)
         existing = owners_file.read_text(encoding="utf-8") if owners_file.exists() else ""
         entry = f"/{target_path} @core-maintainers @co-maintainer"
@@ -290,7 +292,7 @@ def execute_live_mayor_tool(
     if tool in {"splitter", "transit_hub"}:
         slug = re.sub(r"[^a-zA-Z0-9_]+", "_", target_path).strip("_")
         spec_rel = f".codecity/blueprints/{tool}_{slug}.md"
-        spec_file = _safe_repo_target(repo_path, spec_rel)
+        spec_file = safe_repo_target(repo_path, spec_rel)
         spec_file.parent.mkdir(parents=True, exist_ok=True)
         body = (
             f"# Mayor Live Spec ({tool}): `{target_path}`\n\n"

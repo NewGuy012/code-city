@@ -5,28 +5,25 @@ from __future__ import annotations
 import difflib
 import json
 import re
-import shutil
 import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any
 
-from codecity.analyzer.plugins.base import PluginResult
+from codecity.analyzer.plugins.base import (
+    TS_EXTS,
+    DepCollector,
+    PluginResult,
+    edges_to_imports,
+    find_bun,
+    find_local_oxlint,
+    safe_repo_target,
+    structural_diagnostics_to_lint,
+)
 from codecity.analyzer.treesitter_core import AstFileInfo
 from codecity.models import ExternalDep, FileImport, FixDiffResult, LintDiagnostic
 
-_TS_EXTS = (".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs")
 _BUN_LINT_SUPPORTED: bool | None = None
-
-
-def _find_bun() -> str | None:
-    found = shutil.which("bun")
-    if found:
-        return found
-    home_bun = Path.home() / ".bun" / "bin" / "bun"
-    if home_bun.exists():
-        return str(home_bun)
-    return None
 
 
 def _bun_supports_native_lint(bun_bin: str) -> bool:
@@ -47,34 +44,14 @@ def _bun_supports_native_lint(bun_bin: str) -> bool:
     return _BUN_LINT_SUPPORTED
 
 
-def _find_local_oxlint() -> str | None:
-    # Check workspace frontend node_modules first, then PATH
-    candidates = [
-        Path.cwd() / "frontend" / "node_modules" / ".bin" / "oxlint",
-        Path(__file__).resolve().parents[5] / "frontend" / "node_modules" / ".bin" / "oxlint",
-    ]
-    for cand in candidates:
-        if cand.exists():
-            return str(cand)
-    return shutil.which("oxlint")
-
-
 def _strip_jsonc(raw: str) -> str:
-    # Remove // comments outside strings, /* ... */ comments, and trailing commas
     no_block = re.sub(r"/\*[\s\S]*?\*/", "", raw)
-    lines = []
-    for line in no_block.splitlines():
-        # Conservative line-comment stripping when // isn't preceded by http(s):
-        cleaned = re.sub(r"(^|[\s,{[\]])//.*$", r"\1", line)
-        lines.append(cleaned)
-    joined = "\n".join(lines)
-    return re.sub(r",(\s*[}\]])", r"\1", joined)
+    lines = [re.sub(r"(^|[\s,{[\]])//.*$", r"\1", line) for line in no_block.splitlines()]
+    return re.sub(r",(\s*[}\]])", r"\1", "\n".join(lines))
 
 
 def _parse_npm_deps(worktree_root: Path, snapshot_idx: int) -> list[ExternalDep]:
-    deps: list[ExternalDep] = []
-    seen: set[tuple[str, bool]] = set()
-    direct_names: set[str] = set()
+    deps = DepCollector(snapshot_idx, "npm")
 
     for pkg_json in sorted(worktree_root.glob("**/package.json")):
         if "node_modules" in pkg_json.parts:
@@ -85,22 +62,9 @@ def _parse_npm_deps(worktree_root: Path, snapshot_idx: int) -> list[ExternalDep]
             continue
         for section in ("dependencies", "devDependencies", "peerDependencies"):
             entries = data.get(section)
-            if not isinstance(entries, dict):
-                continue
-            for name, ver in entries.items():
-                direct_names.add(str(name))
-                key = (str(name), True)
-                if key not in seen:
-                    seen.add(key)
-                    deps.append(
-                        ExternalDep(
-                            snapshot_idx=snapshot_idx,
-                            ecosystem="npm",
-                            package_name=str(name),
-                            version=str(ver),
-                            is_direct=True,
-                        )
-                    )
+            if isinstance(entries, dict):
+                for name, ver in entries.items():
+                    deps.add(str(name), str(ver), is_direct=True)
 
     for bun_lock in sorted(worktree_root.glob("**/bun.lock")):
         if "node_modules" in bun_lock.parts:
@@ -115,19 +79,7 @@ def _parse_npm_deps(worktree_root: Path, snapshot_idx: int) -> list[ExternalDep]
                         spec = str(tuple_val[0])
                         if "@" in spec:
                             version = spec.rsplit("@", 1)[-1]
-                    is_direct = str(pkg_name) in direct_names
-                    key = (str(pkg_name), is_direct)
-                    if key not in seen:
-                        seen.add(key)
-                        deps.append(
-                            ExternalDep(
-                                snapshot_idx=snapshot_idx,
-                                ecosystem="npm",
-                                package_name=str(pkg_name),
-                                version=version,
-                                is_direct=is_direct,
-                            )
-                        )
+                    deps.add(str(pkg_name), version, is_direct=deps.is_direct(str(pkg_name)))
         except Exception:
             pass
 
@@ -143,23 +95,11 @@ def _parse_npm_deps(worktree_root: Path, snapshot_idx: int) -> list[ExternalDep]
                         continue
                     pkg_name = key_path.split("node_modules/")[-1]
                     version = str(meta.get("version", "")) if isinstance(meta, dict) else ""
-                    is_direct = pkg_name in direct_names
-                    key = (pkg_name, is_direct)
-                    if key not in seen:
-                        seen.add(key)
-                        deps.append(
-                            ExternalDep(
-                                snapshot_idx=snapshot_idx,
-                                ecosystem="npm",
-                                package_name=pkg_name,
-                                version=version,
-                                is_direct=is_direct,
-                            )
-                        )
+                    deps.add(pkg_name, version, is_direct=deps.is_direct(pkg_name))
         except Exception:
             pass
 
-    return deps[:400]
+    return deps.items
 
 
 def _load_tsconfig_aliases(worktree_root: Path) -> list[tuple[str, str, Path]]:
@@ -174,8 +114,7 @@ def _load_tsconfig_aliases(worktree_root: Path) -> list[tuple[str, str, Path]]:
         co = data.get("compilerOptions", {})
         if not isinstance(co, dict):
             continue
-        base_url = co.get("baseUrl", ".")
-        base_dir = (cfg.parent / str(base_url)).resolve()
+        base_dir = (cfg.parent / str(co.get("baseUrl", "."))).resolve()
         paths = co.get("paths", {})
         if isinstance(paths, dict):
             for pat, targets in paths.items():
@@ -199,10 +138,9 @@ def _resolve_ts_imports(
 
     def try_candidates(cand_base: Path) -> str | None:
         candidates = [cand_base]
-        for ext in _TS_EXTS:
+        for ext in TS_EXTS:
             candidates.append(Path(f"{cand_base}{ext}"))
             candidates.append(cand_base / f"index{ext}")
-        # Handle ESM TypeScript imports ending in .js pointing to .ts/.tsx
         if cand_base.suffix in {".js", ".jsx", ".mjs"}:
             stem = cand_base.with_suffix("")
             for ext in (".ts", ".tsx", ".mts", ".js", ".jsx"):
@@ -226,18 +164,14 @@ def _resolve_ts_imports(
                 for pat, repl, base_dir in aliases:
                     prefix = pat.rstrip("*")
                     if imp.startswith(prefix):
-                        suffix = imp[len(prefix) :]
-                        mapped = repl.replace("*", suffix)
+                        mapped = repl.replace("*", imp[len(prefix) :])
                         target = try_candidates(base_dir / mapped)
                         if target:
                             break
             if target and target != rel:
                 edges.add((rel, target))
 
-    return [
-        FileImport(snapshot_idx=snapshot_idx, source_file=s, target_file=t)
-        for s, t in sorted(edges)
-    ]
+    return edges_to_imports(snapshot_idx, edges)
 
 
 def _parse_lint_json(
@@ -279,8 +213,7 @@ def _parse_lint_json(
         if rel_path not in ast_files:
             continue
 
-        line = 1
-        col = 1
+        line, col = 1, 1
         labels = item.get("labels")
         if isinstance(labels, list) and labels:
             span = labels[0].get("span", {}) if isinstance(labels[0], dict) else {}
@@ -293,8 +226,10 @@ def _parse_lint_json(
         code = str(item.get("code") or item.get("ruleId") or "TS")
         severity = str(item.get("severity") or "warning").lower()
         cat = "correctness" if severity == "error" else "style"
-        if "typescript" in code or "no-unused" in code:
-            cat = "types" if "typescript" in code else "correctness"
+        if "typescript" in code:
+            cat = "types"
+        elif "no-unused" in code:
+            cat = "correctness"
         diagnostics.append(
             LintDiagnostic(
                 snapshot_idx=snapshot_idx,
@@ -334,35 +269,24 @@ class TypeScriptPlugin:
         imports = _resolve_ts_imports(worktree_root, snapshot_idx, ast_files)
         diagnostics: list[LintDiagnostic] = []
         format_drift: set[str] = set()
-        bun_bin = _find_bun()
+        bun_bin = find_bun()
 
-        # 1. Lint: prefer native `bun lint --no-script -f json`, else `bun run oxlint -f json`
         ran_external_linter = False
-        if bun_bin and _bun_supports_native_lint(bun_bin):
-            try:
-                proc = subprocess.run(
-                    [bun_bin, "lint", "--no-script", "-f", "json", *ts_paths[:200]],
-                    cwd=worktree_root,
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    timeout=30,
-                )
-                diagnostics.extend(
-                    _parse_lint_json(
-                        proc.stdout, worktree_root, snapshot_idx, ast_files, "bun-lint"
-                    )
-                )
-                ran_external_linter = True
-            except Exception:
-                pass
-        elif bun_bin:
-            oxlint_bin = _find_local_oxlint()
-            if oxlint_bin:
+        if bun_bin:
+            lint_cmd: list[str] | None = None
+            linter_name = "bun-lint"
+            if _bun_supports_native_lint(bun_bin):
+                lint_cmd = [bun_bin, "lint", "--no-script", "-f", "json", "--", *ts_paths[:200]]
+            else:
+                oxlint_bin = find_local_oxlint()
+                if oxlint_bin:
+                    linter_name = "bun-oxlint"
+                    lint_cmd = [bun_bin, "run", oxlint_bin, "-f", "json", "--", *ts_paths[:200]]
+
+            if lint_cmd is not None:
                 try:
                     proc = subprocess.run(
-                        [bun_bin, "run", oxlint_bin, "-f", "json", *ts_paths[:200]],
+                        lint_cmd,
                         cwd=worktree_root,
                         capture_output=True,
                         text=True,
@@ -372,31 +296,22 @@ class TypeScriptPlugin:
                     )
                     diagnostics.extend(
                         _parse_lint_json(
-                            proc.stdout, worktree_root, snapshot_idx, ast_files, "bun-oxlint"
+                            proc.stdout, worktree_root, snapshot_idx, ast_files, linter_name
                         )
                     )
                     ran_external_linter = True
                 except Exception:
                     pass
 
-        # Include Tree-sitter structural diagnostics (complexity, empty catch, oversized module)
-        for rel in ts_paths:
-            for sdiag in ast_files[rel].structural_diagnostics:
-                diagnostics.append(
-                    LintDiagnostic(
-                        snapshot_idx=snapshot_idx,
-                        file_path=rel,
-                        linter="tree-sitter" if not ran_external_linter else "codecity-ast",
-                        line=sdiag.line,
-                        col=sdiag.col,
-                        rule_code=sdiag.rule_code,
-                        category=sdiag.category,
-                        message=sdiag.message,
-                        fixable=sdiag.fixable,
-                    )
-                )
+        diagnostics.extend(
+            structural_diagnostics_to_lint(
+                snapshot_idx,
+                ts_paths,
+                ast_files,
+                "tree-sitter" if not ran_external_linter else "codecity-ast",
+            )
+        )
 
-        # 2. Format drift via `bun fmt --no-script --check` grouped by nearest bunfig.toml/pkg.json
         if bun_bin:
             by_cfg_dir: dict[Path, list[str]] = {}
             wt_res = worktree_root.resolve()
@@ -417,7 +332,7 @@ class TypeScriptPlugin:
             for cfg_dir, sub_paths in by_cfg_dir.items():
                 try:
                     fmt_proc = subprocess.run(
-                        [bun_bin, "fmt", "--no-script", "--check", *sub_paths],
+                        [bun_bin, "fmt", "--no-script", "--check", "--", *sub_paths],
                         cwd=cfg_dir,
                         capture_output=True,
                         text=True,
@@ -445,12 +360,12 @@ class TypeScriptPlugin:
         )
 
     def preview_fix(self, repo_root: Path, file_path: str) -> FixDiffResult | None:
-        if not file_path.endswith(_TS_EXTS):
+        if not file_path.endswith(TS_EXTS):
             return None
-        target = repo_root / file_path
-        if not target.exists():
+        target = safe_repo_target(repo_root, file_path)
+        if not target.is_file():
             return None
-        bun_bin = _find_bun()
+        bun_bin = find_bun()
         if not bun_bin:
             return FixDiffResult(
                 file_path=file_path,
@@ -460,50 +375,49 @@ class TypeScriptPlugin:
                 message="Bun binary not found in PATH.",
             )
 
+        rel = target.relative_to(repo_root.resolve()).as_posix()
         original = target.read_text(encoding="utf-8", errors="replace")
         with tempfile.TemporaryDirectory() as td:
-            tmp_file = Path(td) / Path(file_path).name
+            tmp_file = Path(td) / target.name
             tmp_file.write_text(original, encoding="utf-8")
             linter_label = "bun lint --fix"
             if _bun_supports_native_lint(bun_bin):
                 subprocess.run(
-                    [bun_bin, "lint", "--no-script", "--fix", str(tmp_file)],
+                    [bun_bin, "lint", "--no-script", "--fix", "--", str(tmp_file)],
                     cwd=td,
                     capture_output=True,
                     timeout=15,
                 )
             else:
-                oxlint_bin = _find_local_oxlint()
+                oxlint_bin = find_local_oxlint()
                 if oxlint_bin:
                     linter_label = "oxlint --fix + bun fmt"
                     subprocess.run(
-                        [bun_bin, "run", oxlint_bin, "--fix", str(tmp_file)],
+                        [bun_bin, "run", oxlint_bin, "--fix", "--", str(tmp_file)],
                         cwd=td,
                         capture_output=True,
                         timeout=15,
                     )
             subprocess.run(
-                [bun_bin, "fmt", "--no-script", str(tmp_file)],
+                [bun_bin, "fmt", "--no-script", "--", str(tmp_file)],
                 cwd=td,
                 capture_output=True,
                 timeout=15,
             )
             fixed = tmp_file.read_text(encoding="utf-8", errors="replace")
 
-        diff_lines = list(
+        diff_txt = "".join(
             difflib.unified_diff(
                 original.splitlines(keepends=True),
                 fixed.splitlines(keepends=True),
-                fromfile=f"a/{file_path}",
-                tofile=f"b/{file_path}",
+                fromfile=f"a/{rel}",
+                tofile=f"b/{rel}",
             )
         )
-        diff_txt = "".join(diff_lines)
         return FixDiffResult(
-            file_path=file_path,
+            file_path=rel,
             linter=linter_label,
             has_changes=bool(diff_txt.strip()),
             diff=diff_txt,
-            fixed_content=fixed if diff_txt.strip() else None,
             message="Bun auto-fix preview ready" if diff_txt.strip() else "File already clean.",
         )

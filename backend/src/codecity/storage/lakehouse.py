@@ -12,7 +12,6 @@ from pathlib import Path
 from typing import Any
 
 import duckdb
-import polars as pl
 
 from codecity.models import (
     Annotation,
@@ -29,17 +28,122 @@ from codecity.models import (
 
 DEFAULT_CATALOG_NAME = "lake"
 DATA_INLINING_LIMIT = 1000
+_ACTION_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
 
-TABLE_NAMES = (
-    "snapshots",
-    "districts",
-    "file_metrics",
-    "file_imports",
-    "cochange_pairs",
-    "external_deps",
-    "lint_diagnostics",
-    "annotations",
-)
+_ColumnSpec = tuple[str, str]
+
+_TABLE_SCHEMAS: dict[str, list[_ColumnSpec]] = {
+    "snapshots": [
+        ("snapshot_idx", "INTEGER"),
+        ("commit_sha", "VARCHAR"),
+        ("committed_at", "TIMESTAMP"),
+        ("git_tag", "VARCHAR"),
+        ("total_files", "INTEGER"),
+        ("total_sloc", "INTEGER"),
+        ("total_lint_issues", "INTEGER"),
+        ("language_breakdown", "VARIANT"),
+        ("health_score", "DOUBLE"),
+        ("health_grade", "VARCHAR"),
+        ("city_archetype_title", "VARCHAR"),
+        ("advisor_alerts", "VARIANT"),
+    ],
+    "districts": [
+        ("snapshot_idx", "INTEGER"),
+        ("district_path", "VARCHAR"),
+        ("display_name", "VARCHAR"),
+        ("zone_type", "VARCHAR"),
+        ("bounds_x", "DOUBLE"),
+        ("bounds_z", "DOUBLE"),
+        ("bounds_w", "DOUBLE"),
+        ("bounds_d", "DOUBLE"),
+        ("file_count", "INTEGER"),
+        ("avg_health", "DOUBLE"),
+        ("summary_blurb", "VARCHAR"),
+    ],
+    "file_metrics": [
+        ("snapshot_idx", "INTEGER"),
+        ("file_path", "VARCHAR"),
+        ("district_path", "VARCHAR"),
+        ("language", "VARCHAR"),
+        ("zone_type", "VARCHAR"),
+        ("building_archetype", "VARCHAR"),
+        ("role_confidence", "DOUBLE"),
+        ("role_signals", "VARIANT"),
+        ("sloc", "INTEGER"),
+        ("symbol_count", "INTEGER"),
+        ("max_complexity", "INTEGER"),
+        ("type_or_doc_ratio", "DOUBLE"),
+        ("lint_issue_count", "INTEGER"),
+        ("format_drift", "BOOLEAN"),
+        ("lint_by_category", "VARIANT"),
+        ("churn_90d", "INTEGER"),
+        ("bugfix_commits_90d", "INTEGER"),
+        ("distinct_authors_90d", "INTEGER"),
+        ("hotspot_score", "DOUBLE"),
+        ("condition_flags", "VARIANT"),
+        ("layout_x", "DOUBLE"),
+        ("layout_z", "DOUBLE"),
+        ("layout_w", "DOUBLE"),
+        ("layout_d", "DOUBLE"),
+    ],
+    "file_imports": [
+        ("snapshot_idx", "INTEGER"),
+        ("source_file", "VARCHAR"),
+        ("target_file", "VARCHAR"),
+    ],
+    "cochange_pairs": [
+        ("snapshot_idx", "INTEGER"),
+        ("file_a", "VARCHAR"),
+        ("file_b", "VARCHAR"),
+        ("shared_commits", "INTEGER"),
+        ("coupling_ratio", "DOUBLE"),
+    ],
+    "external_deps": [
+        ("snapshot_idx", "INTEGER"),
+        ("ecosystem", "VARCHAR"),
+        ("package_name", "VARCHAR"),
+        ("version", "VARCHAR"),
+        ("is_direct", "BOOLEAN"),
+        ("parent_package", "VARCHAR"),
+    ],
+    "lint_diagnostics": [
+        ("snapshot_idx", "INTEGER"),
+        ("file_path", "VARCHAR"),
+        ("linter", "VARCHAR"),
+        ("line", "INTEGER"),
+        ("col", "INTEGER"),
+        ("rule_code", "VARCHAR"),
+        ("category", "VARCHAR"),
+        ("message", "VARCHAR"),
+        ("fixable", "BOOLEAN"),
+        ("metadata", "VARIANT"),
+    ],
+    "annotations": [
+        ("annotation_id", "VARCHAR"),
+        ("file_path", "VARCHAR"),
+        ("author", "VARCHAR"),
+        ("tag", "VARCHAR"),
+        ("body", "VARCHAR"),
+        ("created_at", "TIMESTAMP"),
+    ],
+    "sandbox_actions": [
+        ("action_id", "VARCHAR"),
+        ("action_seq", "INTEGER"),
+        ("session_id", "VARCHAR"),
+        ("author", "VARCHAR"),
+        ("tool", "VARCHAR"),
+        ("target_path", "VARCHAR"),
+        ("secondary_path", "VARCHAR"),
+        ("district_path", "VARCHAR"),
+        ("summary", "VARCHAR"),
+        ("velocity_cost", "INTEGER"),
+        ("active", "BOOLEAN"),
+        ("created_at", "TIMESTAMP"),
+    ],
+}
+
+EXPORT_TABLES = tuple(t for t in _TABLE_SCHEMAS if t != "sandbox_actions")
+ANALYSIS_TABLES = tuple(t for t in EXPORT_TABLES if t != "annotations")
 
 
 def default_data_dir() -> Path:
@@ -63,13 +167,29 @@ def sanitize_identifier(raw: str) -> str:
 
 def quote_ident(ident: str) -> str:
     """Quote a SQL identifier safely."""
-    escaped = ident.replace('"', '""')
-    return f'"{escaped}"'
+    return f'"{ident.replace('"', '""')}"'
 
 
 def quote_catalog_prefix(prefix: str) -> str:
     """Quote a single or dotted catalog prefix (e.g. `lake` or `remote.lake`)."""
     return ".".join(quote_ident(part) for part in prefix.split(".") if part)
+
+
+def escape_sql_literal(value: str) -> str:
+    """Escape single quotes for SQL string literals where parameter binding is unsupported."""
+    return value.replace("'", "''")
+
+
+def load_duckdb_extensions(
+    con: duckdb.DuckDBPyConnection,
+    extensions: tuple[str, ...] = ("ducklake", "quack"),
+) -> None:
+    """Load required DuckDB extensions, installing them on demand if missing."""
+    for ext in extensions:
+        try:
+            con.execute(f"LOAD {ext};")
+        except duckdb.Error:
+            con.execute(f"INSTALL {ext}; LOAD {ext};")
 
 
 def infer_owner_repo(
@@ -86,8 +206,7 @@ def infer_owner_repo(
         cleaned = cleaned[:-4]
 
     if "://" in cleaned or cleaned.startswith("git@"):
-        parts = re.split(r"[/:]", cleaned)
-        parts = [p for p in parts if p]
+        parts = [p for p in re.split(r"[/:]", cleaned) if p]
         inferred_repo = parts[-1] if parts else "repo"
         inferred_owner = parts[-2] if len(parts) >= 2 else "git"
     else:
@@ -119,18 +238,17 @@ class LakehouseManager:
     def connect(self, *, read_only: bool = False) -> duckdb.DuckDBPyConnection:
         """Open a DuckDB 2.0 connection with DuckLake 1.1 and Quack extensions attached."""
         con = duckdb.connect()
-        self._load_extensions(con)
+        load_duckdb_extensions(con)
         attach_opts = [
-            f"DATA_PATH '{self._escape_sql_literal(str(self.parquet_dir))}'",
+            f"DATA_PATH '{escape_sql_literal(str(self.parquet_dir))}'",
             "AUTOMATIC_MIGRATION true",
             f"DATA_INLINING_ROW_LIMIT {DATA_INLINING_LIMIT}",
         ]
         if read_only:
             attach_opts.append("READ_ONLY")
-        opts_sql = ", ".join(attach_opts)
-        cat_literal = self._escape_sql_literal(str(self.catalog_path))
+        cat_literal = escape_sql_literal(str(self.catalog_path))
         cat_q = quote_ident(self.catalog_name)
-        con.execute(f"ATTACH 'ducklake:{cat_literal}' AS {cat_q} ({opts_sql});")
+        con.execute(f"ATTACH 'ducklake:{cat_literal}' AS {cat_q} ({', '.join(attach_opts)});")
         if not read_only:
             self._ensure_root_registry(con)
         return con
@@ -143,18 +261,6 @@ class LakehouseManager:
             yield con
         finally:
             con.close()
-
-    @staticmethod
-    def _load_extensions(con: duckdb.DuckDBPyConnection) -> None:
-        for ext in ("ducklake", "quack"):
-            try:
-                con.execute(f"LOAD {ext};")
-            except duckdb.Error:
-                con.execute(f"INSTALL {ext}; LOAD {ext};")
-
-    @staticmethod
-    def _escape_sql_literal(value: str) -> str:
-        return value.replace("'", "''")
 
     def _ensure_root_registry(self, con: duckdb.DuckDBPyConnection) -> None:
         cat = quote_ident(self.catalog_name)
@@ -192,7 +298,7 @@ class LakehouseManager:
         *,
         catalog_prefix: str | None = None,
     ) -> str:
-        """Create nested DuckLake 1.1 schemas `repos.<owner>.<repo>` and all 8 tables."""
+        """Create nested DuckLake 1.1 schemas `repos.<owner>.<repo>` and all tables."""
         o = sanitize_identifier(owner)
         r = sanitize_identifier(repo)
         cat = quote_catalog_prefix(catalog_prefix or self.catalog_name)
@@ -203,149 +309,9 @@ class LakehouseManager:
         con.execute(f"CREATE SCHEMA IF NOT EXISTS {cat}.repos.{quote_ident(o)}.{quote_ident(r)};")
 
         pfx = self.schema_prefix(o, r, catalog_prefix=catalog_prefix)
-        con.execute(
-            f"""
-            CREATE TABLE IF NOT EXISTS {pfx}.snapshots (
-                snapshot_idx INTEGER,
-                commit_sha VARCHAR,
-                committed_at TIMESTAMP,
-                git_tag VARCHAR,
-                total_files INTEGER,
-                total_sloc INTEGER,
-                total_lint_issues INTEGER,
-                language_breakdown VARIANT,
-                health_score DOUBLE,
-                health_grade VARCHAR,
-                city_archetype_title VARCHAR,
-                advisor_alerts VARIANT
-            );
-            """
-        )
-        con.execute(
-            f"""
-            CREATE TABLE IF NOT EXISTS {pfx}.districts (
-                snapshot_idx INTEGER,
-                district_path VARCHAR,
-                display_name VARCHAR,
-                zone_type VARCHAR,
-                bounds_x DOUBLE,
-                bounds_z DOUBLE,
-                bounds_w DOUBLE,
-                bounds_d DOUBLE,
-                file_count INTEGER,
-                avg_health DOUBLE,
-                summary_blurb VARCHAR
-            );
-            """
-        )
-        con.execute(
-            f"""
-            CREATE TABLE IF NOT EXISTS {pfx}.file_metrics (
-                snapshot_idx INTEGER,
-                file_path VARCHAR,
-                district_path VARCHAR,
-                language VARCHAR,
-                zone_type VARCHAR,
-                building_archetype VARCHAR,
-                role_confidence DOUBLE,
-                role_signals VARIANT,
-                sloc INTEGER,
-                symbol_count INTEGER,
-                max_complexity INTEGER,
-                type_or_doc_ratio DOUBLE,
-                lint_issue_count INTEGER,
-                format_drift BOOLEAN,
-                lint_by_category VARIANT,
-                churn_90d INTEGER,
-                bugfix_commits_90d INTEGER,
-                distinct_authors_90d INTEGER,
-                hotspot_score DOUBLE,
-                condition_flags VARIANT,
-                layout_x DOUBLE,
-                layout_z DOUBLE,
-                layout_w DOUBLE,
-                layout_d DOUBLE
-            );
-            """
-        )
-        con.execute(
-            f"""
-            CREATE TABLE IF NOT EXISTS {pfx}.file_imports (
-                snapshot_idx INTEGER,
-                source_file VARCHAR,
-                target_file VARCHAR
-            );
-            """
-        )
-        con.execute(
-            f"""
-            CREATE TABLE IF NOT EXISTS {pfx}.cochange_pairs (
-                snapshot_idx INTEGER,
-                file_a VARCHAR,
-                file_b VARCHAR,
-                shared_commits INTEGER,
-                coupling_ratio DOUBLE
-            );
-            """
-        )
-        con.execute(
-            f"""
-            CREATE TABLE IF NOT EXISTS {pfx}.external_deps (
-                snapshot_idx INTEGER,
-                ecosystem VARCHAR,
-                package_name VARCHAR,
-                version VARCHAR,
-                is_direct BOOLEAN,
-                parent_package VARCHAR
-            );
-            """
-        )
-        con.execute(
-            f"""
-            CREATE TABLE IF NOT EXISTS {pfx}.lint_diagnostics (
-                snapshot_idx INTEGER,
-                file_path VARCHAR,
-                linter VARCHAR,
-                line INTEGER,
-                col INTEGER,
-                rule_code VARCHAR,
-                category VARCHAR,
-                message VARCHAR,
-                fixable BOOLEAN,
-                metadata VARIANT
-            );
-            """
-        )
-        con.execute(
-            f"""
-            CREATE TABLE IF NOT EXISTS {pfx}.annotations (
-                annotation_id VARCHAR,
-                file_path VARCHAR,
-                author VARCHAR,
-                tag VARCHAR,
-                body VARCHAR,
-                created_at TIMESTAMP
-            );
-            """
-        )
-        con.execute(
-            f"""
-            CREATE TABLE IF NOT EXISTS {pfx}.sandbox_actions (
-                action_id VARCHAR,
-                action_seq INTEGER,
-                session_id VARCHAR,
-                author VARCHAR,
-                tool VARCHAR,
-                target_path VARCHAR,
-                secondary_path VARCHAR,
-                district_path VARCHAR,
-                summary VARCHAR,
-                velocity_cost INTEGER,
-                active BOOLEAN,
-                created_at TIMESTAMP
-            );
-            """
-        )
+        for tbl, cols in _TABLE_SCHEMAS.items():
+            cols_sql = ", ".join(f"{name} {dtype}" for name, dtype in cols)
+            con.execute(f"CREATE TABLE IF NOT EXISTS {pfx}.{tbl} ({cols_sql});")
 
         now = datetime.now(UTC).replace(tzinfo=None)
         existing = con.execute(
@@ -376,10 +342,33 @@ class LakehouseManager:
     ) -> None:
         """Clear prior snapshots/metrics before re-indexing while keeping Mayor notes if set."""
         pfx = self.schema_prefix(owner, repo, catalog_prefix=catalog_prefix)
-        for tbl in TABLE_NAMES:
-            if preserve_annotations and tbl == "annotations":
-                continue
+        tables = ANALYSIS_TABLES if preserve_annotations else EXPORT_TABLES
+        for tbl in tables:
             con.execute(f"DELETE FROM {pfx}.{tbl};")
+
+    def _insert_rows(
+        self,
+        con: duckdb.DuckDBPyConnection,
+        pfx: str,
+        table_name: str,
+        rows: list[tuple[Any, ...]],
+    ) -> None:
+        if not rows:
+            return
+        cols = _TABLE_SCHEMAS[table_name]
+        # Stage through a connection-local temp table because Quack remote writes
+        # do not accept bound parameters directly against `remote.*` tables.
+        tmp = f"_tmp_{table_name}"
+        tmp_ddl = ", ".join(
+            f"{col} {'VARCHAR' if dtype == 'VARIANT' else dtype}" for col, dtype in cols
+        )
+        select_expr = ", ".join(
+            f"{col}::JSON::VARIANT" if dtype == "VARIANT" else col for col, dtype in cols
+        )
+        placeholders = ", ".join("?" for _ in cols)
+        con.execute(f"CREATE OR REPLACE TEMP TABLE {tmp} ({tmp_ddl});")
+        con.executemany(f"INSERT INTO {tmp} VALUES ({placeholders});", rows)
+        con.execute(f"INSERT INTO {pfx}.{table_name} SELECT {select_expr} FROM {tmp};")
 
     def write_snapshot_bundle(
         self,
@@ -396,240 +385,147 @@ class LakehouseManager:
         *,
         catalog_prefix: str | None = None,
     ) -> None:
-        """Bulk-write one keyframe's records into DuckLake (supports remote Quack catalogs)."""
+        """Atomically write one keyframe's records into DuckLake (local or remote Quack)."""
         pfx = self.schema_prefix(owner, repo, catalog_prefix=catalog_prefix)
-
-        snap_df = pl.DataFrame(
-            [
-                {
-                    "snapshot_idx": snapshot.snapshot_idx,
-                    "commit_sha": snapshot.commit_sha,
-                    "committed_at": snapshot.committed_at.replace(tzinfo=None),
-                    "git_tag": snapshot.git_tag,
-                    "total_files": snapshot.total_files,
-                    "total_sloc": snapshot.total_sloc,
-                    "total_lint_issues": snapshot.total_lint_issues,
-                    "language_breakdown": json.dumps(snapshot.language_breakdown),
-                    "health_score": float(snapshot.health_score),
-                    "health_grade": snapshot.health_grade,
-                    "city_archetype_title": snapshot.city_archetype_title,
-                    "advisor_alerts": json.dumps([a.model_dump() for a in snapshot.advisor_alerts]),
-                }
-            ],
-            schema={
-                "snapshot_idx": pl.Int32,
-                "commit_sha": pl.String,
-                "committed_at": pl.Datetime("us"),
-                "git_tag": pl.String,
-                "total_files": pl.Int32,
-                "total_sloc": pl.Int32,
-                "total_lint_issues": pl.Int32,
-                "language_breakdown": pl.String,
-                "health_score": pl.Float64,
-                "health_grade": pl.String,
-                "city_archetype_title": pl.String,
-                "advisor_alerts": pl.String,
-            },
-        )
-        con.register("_tmp_snap", snap_df)
-        con.execute(
-            f"""
-            INSERT INTO {pfx}.snapshots
-            SELECT
-                snapshot_idx,
-                commit_sha,
-                committed_at,
-                git_tag,
-                total_files,
-                total_sloc,
-                total_lint_issues,
-                language_breakdown::JSON::VARIANT,
-                health_score,
-                health_grade,
-                city_archetype_title,
-                advisor_alerts::JSON::VARIANT
-            FROM _tmp_snap;
-            """
-        )
-
-        if districts:
-            dist_df = pl.DataFrame(
+        con.execute("BEGIN TRANSACTION;")
+        try:
+            self._insert_rows(
+                con,
+                pfx,
+                "snapshots",
                 [
-                    {
-                        "snapshot_idx": d.snapshot_idx,
-                        "district_path": d.district_path,
-                        "display_name": d.display_name,
-                        "zone_type": d.zone_type.value,
-                        "bounds_x": float(d.bounds_x),
-                        "bounds_z": float(d.bounds_z),
-                        "bounds_w": float(d.bounds_w),
-                        "bounds_d": float(d.bounds_d),
-                        "file_count": d.file_count,
-                        "avg_health": float(d.avg_health),
-                        "summary_blurb": d.summary_blurb,
-                    }
+                    (
+                        snapshot.snapshot_idx,
+                        snapshot.commit_sha,
+                        snapshot.committed_at.replace(tzinfo=None),
+                        snapshot.git_tag,
+                        snapshot.total_files,
+                        snapshot.total_sloc,
+                        snapshot.total_lint_issues,
+                        json.dumps(snapshot.language_breakdown),
+                        float(snapshot.health_score),
+                        snapshot.health_grade,
+                        snapshot.city_archetype_title,
+                        json.dumps([a.model_dump() for a in snapshot.advisor_alerts]),
+                    )
+                ],
+            )
+            self._insert_rows(
+                con,
+                pfx,
+                "districts",
+                [
+                    (
+                        d.snapshot_idx,
+                        d.district_path,
+                        d.display_name,
+                        d.zone_type.value,
+                        float(d.bounds_x),
+                        float(d.bounds_z),
+                        float(d.bounds_w),
+                        float(d.bounds_d),
+                        d.file_count,
+                        float(d.avg_health),
+                        d.summary_blurb,
+                    )
                     for d in districts
-                ]
+                ],
             )
-            con.register("_tmp_dist", dist_df)
-            con.execute(f"INSERT INTO {pfx}.districts SELECT * FROM _tmp_dist;")
-
-        if files:
-            files_df = pl.DataFrame(
+            self._insert_rows(
+                con,
+                pfx,
+                "file_metrics",
                 [
-                    {
-                        "snapshot_idx": f.snapshot_idx,
-                        "file_path": f.file_path,
-                        "district_path": f.district_path,
-                        "language": f.language,
-                        "zone_type": f.zone_type.value,
-                        "building_archetype": f.building_archetype.value,
-                        "role_confidence": float(f.role_confidence),
-                        "role_signals": json.dumps(f.role_signals),
-                        "sloc": f.sloc,
-                        "symbol_count": f.symbol_count,
-                        "max_complexity": f.max_complexity,
-                        "type_or_doc_ratio": float(f.type_or_doc_ratio),
-                        "lint_issue_count": f.lint_issue_count,
-                        "format_drift": bool(f.format_drift),
-                        "lint_by_category": json.dumps(f.lint_by_category),
-                        "churn_90d": f.churn_90d,
-                        "bugfix_commits_90d": f.bugfix_commits_90d,
-                        "distinct_authors_90d": f.distinct_authors_90d,
-                        "hotspot_score": float(f.hotspot_score),
-                        "condition_flags": json.dumps(f.condition_flags),
-                        "layout_x": float(f.layout_x),
-                        "layout_z": float(f.layout_z),
-                        "layout_w": float(f.layout_w),
-                        "layout_d": float(f.layout_d),
-                    }
+                    (
+                        f.snapshot_idx,
+                        f.file_path,
+                        f.district_path,
+                        f.language,
+                        f.zone_type.value,
+                        f.building_archetype.value,
+                        float(f.role_confidence),
+                        json.dumps(f.role_signals),
+                        f.sloc,
+                        f.symbol_count,
+                        f.max_complexity,
+                        float(f.type_or_doc_ratio),
+                        f.lint_issue_count,
+                        bool(f.format_drift),
+                        json.dumps(f.lint_by_category),
+                        f.churn_90d,
+                        f.bugfix_commits_90d,
+                        f.distinct_authors_90d,
+                        float(f.hotspot_score),
+                        json.dumps(f.condition_flags),
+                        float(f.layout_x),
+                        float(f.layout_z),
+                        float(f.layout_w),
+                        float(f.layout_d),
+                    )
                     for f in files
-                ]
+                ],
             )
-            con.register("_tmp_files", files_df)
-            con.execute(
-                f"""
-                INSERT INTO {pfx}.file_metrics
-                SELECT
-                    snapshot_idx,
-                    file_path,
-                    district_path,
-                    language,
-                    zone_type,
-                    building_archetype,
-                    role_confidence,
-                    role_signals::JSON::VARIANT,
-                    sloc,
-                    symbol_count,
-                    max_complexity,
-                    type_or_doc_ratio,
-                    lint_issue_count,
-                    format_drift,
-                    lint_by_category::JSON::VARIANT,
-                    churn_90d,
-                    bugfix_commits_90d,
-                    distinct_authors_90d,
-                    hotspot_score,
-                    condition_flags::JSON::VARIANT,
-                    layout_x,
-                    layout_z,
-                    layout_w,
-                    layout_d
-                FROM _tmp_files;
-                """
+            self._insert_rows(
+                con,
+                pfx,
+                "file_imports",
+                [(i.snapshot_idx, i.source_file, i.target_file) for i in imports],
             )
-
-        if imports:
-            imp_df = pl.DataFrame(
+            self._insert_rows(
+                con,
+                pfx,
+                "cochange_pairs",
                 [
-                    {
-                        "snapshot_idx": i.snapshot_idx,
-                        "source_file": i.source_file,
-                        "target_file": i.target_file,
-                    }
-                    for i in imports
-                ]
-            )
-            con.register("_tmp_imp", imp_df)
-            con.execute(f"INSERT INTO {pfx}.file_imports SELECT * FROM _tmp_imp;")
-
-        if cochanges:
-            co_df = pl.DataFrame(
-                [
-                    {
-                        "snapshot_idx": c.snapshot_idx,
-                        "file_a": c.file_a,
-                        "file_b": c.file_b,
-                        "shared_commits": c.shared_commits,
-                        "coupling_ratio": float(c.coupling_ratio),
-                    }
+                    (
+                        c.snapshot_idx,
+                        c.file_a,
+                        c.file_b,
+                        c.shared_commits,
+                        float(c.coupling_ratio),
+                    )
                     for c in cochanges
-                ]
+                ],
             )
-            con.register("_tmp_co", co_df)
-            con.execute(f"INSERT INTO {pfx}.cochange_pairs SELECT * FROM _tmp_co;")
-
-        if deps:
-            dep_df = pl.DataFrame(
+            self._insert_rows(
+                con,
+                pfx,
+                "external_deps",
                 [
-                    {
-                        "snapshot_idx": d.snapshot_idx,
-                        "ecosystem": d.ecosystem,
-                        "package_name": d.package_name,
-                        "version": d.version,
-                        "is_direct": bool(d.is_direct),
-                        "parent_package": d.parent_package,
-                    }
+                    (
+                        d.snapshot_idx,
+                        d.ecosystem,
+                        d.package_name,
+                        d.version,
+                        bool(d.is_direct),
+                        d.parent_package,
+                    )
                     for d in deps
                 ],
-                schema={
-                    "snapshot_idx": pl.Int32,
-                    "ecosystem": pl.String,
-                    "package_name": pl.String,
-                    "version": pl.String,
-                    "is_direct": pl.Boolean,
-                    "parent_package": pl.String,
-                },
             )
-            con.register("_tmp_deps", dep_df)
-            con.execute(f"INSERT INTO {pfx}.external_deps SELECT * FROM _tmp_deps;")
-
-        if diagnostics:
-            diag_df = pl.DataFrame(
+            self._insert_rows(
+                con,
+                pfx,
+                "lint_diagnostics",
                 [
-                    {
-                        "snapshot_idx": diag.snapshot_idx,
-                        "file_path": diag.file_path,
-                        "linter": diag.linter,
-                        "line": diag.line,
-                        "col": diag.col,
-                        "rule_code": diag.rule_code,
-                        "category": diag.category,
-                        "message": diag.message,
-                        "fixable": bool(diag.fixable),
-                        "metadata": json.dumps(diag.metadata),
-                    }
+                    (
+                        diag.snapshot_idx,
+                        diag.file_path,
+                        diag.linter,
+                        diag.line,
+                        diag.col,
+                        diag.rule_code,
+                        diag.category,
+                        diag.message,
+                        bool(diag.fixable),
+                        json.dumps(diag.metadata),
+                    )
                     for diag in diagnostics
-                ]
+                ],
             )
-            con.register("_tmp_diag", diag_df)
-            con.execute(
-                f"""
-                INSERT INTO {pfx}.lint_diagnostics
-                SELECT
-                    snapshot_idx,
-                    file_path,
-                    linter,
-                    line,
-                    col,
-                    rule_code,
-                    category,
-                    message,
-                    fixable,
-                    metadata::JSON::VARIANT
-                FROM _tmp_diag;
-                """
-            )
+            con.execute("COMMIT;")
+        except Exception:
+            con.execute("ROLLBACK;")
+            raise
 
     def add_annotation(
         self,
@@ -642,20 +538,56 @@ class LakehouseManager:
     ) -> None:
         """Insert a Mayor Note directly into DuckLake (inlined automatically for fast writes)."""
         pfx = self.schema_prefix(owner, repo, catalog_prefix=catalog_prefix)
-        df = pl.DataFrame(
+        self._insert_rows(
+            con,
+            pfx,
+            "annotations",
             [
-                {
-                    "annotation_id": annotation.annotation_id,
-                    "file_path": annotation.file_path,
-                    "author": annotation.author,
-                    "tag": annotation.tag,
-                    "body": annotation.body,
-                    "created_at": annotation.created_at.replace(tzinfo=None),
-                }
-            ]
+                (
+                    annotation.annotation_id,
+                    annotation.file_path,
+                    annotation.author,
+                    annotation.tag,
+                    annotation.body,
+                    annotation.created_at.replace(tzinfo=None),
+                )
+            ],
         )
-        con.register("_tmp_ann", df)
-        con.execute(f"INSERT INTO {pfx}.annotations SELECT * FROM _tmp_ann;")
+
+    def _query_table_changes(
+        self,
+        con: duckdb.DuckDBPyConnection,
+        owner: str,
+        repo: str,
+        table_name: str,
+        cols: list[str],
+        order_by: str,
+        start_snapshot: int = 0,
+    ) -> list[dict[str, Any]]:
+        schema_dot = self.schema_dot_path(owner, repo)
+        cat = escape_sql_literal(self.catalog_name)
+        cur = con.execute(f"SELECT * FROM ducklake_current_snapshot('{cat}')").fetchone()
+        if not cur or cur[0] is None:
+            return []
+        end_snap = int(cur[0])
+        if start_snapshot > end_snap:
+            return []
+        rows = con.execute(
+            f"""
+            SELECT {", ".join(cols)}
+            FROM ducklake_table_changes(
+                '{cat}', '{schema_dot}', '{table_name}', {int(start_snapshot)}, {end_snap}
+            )
+            ORDER BY {order_by};
+            """
+        ).fetchall()
+        results = []
+        for row in rows:
+            item = dict(zip(cols, row, strict=True))
+            if isinstance(item.get("created_at"), datetime):
+                item["created_at"] = item["created_at"].isoformat()
+            results.append(item)
+        return results
 
     def get_annotation_changes(
         self,
@@ -665,50 +597,25 @@ class LakehouseManager:
         start_snapshot: int = 0,
     ) -> list[dict[str, Any]]:
         """Query DuckLake `ducklake_table_changes()` for the live Mayor Notes changelog."""
-        schema_dot = self.schema_dot_path(owner, repo)
-        cat = self._escape_sql_literal(self.catalog_name)
-        cur = con.execute(f"SELECT * FROM ducklake_current_snapshot('{cat}')").fetchone()
-        if not cur or cur[0] is None:
-            return []
-        end_snap = int(cur[0])
-        if start_snapshot > end_snap:
-            return []
-        rows = con.execute(
-            f"""
-            SELECT
-                snapshot_id,
-                rowid,
-                change_type,
-                annotation_id,
-                file_path,
-                author,
-                tag,
-                body,
-                created_at
-            FROM ducklake_table_changes(
-                '{cat}', '{schema_dot}', 'annotations', {start_snapshot}, {end_snap}
-            )
-            ORDER BY snapshot_id DESC, created_at DESC;
-            """
-        ).fetchall()
-        cols = [
-            "snapshot_id",
-            "rowid",
-            "change_type",
-            "annotation_id",
-            "file_path",
-            "author",
-            "tag",
-            "body",
-            "created_at",
-        ]
-        results = []
-        for row in rows:
-            item = dict(zip(cols, row, strict=True))
-            if isinstance(item["created_at"], datetime):
-                item["created_at"] = item["created_at"].isoformat()
-            results.append(item)
-        return results
+        return self._query_table_changes(
+            con,
+            owner,
+            repo,
+            "annotations",
+            [
+                "snapshot_id",
+                "rowid",
+                "change_type",
+                "annotation_id",
+                "file_path",
+                "author",
+                "tag",
+                "body",
+                "created_at",
+            ],
+            "snapshot_id DESC, created_at DESC",
+            start_snapshot,
+        )
 
     def add_sandbox_action(
         self,
@@ -727,41 +634,27 @@ class LakehouseManager:
         ).fetchall()
         next_seq = int(rows[0][0]) + 1 if rows else 1
         persisted = action.model_copy(update={"action_seq": next_seq})
-
-        df = pl.DataFrame(
+        self._insert_rows(
+            con,
+            pfx,
+            "sandbox_actions",
             [
-                {
-                    "action_id": persisted.action_id,
-                    "action_seq": persisted.action_seq,
-                    "session_id": persisted.session_id,
-                    "author": persisted.author,
-                    "tool": persisted.tool,
-                    "target_path": persisted.target_path,
-                    "secondary_path": persisted.secondary_path,
-                    "district_path": persisted.district_path,
-                    "summary": persisted.summary,
-                    "velocity_cost": persisted.velocity_cost,
-                    "active": persisted.active,
-                    "created_at": persisted.created_at.replace(tzinfo=None),
-                }
+                (
+                    persisted.action_id,
+                    persisted.action_seq,
+                    persisted.session_id,
+                    persisted.author,
+                    persisted.tool,
+                    persisted.target_path,
+                    persisted.secondary_path,
+                    persisted.district_path,
+                    persisted.summary,
+                    persisted.velocity_cost,
+                    persisted.active,
+                    persisted.created_at.replace(tzinfo=None),
+                )
             ],
-            schema={
-                "action_id": pl.String,
-                "action_seq": pl.Int32,
-                "session_id": pl.String,
-                "author": pl.String,
-                "tool": pl.String,
-                "target_path": pl.String,
-                "secondary_path": pl.String,
-                "district_path": pl.String,
-                "summary": pl.String,
-                "velocity_cost": pl.Int32,
-                "active": pl.Boolean,
-                "created_at": pl.Datetime("us"),
-            },
         )
-        con.register("_tmp_sbx", df)
-        con.execute(f"INSERT INTO {pfx}.sandbox_actions SELECT * FROM _tmp_sbx;")
         return persisted
 
     def query_sandbox_actions(
@@ -809,11 +702,13 @@ class LakehouseManager:
         *,
         catalog_prefix: str | None = None,
     ) -> None:
+        if not _ACTION_ID_RE.fullmatch(action_id):
+            raise ValueError(f"Invalid sandbox action_id: {action_id}")
         pfx = self.schema_prefix(owner, repo, catalog_prefix=catalog_prefix)
-        aid_lit = self._escape_sql_literal(action_id)
         active_sql = "true" if active else "false"
         con.execute(
-            f"UPDATE {pfx}.sandbox_actions SET active = {active_sql} WHERE action_id = '{aid_lit}';"
+            f"UPDATE {pfx}.sandbox_actions SET active = {active_sql} "
+            f"WHERE action_id = '{action_id}';"
         )
 
     def clear_sandbox_actions(
@@ -835,52 +730,74 @@ class LakehouseManager:
         start_snapshot: int = 0,
     ) -> list[dict[str, Any]]:
         """Query DuckLake `ducklake_table_changes()` for collaborative sandbox sync."""
-        schema_dot = self.schema_dot_path(owner, repo)
-        cat = self._escape_sql_literal(self.catalog_name)
-        cur = con.execute(f"SELECT * FROM ducklake_current_snapshot('{cat}')").fetchone()
-        if not cur or cur[0] is None:
-            return []
-        end_snap = int(cur[0])
-        if start_snapshot > end_snap:
-            return []
-        rows = con.execute(
+        return self._query_table_changes(
+            con,
+            owner,
+            repo,
+            "sandbox_actions",
+            [
+                "snapshot_id",
+                "change_type",
+                "action_id",
+                "action_seq",
+                "author",
+                "tool",
+                "target_path",
+                "summary",
+                "active",
+                "created_at",
+            ],
+            "snapshot_id DESC, action_seq DESC",
+            start_snapshot,
+        )
+
+    def _build_repo_ref(
+        self,
+        con: duckdb.DuckDBPyConnection,
+        owner: str,
+        repo: str,
+        schema_path: str,
+        source: str,
+    ) -> RepoRef:
+        pfx = self.schema_prefix(owner, repo)
+        row = con.execute(
             f"""
             SELECT
-                snapshot_id,
-                change_type,
-                action_id,
-                action_seq,
-                author,
-                tool,
-                target_path,
-                summary,
-                active,
-                created_at
-            FROM ducklake_table_changes(
-                '{cat}', '{schema_dot}', 'sandbox_actions', {start_snapshot}, {end_snap}
-            )
-            ORDER BY snapshot_id DESC, action_seq DESC;
+                COUNT(*)::INTEGER,
+                COALESCE(MAX(snapshot_idx), 0)::INTEGER,
+                arg_max(health_grade, snapshot_idx),
+                arg_max(city_archetype_title, snapshot_idx),
+                COALESCE(arg_max(total_files, snapshot_idx), 0)::INTEGER
+            FROM {pfx}.snapshots;
             """
-        ).fetchall()
-        cols = [
-            "snapshot_id",
-            "change_type",
-            "action_id",
-            "action_seq",
-            "author",
-            "tool",
-            "target_path",
-            "summary",
-            "active",
-            "created_at",
-        ]
-        results = []
-        for row in rows:
-            item = dict(zip(cols, row, strict=True))
-            if isinstance(item["created_at"], datetime):
-                item["created_at"] = item["created_at"].isoformat()
-            results.append(item)
-        return results
+        ).fetchone()
+        total_snaps = int(row[0]) if row else 0
+        latest_idx = int(row[1]) if row else 0
+        return RepoRef(
+            owner=owner,
+            repo=repo,
+            schema_path=schema_path,
+            repo_url_or_path=source,
+            latest_snapshot_idx=latest_idx,
+            latest_grade=str(row[2]) if row and row[2] is not None else "A",
+            latest_title=(str(row[3]) if row and row[3] is not None else "Sunlit Civic Metropolis"),
+            total_snapshots=total_snaps,
+            total_files=int(row[4]) if row else 0,
+        )
+
+    def get_repo(self, con: duckdb.DuckDBPyConnection, owner: str, repo: str) -> RepoRef | None:
+        """Fetch one analyzed repository summary from `repo_registry`."""
+        o = sanitize_identifier(owner)
+        r = sanitize_identifier(repo)
+        cat = quote_ident(self.catalog_name)
+        row = con.execute(
+            f"SELECT owner, repo, schema_path, source FROM {cat}.repos.repo_registry "
+            "WHERE owner = ? AND repo = ? LIMIT 1;",
+            [o, r],
+        ).fetchone()
+        if not row:
+            return None
+        return self._build_repo_ref(con, str(row[0]), str(row[1]), str(row[2]), str(row[3]))
 
     def list_repos(self, con: duckdb.DuckDBPyConnection) -> list[RepoRef]:
         """List all analyzed repositories and their latest snapshot summary."""
@@ -889,50 +806,31 @@ class LakehouseManager:
             f"SELECT owner, repo, schema_path, source "
             f"FROM {cat}.repos.repo_registry ORDER BY updated_at DESC;"
         ).fetchall()
-        repos: list[RepoRef] = []
-        for owner, repo, schema_path, source in rows:
-            pfx = self.schema_prefix(owner, repo)
-            snap_row = con.execute(
-                f"""
-                SELECT
-                    COUNT(*),
-                    COALESCE(MAX(snapshot_idx), 0)
-                FROM {pfx}.snapshots;
-                """
-            ).fetchone()
-            total_snaps = int(snap_row[0]) if snap_row else 0
-            latest_idx = int(snap_row[1]) if snap_row else 0
-            latest_grade = "A"
-            latest_title = "Sunlit Civic Metropolis"
-            total_files = 0
-            if total_snaps > 0:
-                meta = con.execute(
-                    f"""
-                    SELECT health_grade, city_archetype_title, total_files
-                    FROM {pfx}.snapshots
-                    WHERE snapshot_idx = ?
-                    LIMIT 1;
-                    """,
-                    [latest_idx],
-                ).fetchone()
-                if meta:
-                    latest_grade = str(meta[0])
-                    latest_title = str(meta[1])
-                    total_files = int(meta[2])
-            repos.append(
-                RepoRef(
-                    owner=owner,
-                    repo=repo,
-                    schema_path=schema_path,
-                    repo_url_or_path=source,
-                    latest_snapshot_idx=latest_idx,
-                    latest_grade=latest_grade,
-                    latest_title=latest_title,
-                    total_snapshots=total_snaps,
-                    total_files=total_files,
-                )
-            )
-        return repos
+        return [self._build_repo_ref(con, r[0], r[1], r[2], r[3]) for r in rows]
+
+    def export_table_parquet(
+        self,
+        con: duckdb.DuckDBPyConnection,
+        owner: str,
+        repo: str,
+        table_name: str,
+        dest: Path,
+    ) -> Path:
+        """Export one repo table to a DuckDB-Wasm-compatible Parquet file."""
+        if table_name not in EXPORT_TABLES:
+            raise ValueError(f"Unknown export table: {table_name}")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        pfx = self.schema_prefix(owner, repo)
+        cols = _TABLE_SCHEMAS[table_name]
+        cols_expr = ", ".join(
+            f"to_json({col})::VARCHAR AS {col}" if dtype == "VARIANT" else col
+            for col, dtype in cols
+        )
+        dest_esc = escape_sql_literal(str(dest))
+        con.execute(
+            f"COPY (SELECT {cols_expr} FROM {pfx}.{table_name}) TO '{dest_esc}' (FORMAT PARQUET);"
+        )
+        return dest
 
     def export_repo_parquet(
         self,
@@ -943,41 +841,7 @@ class LakehouseManager:
     ) -> dict[str, Path]:
         """Export every table for a repo to DuckDB-Wasm-compatible Parquet files."""
         out_dir.mkdir(parents=True, exist_ok=True)
-        pfx = self.schema_prefix(owner, repo)
-
-        projections = {
-            "snapshots": (
-                "snapshot_idx, commit_sha, committed_at, git_tag, total_files, total_sloc, "
-                "total_lint_issues, to_json(language_breakdown)::VARCHAR AS language_breakdown, "
-                "health_score, health_grade, city_archetype_title, "
-                "to_json(advisor_alerts)::VARCHAR AS advisor_alerts"
-            ),
-            "districts": "*",
-            "file_metrics": (
-                "snapshot_idx, file_path, district_path, language, zone_type, building_archetype, "
-                "role_confidence, to_json(role_signals)::VARCHAR AS role_signals, "
-                "sloc, symbol_count, max_complexity, type_or_doc_ratio, lint_issue_count, "
-                "format_drift, to_json(lint_by_category)::VARCHAR AS lint_by_category, "
-                "churn_90d, bugfix_commits_90d, distinct_authors_90d, hotspot_score, "
-                "to_json(condition_flags)::VARCHAR AS condition_flags, "
-                "layout_x, layout_z, layout_w, layout_d"
-            ),
-            "file_imports": "*",
-            "cochange_pairs": "*",
-            "external_deps": "*",
-            "lint_diagnostics": (
-                "snapshot_idx, file_path, linter, line, col, rule_code, category, message, "
-                "fixable, to_json(metadata)::VARCHAR AS metadata"
-            ),
-            "annotations": "*",
+        return {
+            tbl: self.export_table_parquet(con, owner, repo, tbl, out_dir / f"{tbl}.parquet")
+            for tbl in EXPORT_TABLES
         }
-
-        exported: dict[str, Path] = {}
-        for tbl, cols_expr in projections.items():
-            dest = out_dir / f"{tbl}.parquet"
-            dest_esc = self._escape_sql_literal(str(dest))
-            con.execute(
-                f"COPY (SELECT {cols_expr} FROM {pfx}.{tbl}) TO '{dest_esc}' (FORMAT PARQUET);"
-            )
-            exported[tbl] = dest
-        return exported

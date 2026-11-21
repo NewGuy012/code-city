@@ -128,12 +128,11 @@ def analyze_repository(
                 district_layout,
             )
 
-            # Optional HEAD-only semantic README/doc enrichment (Phase 5)
             if semantic and kf.snapshot_idx == total_kf - 1:
                 try:
                     from codecity.analyzer.semantic import enrich_head_districts
 
-                    enrich_head_districts(repo_path, snapshot, districts)
+                    enrich_head_districts(repo_path, districts)
                 except Exception:
                     pass
 
@@ -150,7 +149,7 @@ def analyze_repository(
                     cochanges,
                     plugin_res.external_deps,
                     plugin_res.diagnostics,
-                    catalog_prefix="remote.lake",
+                    catalog_prefix=f"remote.{lake.catalog_name}",
                 )
             finally:
                 client.close()
@@ -176,10 +175,7 @@ def analyze_repository(
                 )
 
         with qsrv.host_cursor() as con:
-            repos = lake.list_repos(con)
-        matched = next(
-            (r for r in repos if r.owner == resolved_owner and r.repo == resolved_repo),
-            RepoRef(
+            matched = lake.get_repo(con, resolved_owner, resolved_repo) or RepoRef(
                 owner=resolved_owner,
                 repo=resolved_repo,
                 schema_path=schema_path,
@@ -187,8 +183,7 @@ def analyze_repository(
                 latest_snapshot_idx=total_kf - 1,
                 total_snapshots=total_kf,
                 total_files=latest_files_count,
-            ),
-        )
+            )
 
     emit("done", f"City complete: {matched.latest_grade} · {matched.latest_title}", 100.0)
     return AnalyzeSummary(

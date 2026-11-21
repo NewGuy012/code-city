@@ -3,26 +3,19 @@
 from __future__ import annotations
 
 import json
-import shutil
 import subprocess
-import sys
 import tomllib
 from pathlib import Path
 
-from codecity.analyzer.plugins.base import PluginResult
+from codecity.analyzer.plugins.base import (
+    DepCollector,
+    PluginResult,
+    edges_to_imports,
+    ruff_cmd,
+    safe_repo_target,
+)
 from codecity.analyzer.treesitter_core import AstFileInfo
 from codecity.models import ExternalDep, FileImport, FixDiffResult, LintDiagnostic
-
-
-def _ruff_cmd() -> list[str]:
-    """Locate the `ruff` CLI executable reliably inside or outside the active venv."""
-    venv_ruff = Path(sys.executable).parent / "ruff"
-    if venv_ruff.exists():
-        return [str(venv_ruff)]
-    found = shutil.which("ruff")
-    if found:
-        return [found]
-    return [sys.executable, "-m", "ruff"]
 
 
 def _categorize_ruff_code(code: str) -> str:
@@ -40,47 +33,30 @@ def _categorize_ruff_code(code: str) -> str:
     return "lint"
 
 
+def _extract_pkg_name(spec: str) -> str:
+    spec = spec.strip().split(";")[0].strip()
+    for sep in ("[", "=", ">", "<", "~", "!", "@", " "):
+        if sep in spec:
+            spec = spec.split(sep, 1)[0]
+    return spec.strip()
+
+
 def _parse_python_deps(worktree_root: Path, snapshot_idx: int) -> list[ExternalDep]:
-    deps: list[ExternalDep] = []
-    seen: set[tuple[str, bool]] = set()
-    direct_names: set[str] = set()
+    deps = DepCollector(snapshot_idx, "python", case_insensitive=True)
 
     pyproject = worktree_root / "pyproject.toml"
     if pyproject.exists():
         try:
             data = tomllib.loads(pyproject.read_text(encoding="utf-8", errors="ignore"))
-            raw_deps = list(data.get("project", {}).get("dependencies", []))
-            for item in raw_deps:
+            for item in data.get("project", {}).get("dependencies", []):
                 name = _extract_pkg_name(str(item))
                 if name:
-                    direct_names.add(name.lower())
-                    if (name.lower(), True) not in seen:
-                        seen.add((name.lower(), True))
-                        deps.append(
-                            ExternalDep(
-                                snapshot_idx=snapshot_idx,
-                                ecosystem="python",
-                                package_name=name,
-                                version=str(item).removeprefix(name).strip() or "*",
-                                is_direct=True,
-                            )
-                        )
-            poetry_deps = data.get("tool", {}).get("poetry", {}).get("dependencies", {})
-            for name, spec in poetry_deps.items():
-                if name.lower() == "python":
-                    continue
-                direct_names.add(name.lower())
-                if (name.lower(), True) not in seen:
-                    seen.add((name.lower(), True))
-                    deps.append(
-                        ExternalDep(
-                            snapshot_idx=snapshot_idx,
-                            ecosystem="python",
-                            package_name=name,
-                            version=str(spec),
-                            is_direct=True,
-                        )
-                    )
+                    deps.add(name, str(item).removeprefix(name).strip() or "*", is_direct=True)
+            for name, spec in (
+                data.get("tool", {}).get("poetry", {}).get("dependencies", {}).items()
+            ):
+                if name.lower() != "python":
+                    deps.add(str(name), str(spec), is_direct=True)
         except Exception:
             pass
 
@@ -88,21 +64,10 @@ def _parse_python_deps(worktree_root: Path, snapshot_idx: int) -> list[ExternalD
         try:
             for line in req_file.read_text(encoding="utf-8", errors="ignore").splitlines():
                 stripped = line.split("#", 1)[0].strip()
-                if not stripped or stripped.startswith("-"):
-                    continue
-                name = _extract_pkg_name(stripped)
-                if name and (name.lower(), True) not in seen:
-                    direct_names.add(name.lower())
-                    seen.add((name.lower(), True))
-                    deps.append(
-                        ExternalDep(
-                            snapshot_idx=snapshot_idx,
-                            ecosystem="python",
-                            package_name=name,
-                            version=stripped.removeprefix(name).strip() or "*",
-                            is_direct=True,
-                        )
-                    )
+                if stripped and not stripped.startswith("-"):
+                    name = _extract_pkg_name(stripped)
+                    if name:
+                        deps.add(name, stripped.removeprefix(name).strip() or "*", is_direct=True)
         except OSError:
             pass
 
@@ -112,34 +77,12 @@ def _parse_python_deps(worktree_root: Path, snapshot_idx: int) -> list[ExternalD
             lock_data = tomllib.loads(uv_lock.read_text(encoding="utf-8", errors="ignore"))
             for pkg in lock_data.get("package", []):
                 name = str(pkg.get("name", "")).strip()
-                if not name:
-                    continue
-                version = str(pkg.get("version", ""))
-                is_direct = name.lower() in direct_names
-                if (name.lower(), is_direct) in seen:
-                    continue
-                seen.add((name.lower(), is_direct))
-                deps.append(
-                    ExternalDep(
-                        snapshot_idx=snapshot_idx,
-                        ecosystem="python",
-                        package_name=name,
-                        version=version,
-                        is_direct=is_direct,
-                    )
-                )
+                if name:
+                    deps.add(name, str(pkg.get("version", "")), is_direct=deps.is_direct(name))
         except Exception:
             pass
 
-    return deps[:400]
-
-
-def _extract_pkg_name(spec: str) -> str:
-    spec = spec.strip().split(";")[0].strip()
-    for sep in ("[", "=", ">", "<", "~", "!", "@", " "):
-        if sep in spec:
-            spec = spec.split(sep, 1)[0]
-    return spec.strip()
+    return deps.items
 
 
 def _resolve_python_imports_fallback(
@@ -156,25 +99,21 @@ def _resolve_python_imports_fallback(
         if parts and parts[-1] == "__init__":
             parts = parts[:-1]
         for start in range(len(parts)):
-            # Strip common src/ or backend/src/ roots so `from pkg.mod import ...` resolves
             mod = ".".join(parts[start:])
             if mod and mod not in module_to_file:
                 module_to_file[mod] = rel
 
     edges: set[tuple[str, str]] = set()
     for rel in py_files:
-        info = ast_files[rel]
         cur_parts = list(Path(rel).parent.parts)
-        for imp in info.raw_imports:
-            target: str | None = None
+        for imp in ast_files[rel].raw_imports:
             if imp.startswith("."):
                 dots = len(imp) - len(imp.lstrip("."))
                 rem = imp.lstrip(".")
                 base_parts = cur_parts[: max(0, len(cur_parts) - (dots - 1))]
                 if rem:
                     base_parts.extend(rem.split("."))
-                cand_mod = ".".join(base_parts)
-                target = module_to_file.get(cand_mod)
+                target = module_to_file.get(".".join(base_parts))
             else:
                 target = module_to_file.get(imp)
                 if not target and "." in imp:
@@ -182,10 +121,7 @@ def _resolve_python_imports_fallback(
             if target and target != rel:
                 edges.add((rel, target))
 
-    return [
-        FileImport(snapshot_idx=snapshot_idx, source_file=src, target_file=dst)
-        for src, dst in sorted(edges)
-    ]
+    return edges_to_imports(snapshot_idx, edges)
 
 
 class PythonPlugin:
@@ -205,14 +141,14 @@ class PythonPlugin:
         if not py_paths:
             return PluginResult(external_deps=deps)
 
-        ruff = _ruff_cmd()
+        ruff = ruff_cmd()
         diagnostics: list[LintDiagnostic] = []
         edge_set: set[tuple[str, str]] = set()
+        wt_root = worktree_root.resolve()
 
-        # 1. Run `ruff check --output-format=json` across Python files
         try:
             proc = subprocess.run(
-                [*ruff, "check", "--no-cache", "--output-format=json", *py_paths],
+                [*ruff, "check", "--no-cache", "--output-format=json", "--", *py_paths],
                 cwd=worktree_root,
                 capture_output=True,
                 text=True,
@@ -221,16 +157,10 @@ class PythonPlugin:
                 timeout=30,
             )
             if proc.stdout.strip().startswith("["):
-                items = json.loads(proc.stdout)
-                for item in items:
+                for item in json.loads(proc.stdout):
                     raw_fname = str(item.get("filename", ""))
                     try:
-                        rel_path = (
-                            Path(raw_fname)
-                            .resolve()
-                            .relative_to(worktree_root.resolve())
-                            .as_posix()
-                        )
+                        rel_path = Path(raw_fname).resolve().relative_to(wt_root).as_posix()
                     except ValueError:
                         rel_path = raw_fname
                     if rel_path not in ast_files:
@@ -254,10 +184,9 @@ class PythonPlugin:
         except Exception:
             pass
 
-        # 2. Run `ruff analyze graph` and merge with AST resolution
         try:
             gproc = subprocess.run(
-                [*ruff, "analyze", "graph", "--direction", "dependencies", *py_paths],
+                [*ruff, "analyze", "graph", "--direction", "dependencies", "--", *py_paths],
                 cwd=worktree_root,
                 capture_output=True,
                 text=True,
@@ -266,8 +195,7 @@ class PythonPlugin:
                 timeout=20,
             )
             if gproc.returncode == 0 and gproc.stdout.strip().startswith("{"):
-                graph_data: dict[str, list[str]] = json.loads(gproc.stdout)
-                for src, targets in graph_data.items():
+                for src, targets in json.loads(gproc.stdout).items():
                     src_norm = Path(src).as_posix()
                     if src_norm not in ast_files:
                         continue
@@ -281,13 +209,8 @@ class PythonPlugin:
         for imp in _resolve_python_imports_fallback(ast_files, snapshot_idx):
             edge_set.add((imp.source_file, imp.target_file))
 
-        imports = [
-            FileImport(snapshot_idx=snapshot_idx, source_file=s, target_file=t)
-            for s, t in sorted(edge_set)
-        ]
-
         return PluginResult(
-            imports=imports,
+            imports=edges_to_imports(snapshot_idx, edge_set),
             diagnostics=diagnostics,
             external_deps=deps,
         )
@@ -295,12 +218,12 @@ class PythonPlugin:
     def preview_fix(self, repo_root: Path, file_path: str) -> FixDiffResult | None:
         if not file_path.endswith((".py", ".pyi")):
             return None
-        target = repo_root / file_path
-        if not target.exists():
+        target = safe_repo_target(repo_root, file_path)
+        if not target.is_file():
             return None
-        ruff = _ruff_cmd()
+        rel = target.relative_to(repo_root.resolve()).as_posix()
         diff_proc = subprocess.run(
-            [*ruff, "check", "--no-cache", "--fix", "--diff", file_path],
+            [*ruff_cmd(), "check", "--no-cache", "--fix", "--diff", "--", rel],
             cwd=repo_root,
             capture_output=True,
             text=True,
@@ -310,7 +233,7 @@ class PythonPlugin:
         )
         diff_txt = diff_proc.stdout
         return FixDiffResult(
-            file_path=file_path,
+            file_path=rel,
             linter="ruff",
             has_changes=bool(diff_txt.strip()),
             diff=diff_txt,

@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Any
 
 import tree_sitter_go
-import tree_sitter_javascript
 import tree_sitter_python
 import tree_sitter_rust
 import tree_sitter_typescript
@@ -88,7 +87,6 @@ def _get_language(lang_key: str) -> Language:
             "python": tree_sitter_python.language,
             "typescript": tree_sitter_typescript.language_typescript,
             "tsx": tree_sitter_typescript.language_tsx,
-            "javascript": tree_sitter_javascript.language,
             "rust": tree_sitter_rust.language,
             "go": tree_sitter_go.language,
         }
@@ -393,8 +391,29 @@ def _extract_imports(
 
 
 def _strip_strings_and_comments_for_hints(text: str) -> str:
-    """Blank quoted string/regex literals for conservative keyword hint checks."""
-    return re.sub(r"(['\"`])(?:\\.|(?!\1).)*\1", '""', text)
+    """Blank quoted string literals in a single linear pass for conservative hint checks."""
+    out: list[str] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if ch in {"'", '"', "`"}:
+            out.append('""')
+            quote = ch
+            i += 1
+            while i < n:
+                cur = text[i]
+                if cur == "\\":
+                    i += 2
+                    continue
+                if cur == quote:
+                    i += 1
+                    break
+                i += 1
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
 
 
 def analyze_file_ast(rel_path: str, text: str) -> AstFileInfo:

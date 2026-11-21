@@ -11,7 +11,13 @@ from dataclasses import dataclass
 
 import duckdb
 
-from codecity.storage.lakehouse import LakehouseManager, sanitize_identifier
+from codecity.storage.lakehouse import (
+    LakehouseManager,
+    escape_sql_literal,
+    load_duckdb_extensions,
+    quote_ident,
+    sanitize_identifier,
+)
 
 
 def _pick_free_port(host: str = "127.0.0.1") -> int:
@@ -61,7 +67,7 @@ class QuackServerManager:
             quack_uri = f"quack:{self.host}:{actual_port}"
             con = self.lakehouse.connect()
             try:
-                tok = self.token.replace("'", "''")
+                tok = escape_sql_literal(self.token)
                 con.execute(f"CALL quack_serve('{quack_uri}', disable_ssl=true, token='{tok}');")
             except Exception:
                 con.close()
@@ -89,16 +95,12 @@ class QuackServerManager:
         """Open a remote DuckDB connection attached to this Quack server."""
         ep = self.start()
         client = duckdb.connect()
-        for ext in ("quack", "ducklake"):
-            try:
-                client.execute(f"LOAD {ext};")
-            except duckdb.Error:
-                client.execute(f"INSTALL {ext}; LOAD {ext};")
-        tok = ep.token.replace("'", "''")
+        load_duckdb_extensions(client, ("quack", "ducklake"))
+        tok = escape_sql_literal(ep.token)
         client.execute(
             f"CREATE SECRET IF NOT EXISTS (TYPE quack, TOKEN '{tok}', SCOPE '{ep.quack_uri}');"
         )
-        client.execute(f"ATTACH '{ep.quack_uri}' AS {alias} (DISABLE_SSL true);")
+        client.execute(f"ATTACH '{ep.quack_uri}' AS {quote_ident(alias)} (DISABLE_SSL true);")
         return client
 
     @contextmanager
@@ -114,7 +116,7 @@ class QuackServerManager:
             cur.close()
 
     def attach_snippet(self, owner: str, repo: str, *, proxy_url: str | None = None) -> str:
-        """Render a copy-paste DuckDB CLI snippet to query or annotate the live DuckLake."""
+        """Render a DuckDB CLI snippet to query or annotate the live DuckLake."""
         ep = self._endpoint
         target_uri = ep.quack_uri if ep else "quack:127.0.0.1:8080"
         token = ep.token if ep else "<token>"
