@@ -10,6 +10,7 @@ import { CameraControlsHUD } from "./components/CameraControlsHUD";
 import { DataMapBar } from "./components/DataMapBar";
 import { HealthCardModal } from "./components/HealthCardModal";
 import { InspectorDrawer } from "./components/InspectorDrawer";
+import { MayorToolbar } from "./components/MayorToolbar";
 import { Minimap2D } from "./components/Minimap2D";
 import { OnboardingTour } from "./components/OnboardingTour";
 import { TimeScrubber } from "./components/TimeScrubber";
@@ -19,11 +20,18 @@ import {
   type HealthReportData,
   type TourLandmark,
 } from "./data/cityDataClient";
+import {
+  type MayorToolId,
+  type SandboxActionRecord,
+  applySandboxOverlay,
+  validateToolOnFile,
+} from "./game/sandboxOverlay";
 import { CitySimulationEngine, type SimStateSnapshot } from "./game/simEngine";
 import type {
   Annotation,
   BlastRadiusResult,
   DataMapMode,
+  FileMetric,
   LintDiagnostic,
   RepoRef,
   Snapshot,
@@ -58,6 +66,20 @@ export function App() {
   const [showTraffic, setShowTraffic] = useState(true);
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
 
+  const [activeTool, setActiveTool] = useState<MayorToolId>("inspect");
+  const [sandboxActions, setSandboxActions] = useState<SandboxActionRecord[]>([]);
+  const [pendingTransitStart, setPendingTransitStart] = useState<string | null>(null);
+  const [toastMsg, setToastMsg] = useState<string | null>(null);
+  const [liveMode, setLiveMode] = useState(false);
+  const [liveBranchName, setLiveBranchName] = useState<string | null>(null);
+  const [coopSyncEnabled, setCoopSyncEnabled] = useState(false);
+
+  const overlayResult = useMemo(
+    () => (bundle ? applySandboxOverlay(bundle, sandboxActions) : null),
+    [bundle, sandboxActions],
+  );
+  const effectiveBundle = overlayResult?.bundle ?? null;
+
   useUnifiedCameraHotkeys(viewMode);
 
   // Cinematic turntable orbit (Preset 5) + Follow Vehicle Cam (Preset 4)
@@ -90,22 +112,23 @@ export function App() {
 
   // Decoupled 10Hz traffic & city-health simulation loop
   useEffect(() => {
-    if (!bundle) return;
-    setSimState(sim.step(bundle));
+    if (!effectiveBundle) return;
+    setSimState(sim.step(effectiveBundle));
     const timer = setInterval(() => {
       const spd = sim.getSpeed();
       if (spd === 0) {
         setSimState(sim.getSnapshot());
         return;
       }
-      let next = sim.step(bundle);
+      let next = sim.step(effectiveBundle);
       for (let extra = 1; extra < spd; extra++) {
-        next = sim.step(bundle);
+        next = sim.step(effectiveBundle);
       }
       setSimState(next);
     }, 100);
     return () => clearInterval(timer);
-  }, [bundle, sim]);
+  }, [effectiveBundle, sim]);
+
   const [blastRadius, setBlastRadius] = useState<BlastRadiusResult | null>(null);
   const [fileDiagnostics, setFileDiagnostics] = useState<LintDiagnostic[]>([]);
   const [fileHistory, setFileHistory] = useState<
@@ -132,6 +155,27 @@ export function App() {
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [analyzePct, setAnalyzePct] = useState<number | null>(null);
 
+  const showToast = useCallback((msg: string) => {
+    setToastMsg(msg);
+  }, []);
+
+  useEffect(() => {
+    if (!toastMsg) return;
+    const t = setTimeout(() => setToastMsg(null), 3200);
+    return () => clearTimeout(t);
+  }, [toastMsg]);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setActiveTool("inspect");
+        setPendingTransitStart(null);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
   const loadRepoData = useCallback(
     async (owner: string, repo: string, baseUrl: string, force = false) => {
       setLoadingMsg(`Loading ${owner}/${repo} into DuckDB-Wasm...`);
@@ -151,6 +195,8 @@ export function App() {
           setPrevBundle(null);
         }
         setAnnotations(await client.queryAnnotations());
+        setSandboxActions(await client.querySandboxActions());
+        setPendingTransitStart(null);
         setSelectedFile(null);
         setBlastRadius(null);
         setTourActive(false);
@@ -267,43 +313,46 @@ export function App() {
     };
   }, [bundle, client, selectedFile]);
 
-  // Ghost diff sets comparing current snapshot vs previous snapshot
+  // Ghost diff sets comparing current snapshot vs previous snapshot + sandbox overlay
   const { addedFiles, removedLots } = useMemo(() => {
+    const added = new Set<string>(overlayResult?.addedFiles ?? []);
+    const removed: GhostLot[] = [...(overlayResult?.demolishedLots ?? [])];
     if (!bundle || !prevBundle) {
-      return { addedFiles: new Set<string>(), removedLots: [] as GhostLot[] };
+      return { addedFiles: added, removedLots: removed };
     }
     const curPaths = new Set(bundle.files.map((f) => f.file_path));
     const prevPaths = new Set(prevBundle.files.map((f) => f.file_path));
-    const added = new Set<string>();
     for (const p of curPaths) {
       if (!prevPaths.has(p)) added.add(p);
     }
-    const removed: GhostLot[] = prevBundle.files
-      .filter((f) => !curPaths.has(f.file_path))
-      .map((f) => ({
-        file_path: f.file_path,
-        layout_x: f.layout_x,
-        layout_z: f.layout_z,
-        layout_w: f.layout_w,
-        layout_d: f.layout_d,
-      }));
+    for (const f of prevBundle.files) {
+      if (!curPaths.has(f.file_path)) {
+        removed.push({
+          file_path: f.file_path,
+          layout_x: f.layout_x,
+          layout_z: f.layout_z,
+          layout_w: f.layout_w,
+          layout_d: f.layout_d,
+        });
+      }
+    }
     return { addedFiles: added, removedLots: removed };
-  }, [bundle, prevBundle]);
+  }, [bundle, overlayResult, prevBundle]);
 
   const selectedFileMetric = useMemo(() => {
-    if (!bundle || !selectedFile) return null;
-    return bundle.files.find((f) => f.file_path === selectedFile) ?? null;
-  }, [bundle, selectedFile]);
+    if (!effectiveBundle || !selectedFile) return null;
+    return effectiveBundle.files.find((f) => f.file_path === selectedFile) ?? null;
+  }, [effectiveBundle, selectedFile]);
 
   const streetGrid = useMemo(() => {
-    if (!bundle) return { xLines: [], zLines: [], plazas: [] };
-    return deriveStreetLinesAndPlazas(bundle.districts, bundle.files);
-  }, [bundle]);
+    if (!effectiveBundle) return { xLines: [], zLines: [], plazas: [] };
+    return deriveStreetLinesAndPlazas(effectiveBundle.districts, effectiveBundle.files);
+  }, [effectiveBundle]);
 
   const handleFocusFile = useCallback(
     (filePath: string) => {
-      if (!bundle) return;
-      const f = bundle.files.find((item) => item.file_path === filePath);
+      if (!effectiveBundle) return;
+      const f = effectiveBundle.files.find((item) => item.file_path === filePath);
       if (!f) return;
       setSelectedFile(f.file_path);
       setFocusTarget({
@@ -313,8 +362,88 @@ export function App() {
         nonce: Date.now(),
       });
     },
-    [bundle],
+    [effectiveBundle],
   );
+
+  const handleToolAction = useCallback(
+    async (file: FileMetric) => {
+      if (!effectiveBundle || activeTool === "inspect") return;
+      const tool = activeTool;
+
+      if (tool === "transit_hub" && !pendingTransitStart) {
+        const check = validateToolOnFile(tool, file, effectiveBundle, null);
+        if (!check.ok) {
+          setPendingTransitStart(file.file_path);
+          showToast(`Selected ${file.file_path} — click a 2nd building to bridge with Interface Hub`);
+          return;
+        }
+      }
+
+      const validation = validateToolOnFile(tool, file, effectiveBundle, pendingTransitStart);
+      if (!validation.ok) {
+        showToast(validation.reason ?? "Action cannot be applied to this building.");
+        return;
+      }
+
+      const summaryMap: Record<Exclude<MayorToolId, "inspect">, string> = {
+        sweeper: `Cleaned ${file.lint_issue_count} lint issues & format drift`,
+        splitter: `Split ${file.sloc} SLOC monolith into balanced modules`,
+        transit_hub: `Inserted Interface Hub between ${file.file_path} and ${validation.secondaryPath ?? "coupled partner"}`,
+        proving_park: `Planted Proving Park shielding ${file.district_path}/`,
+        co_maintainer: `Assigned co-maintainer (Bus Factor -> 2)`,
+        bulldozer: `Demolished unimported dead module (fan-in == 0)`,
+      };
+
+      const nextList = await client.appendSandboxAction({
+        tool,
+        target_path: file.file_path,
+        secondary_path: validation.secondaryPath ?? null,
+        district_path: file.district_path,
+        summary: summaryMap[tool],
+        velocity_cost: validation.cost,
+      });
+      setSandboxActions(nextList);
+      setPendingTransitStart(null);
+
+      // Dispatch service vehicle & floating feedback popup
+      const cx = file.layout_x + file.layout_w * 0.5;
+      const cz = file.layout_z + file.layout_d * 0.5;
+      sim.dispatchServiceUnit(tool === "sweeper" ? "sweeper" : "crew", file, effectiveBundle);
+      sim.addVelocity(-validation.cost);
+      const badge =
+        tool === "sweeper"
+          ? "-Smog +Health"
+          : tool === "proving_park"
+            ? "+Park +Happiness"
+            : tool === "splitter"
+              ? "Split -Congestion"
+              : tool === "transit_hub"
+                ? "+Interface -Cycle"
+                : tool === "co_maintainer"
+                  ? "+Co-Maintainer"
+                  : "-Upkeep";
+      sim.spawnFloatingPopup(cx, cz, badge, tool === "bulldozer" ? "#fda4af" : "#4ade80");
+      setSimState(sim.getSnapshot());
+      showToast(`${summaryMap[tool]} (Sandbox)`);
+    },
+    [activeTool, client, effectiveBundle, pendingTransitStart, showToast, sim],
+  );
+
+  const handleUndo = useCallback(async () => {
+    setSandboxActions(await client.undoSandboxAction());
+    showToast("Undid last Mayor intervention");
+  }, [client, showToast]);
+
+  const handleRedo = useCallback(async () => {
+    setSandboxActions(await client.redoSandboxAction());
+    showToast("Redid Mayor intervention");
+  }, [client, showToast]);
+
+  const handleResetSandbox = useCallback(async () => {
+    setSandboxActions(await client.resetSandboxActions());
+    setPendingTransitStart(null);
+    showToast("Sandbox reset to HEAD");
+  }, [client, showToast]);
 
   async function handleOpenHealthModal() {
     if (!bundle || !activeRepo) return;
@@ -434,14 +563,14 @@ export function App() {
   return (
     <div className="relative h-screen w-screen overflow-hidden bg-slate-950 text-slate-100">
       {/* Main 2D Isometric or Lazy 3D Skyline Canvas */}
-      {bundle ? (
+      {effectiveBundle ? (
         viewMode === "2d" ? (
           <CityCanvas2D
-            districts={bundle.districts}
-            files={bundle.files}
-            imports={bundle.imports}
-            cochanges={bundle.cochanges}
-            deps={bundle.deps}
+            districts={effectiveBundle.districts}
+            files={effectiveBundle.files}
+            imports={effectiveBundle.imports}
+            cochanges={effectiveBundle.cochanges}
+            deps={effectiveBundle.deps}
             dataMap={dataMap}
             selectedFile={selectedFile}
             blastRadius={blastRadius}
@@ -455,7 +584,9 @@ export function App() {
             floatingPopups={simState.floatingPopups}
             plazas={streetGrid.plazas}
             streetLines={{ xLines: streetGrid.xLines, zLines: streetGrid.zLines }}
+            activeTool={activeTool}
             onSelectFile={setSelectedFile}
+            onToolAction={(f) => void handleToolAction(f)}
           />
         ) : (
           <Suspense
@@ -467,10 +598,10 @@ export function App() {
             }
           >
             <CityCanvas3D
-              districts={bundle.districts}
-              files={bundle.files}
-              cochanges={bundle.cochanges}
-              deps={bundle.deps}
+              districts={effectiveBundle.districts}
+              files={effectiveBundle.files}
+              cochanges={effectiveBundle.cochanges}
+              deps={effectiveBundle.deps}
               dataMap={dataMap}
               selectedFile={selectedFile}
               blastRadius={blastRadius}
@@ -480,7 +611,9 @@ export function App() {
               blackoutFiles={simState.blackoutFiles}
               plazas={streetGrid.plazas}
               streetLines={{ xLines: streetGrid.xLines, zLines: streetGrid.zLines }}
+              activeTool={activeTool}
               onSelectFile={setSelectedFile}
+              onToolAction={(f) => void handleToolAction(f)}
             />
           </Suspense>
         )
@@ -532,20 +665,20 @@ export function App() {
               </select>
             )}
 
-            {bundle && (
+            {effectiveBundle && (
               <div className="flex items-center gap-2 border-l border-slate-700 pl-3 text-xs">
                 <span
                   data-testid="city-grade-badge"
                   className="rounded-lg bg-amber-400/20 px-2 py-0.5 font-extrabold text-amber-300 ring-1 ring-amber-400/40"
                 >
-                  {bundle.snapshot.health_grade}
+                  {effectiveBundle.snapshot.health_grade}
                 </span>
                 <span className="hidden font-medium text-slate-200 md:inline">
-                  {bundle.snapshot.city_archetype_title}
+                  {effectiveBundle.snapshot.city_archetype_title}
                 </span>
                 <span className="text-slate-400">
-                  {bundle.snapshot.total_files} files ·{" "}
-                  {bundle.snapshot.total_sloc.toLocaleString()} SLOC
+                  {effectiveBundle.snapshot.total_files} files ·{" "}
+                  {effectiveBundle.snapshot.total_sloc.toLocaleString()} SLOC
                 </span>
               </div>
             )}
@@ -616,6 +749,44 @@ export function App() {
         )}
       </header>
 
+      {/* Interactive Mayor Toolbar (Left Dock) */}
+      {effectiveBundle && (
+        <MayorToolbar
+          activeTool={activeTool}
+          onSelectTool={(t) => {
+            setActiveTool(t);
+            setPendingTransitStart(null);
+          }}
+          actions={sandboxActions}
+          isStaticMode={isStaticMode}
+          liveMode={liveMode}
+          liveBranchName={liveBranchName}
+          coopSyncEnabled={coopSyncEnabled}
+          repoLabel={activeRepo ? `${activeRepo.owner}/${activeRepo.repo}` : "codecity"}
+          baseBundle={bundle}
+          effectiveBundle={effectiveBundle}
+          pendingTransitStart={pendingTransitStart}
+          onUndo={() => void handleUndo()}
+          onRedo={() => void handleRedo()}
+          onReset={() => void handleResetSandbox()}
+          onToggleLiveMode={() => {
+            setLiveMode((v) => !v);
+            setLiveBranchName("codecity/mayor-session");
+          }}
+          onToggleCoopSync={() => setCoopSyncEnabled((v) => !v)}
+        />
+      )}
+
+      {/* Toast Notification Banner */}
+      {toastMsg && (
+        <div
+          data-testid="mayor-toast"
+          className="sim-panel pointer-events-none fixed top-28 left-1/2 z-40 -translate-x-1/2 rounded-xl border-amber-400/40 px-4 py-2 text-xs font-medium text-amber-200 shadow-2xl"
+        >
+          {toastMsg}
+        </div>
+      )}
+
       {/* Guided Onboarding Tour Overlay */}
       {tourActive && (
         <OnboardingTour
@@ -681,8 +852,8 @@ export function App() {
             />
           </div>
           <Minimap2D
-            districts={bundle.districts}
-            files={bundle.files}
+            districts={effectiveBundle?.districts ?? bundle.districts}
+            files={effectiveBundle?.files ?? bundle.files}
             vehicles={simState.vehicles}
             fireFiles={simState.fireFiles}
             blackoutFiles={simState.blackoutFiles}

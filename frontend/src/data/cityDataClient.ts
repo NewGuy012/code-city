@@ -4,6 +4,7 @@ import duckdbMvpWorker from "@duckdb/duckdb-wasm/dist/duckdb-browser-mvp.worker.
 import duckdbEhWasm from "@duckdb/duckdb-wasm/dist/duckdb-eh.wasm?url";
 import duckdbMvpWasm from "@duckdb/duckdb-wasm/dist/duckdb-mvp.wasm?url";
 
+import type { SandboxActionRecord } from "../game/sandboxOverlay";
 import type {
   Annotation,
   BlastRadiusNode,
@@ -172,7 +173,113 @@ export class CityDataClient {
         `CREATE OR REPLACE TABLE ${table} AS SELECT * FROM read_parquet('${vpath}');`,
       );
     }
+    await this.ensureSandboxTable();
     this.loadedKey = cacheKey;
+  }
+
+  async ensureSandboxTable(): Promise<void> {
+    const conn = await this.initWasm();
+    await conn.query(`
+      CREATE TABLE IF NOT EXISTS sandbox_actions (
+        action_id VARCHAR,
+        action_seq INTEGER,
+        tool VARCHAR,
+        target_path VARCHAR,
+        secondary_path VARCHAR,
+        district_path VARCHAR,
+        summary VARCHAR,
+        velocity_cost INTEGER,
+        active BOOLEAN,
+        created_at VARCHAR
+      );
+    `);
+  }
+
+  async querySandboxActions(): Promise<SandboxActionRecord[]> {
+    await this.ensureSandboxTable();
+    const conn = await this.initWasm();
+    const res = await conn.query(`SELECT * FROM sandbox_actions ORDER BY action_seq ASC;`);
+    return res.toArray().map((row) => {
+      const r = row.toJSON() as Record<string, unknown>;
+      return {
+        action_id: String(r.action_id),
+        action_seq: Number(r.action_seq),
+        tool: String(r.tool) as SandboxActionRecord["tool"],
+        target_path: String(r.target_path),
+        secondary_path: r.secondary_path ? String(r.secondary_path) : null,
+        district_path: String(r.district_path),
+        summary: String(r.summary),
+        velocity_cost: Number(r.velocity_cost ?? 0),
+        active: Boolean(r.active),
+        created_at: String(r.created_at),
+      };
+    });
+  }
+
+  async appendSandboxAction(
+    action: Omit<SandboxActionRecord, "action_id" | "action_seq" | "active" | "created_at">,
+  ): Promise<SandboxActionRecord[]> {
+    await this.ensureSandboxTable();
+    const conn = await this.initWasm();
+    // Clear inactive redo tail when branching from an undone state
+    await conn.query(`DELETE FROM sandbox_actions WHERE active = false;`);
+    const maxRes = await conn.query(`SELECT COALESCE(MAX(action_seq), 0) AS m FROM sandbox_actions;`);
+    const maxRow = maxRes.toArray()[0]?.toJSON() as Record<string, unknown> | undefined;
+    const nextSeq = Number(maxRow?.m ?? 0) + 1;
+    const esc = (v: string) => v.replace(/'/g, "''");
+    const id = `sbx-${Date.now().toString(36)}-${nextSeq}`;
+    const secSql = action.secondary_path ? `'${esc(action.secondary_path)}'` : "NULL";
+    const nowIso = new Date().toISOString();
+    await conn.query(`
+      INSERT INTO sandbox_actions VALUES (
+        '${esc(id)}',
+        ${nextSeq},
+        '${esc(action.tool)}',
+        '${esc(action.target_path)}',
+        ${secSql},
+        '${esc(action.district_path)}',
+        '${esc(action.summary)}',
+        ${Math.round(action.velocity_cost)},
+        true,
+        '${esc(nowIso)}'
+      );
+    `);
+    return this.querySandboxActions();
+  }
+
+  async undoSandboxAction(): Promise<SandboxActionRecord[]> {
+    await this.ensureSandboxTable();
+    const conn = await this.initWasm();
+    await conn.query(`
+      UPDATE sandbox_actions
+      SET active = false
+      WHERE action_seq = (SELECT MAX(action_seq) FROM sandbox_actions WHERE active = true);
+    `);
+    return this.querySandboxActions();
+  }
+
+  async redoSandboxAction(): Promise<SandboxActionRecord[]> {
+    await this.ensureSandboxTable();
+    const conn = await this.initWasm();
+    await conn.query(`
+      UPDATE sandbox_actions
+      SET active = true
+      WHERE action_seq = (SELECT MIN(action_seq) FROM sandbox_actions WHERE active = false);
+    `);
+    return this.querySandboxActions();
+  }
+
+  async resetSandboxActions(): Promise<SandboxActionRecord[]> {
+    await this.ensureSandboxTable();
+    const conn = await this.initWasm();
+    await conn.query(`DELETE FROM sandbox_actions;`);
+    return [];
+  }
+
+  async runReadSql(sql: string): Promise<Array<Record<string, unknown>>> {
+    const conn = await this.initWasm();
+    const res = await conn.query(sql);
+    return res.toArray().map((row) => row.toJSON() as Record<string, unknown>);
   }
 
   async detectStaticManifest(): Promise<StaticManifest | null> {
