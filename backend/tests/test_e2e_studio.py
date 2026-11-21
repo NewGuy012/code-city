@@ -2,25 +2,19 @@
 
 from __future__ import annotations
 
-import socket
 import threading
 import time
+import urllib.request
 from pathlib import Path
 
-import httpx
 import uvicorn
 from playwright.sync_api import Page, sync_playwright
 
 from codecity.analyzer.pipeline import analyze_repository
 from codecity.api.app import create_app
 from codecity.storage.lakehouse import LakehouseManager
+from codecity.storage.quack_server import _pick_free_port
 from tests.conftest import create_polyglot_fixture_repo
-
-
-def _free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return int(s.getsockname()[1])
 
 
 def _assert_no_hud_overlap(page: Page) -> None:
@@ -84,7 +78,7 @@ def test_live_studio_e2e_2d_datamaps_tour_notes_3d_timescrub_and_quack(tmp_path:
         workers=2,
     )
 
-    port = _free_port()
+    port = _pick_free_port()
     app = create_app(lakehouse=lake, enable_quack=True)
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
     thread = threading.Thread(target=server.run, daemon=True)
@@ -93,13 +87,15 @@ def test_live_studio_e2e_2d_datamaps_tour_notes_3d_timescrub_and_quack(tmp_path:
     base_url = f"http://127.0.0.1:{port}"
     for _ in range(50):
         try:
-            if httpx.get(f"{base_url}/api/health", timeout=1.0).status_code == 200:
-                break
+            with urllib.request.urlopen(f"{base_url}/api/health", timeout=1.0) as resp:
+                if resp.status == 200:
+                    break
         except Exception:
             time.sleep(0.1)
 
     try:
-        assert httpx.get(f"{base_url}/sprites/buildings_atlas.png", timeout=2.0).status_code == 200
+        with urllib.request.urlopen(f"{base_url}/sprites/buildings_atlas.png", timeout=2.0) as r:
+            assert r.status == 200
         with sync_playwright() as pw:
             browser = pw.chromium.launch(
                 args=["--use-gl=angle", "--use-angle=swiftshader"],

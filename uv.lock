@@ -63,7 +63,6 @@ source = { editable = "." }
 dependencies = [
     { name = "duckdb" },
     { name = "fastapi" },
-    { name = "httpx" },
     { name = "pydantic" },
     { name = "ruff" },
     { name = "tree-sitter" },
@@ -76,6 +75,7 @@ dependencies = [
 
 [package.optional-dependencies]
 dev = [
+    { name = "httpx" },
     { name = "playwright" },
     { name = "pytest" },
 ]
@@ -84,7 +84,7 @@ dev = [
 requires-dist = [
     { name = "duckdb", specifier = ">=2.0.0" },
     { name = "fastapi", specifier = ">=0.115.0" },
-    { name = "httpx", specifier = ">=0.28.0" },
+    { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.28.0" },
     { name = "playwright", marker = "extra == 'dev'", specifier = ">=1.50.0" },
     { name = "pydantic", specifier = ">=2.10.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3.0" },

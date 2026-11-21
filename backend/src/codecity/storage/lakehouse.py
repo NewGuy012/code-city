@@ -5,13 +5,15 @@ from __future__ import annotations
 import json
 import os
 import re
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
 import duckdb
+from pydantic import BaseModel
 
 from codecity.models import (
     Annotation,
@@ -369,6 +371,31 @@ class LakehouseManager:
         con.executemany(f"INSERT INTO {tmp} VALUES ({placeholders});", rows)
         con.execute(f"INSERT INTO {pfx}.{table_name} SELECT {select_expr} FROM {tmp};")
 
+    def _insert_models(
+        self,
+        con: duckdb.DuckDBPyConnection,
+        pfx: str,
+        table_name: str,
+        models: Sequence[BaseModel],
+    ) -> None:
+        if not models:
+            return
+        cols = _TABLE_SCHEMAS[table_name]
+
+        def _cell(val: Any, dtype: str) -> Any:
+            if dtype == "VARIANT":
+                if isinstance(val, list):
+                    val = [x.model_dump() if isinstance(x, BaseModel) else x for x in val]
+                return json.dumps(val)
+            if isinstance(val, Enum):
+                return val.value
+            if isinstance(val, datetime):
+                return val.replace(tzinfo=None)
+            return val
+
+        rows = [tuple(_cell(getattr(m, col), dtype) for col, dtype in cols) for m in models]
+        self._insert_rows(con, pfx, table_name, rows)
+
     def write_snapshot_bundle(
         self,
         con: duckdb.DuckDBPyConnection,
@@ -388,132 +415,13 @@ class LakehouseManager:
         pfx = self.schema_prefix(owner, repo, catalog_prefix=catalog_prefix)
         con.execute("BEGIN TRANSACTION;")
         try:
-            self._insert_rows(
-                con,
-                pfx,
-                "snapshots",
-                [
-                    (
-                        snapshot.snapshot_idx,
-                        snapshot.commit_sha,
-                        snapshot.committed_at.replace(tzinfo=None),
-                        snapshot.git_tag,
-                        snapshot.total_files,
-                        snapshot.total_sloc,
-                        snapshot.total_lint_issues,
-                        json.dumps(snapshot.language_breakdown),
-                        float(snapshot.health_score),
-                        snapshot.health_grade,
-                        snapshot.city_archetype_title,
-                        json.dumps([a.model_dump() for a in snapshot.advisor_alerts]),
-                    )
-                ],
-            )
-            self._insert_rows(
-                con,
-                pfx,
-                "districts",
-                [
-                    (
-                        d.snapshot_idx,
-                        d.district_path,
-                        d.display_name,
-                        d.zone_type.value,
-                        float(d.bounds_x),
-                        float(d.bounds_z),
-                        float(d.bounds_w),
-                        float(d.bounds_d),
-                        d.file_count,
-                        float(d.avg_health),
-                        d.summary_blurb,
-                    )
-                    for d in districts
-                ],
-            )
-            self._insert_rows(
-                con,
-                pfx,
-                "file_metrics",
-                [
-                    (
-                        f.snapshot_idx,
-                        f.file_path,
-                        f.district_path,
-                        f.language,
-                        f.zone_type.value,
-                        f.building_archetype.value,
-                        float(f.role_confidence),
-                        json.dumps(f.role_signals),
-                        f.sloc,
-                        f.symbol_count,
-                        f.max_complexity,
-                        float(f.type_or_doc_ratio),
-                        f.lint_issue_count,
-                        bool(f.format_drift),
-                        json.dumps(f.lint_by_category),
-                        f.churn_90d,
-                        f.bugfix_commits_90d,
-                        f.distinct_authors_90d,
-                        float(f.hotspot_score),
-                        json.dumps(f.condition_flags),
-                        float(f.layout_x),
-                        float(f.layout_z),
-                        float(f.layout_w),
-                        float(f.layout_d),
-                    )
-                    for f in files
-                ],
-            )
-            self._insert_rows(
-                con,
-                pfx,
-                "file_imports",
-                [(i.snapshot_idx, i.source_file, i.target_file) for i in imports],
-            )
-            self._insert_rows(
-                con,
-                pfx,
-                "cochange_pairs",
-                [
-                    (
-                        c.snapshot_idx,
-                        c.file_a,
-                        c.file_b,
-                        c.shared_commits,
-                        float(c.coupling_ratio),
-                    )
-                    for c in cochanges
-                ],
-            )
-            self._insert_rows(
-                con,
-                pfx,
-                "external_deps",
-                [
-                    (d.snapshot_idx, d.ecosystem, d.package_name, d.version, bool(d.is_direct))
-                    for d in deps
-                ],
-            )
-            self._insert_rows(
-                con,
-                pfx,
-                "lint_diagnostics",
-                [
-                    (
-                        diag.snapshot_idx,
-                        diag.file_path,
-                        diag.linter,
-                        diag.line,
-                        diag.col,
-                        diag.rule_code,
-                        diag.category,
-                        diag.message,
-                        bool(diag.fixable),
-                        json.dumps(diag.metadata),
-                    )
-                    for diag in diagnostics
-                ],
-            )
+            self._insert_models(con, pfx, "snapshots", [snapshot])
+            self._insert_models(con, pfx, "districts", districts)
+            self._insert_models(con, pfx, "file_metrics", files)
+            self._insert_models(con, pfx, "file_imports", imports)
+            self._insert_models(con, pfx, "cochange_pairs", cochanges)
+            self._insert_models(con, pfx, "external_deps", deps)
+            self._insert_models(con, pfx, "lint_diagnostics", diagnostics)
             con.execute("COMMIT;")
         except Exception:
             con.execute("ROLLBACK;")
@@ -530,21 +438,7 @@ class LakehouseManager:
     ) -> None:
         """Insert a Mayor Note directly into DuckLake (inlined automatically for fast writes)."""
         pfx = self.schema_prefix(owner, repo, catalog_prefix=catalog_prefix)
-        self._insert_rows(
-            con,
-            pfx,
-            "annotations",
-            [
-                (
-                    annotation.annotation_id,
-                    annotation.file_path,
-                    annotation.author,
-                    annotation.tag,
-                    annotation.body,
-                    annotation.created_at.replace(tzinfo=None),
-                )
-            ],
-        )
+        self._insert_models(con, pfx, "annotations", [annotation])
 
     def get_annotation_changes(
         self,
@@ -607,27 +501,7 @@ class LakehouseManager:
         ).fetchall()
         next_seq = int(rows[0][0]) + 1 if rows else 1
         persisted = action.model_copy(update={"action_seq": next_seq})
-        self._insert_rows(
-            con,
-            pfx,
-            "sandbox_actions",
-            [
-                (
-                    persisted.action_id,
-                    persisted.action_seq,
-                    persisted.session_id,
-                    persisted.author,
-                    persisted.tool,
-                    persisted.target_path,
-                    persisted.secondary_path,
-                    persisted.district_path,
-                    persisted.summary,
-                    persisted.velocity_cost,
-                    persisted.active,
-                    persisted.created_at.replace(tzinfo=None),
-                )
-            ],
-        )
+        self._insert_models(con, pfx, "sandbox_actions", [persisted])
         return persisted
 
     def query_sandbox_actions(
@@ -639,31 +513,11 @@ class LakehouseManager:
         catalog_prefix: str | None = None,
     ) -> list[SandboxAction]:
         pfx = self.schema_prefix(owner, repo, catalog_prefix=catalog_prefix)
+        cols = [c for c, _ in _TABLE_SCHEMAS["sandbox_actions"]]
         rows = con.execute(
-            f"""
-            SELECT action_id, action_seq, session_id, author, tool, target_path,
-                   secondary_path, district_path, summary, velocity_cost, active, created_at
-            FROM {pfx}.sandbox_actions
-            ORDER BY action_seq ASC;
-            """
+            f"SELECT {', '.join(cols)} FROM {pfx}.sandbox_actions ORDER BY action_seq ASC;"
         ).fetchall()
-        return [
-            SandboxAction(
-                action_id=str(r[0]),
-                action_seq=int(r[1]),
-                session_id=str(r[2]),
-                author=str(r[3]),
-                tool=str(r[4]),
-                target_path=str(r[5]),
-                secondary_path=str(r[6]) if r[6] is not None else None,
-                district_path=str(r[7]),
-                summary=str(r[8]),
-                velocity_cost=int(r[9]),
-                active=bool(r[10]),
-                created_at=r[11],
-            )
-            for r in rows
-        ]
+        return [SandboxAction.model_validate(dict(zip(cols, r, strict=True))) for r in rows]
 
     def toggle_sandbox_action(
         self,

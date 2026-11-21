@@ -126,9 +126,15 @@ def test_control_plane_mayor_export_quack_and_security(tmp_path: Path) -> None:
         finally:
             plain.close()
 
-        # Badge SVG + static export + Playwright PNG postcard
+        # Badge SVG (sandboxed CSP) + sanitized error + static export + Playwright PNG postcard
         badge = client.get("/api/repos/acme/poly_city/badge.svg")
         assert badge.status_code == 200 and "<svg" in badge.text
+        assert "sandbox" in badge.headers.get("content-security-policy", "")
+        assert badge.headers.get("x-content-type-options") == "nosniff"
+
+        missing = client.get("/api/repos/ghost/nope/parquet/snapshots.parquet")
+        assert missing.status_code == 404
+        assert "metadata.ducklake" not in missing.text and str(tmp_path) not in missing.text
 
         exp = client.post("/api/repos/acme/poly_city/export", json={"with_postcard": True})
         assert exp.status_code == 200

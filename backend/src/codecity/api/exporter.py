@@ -10,6 +10,8 @@ import shutil
 import socketserver
 import subprocess
 import threading
+from collections.abc import Callable
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -30,12 +32,12 @@ class ExportResult:
     postcard_path: Path | None = None
 
 
-def _default_frontend_dist() -> Path:
+def default_frontend_dist() -> Path:
     return Path(__file__).resolve().parents[4] / "frontend" / "dist"
 
 
 def _ensure_frontend_dist(frontend_dist: Path | None) -> Path:
-    dist_dir = (frontend_dist or _default_frontend_dist()).resolve()
+    dist_dir = (frontend_dist or default_frontend_dist()).resolve()
     if (dist_dir / "index.html").exists():
         return dist_dir
     bun_bin = find_bun()
@@ -111,6 +113,7 @@ def export_static_site(
     output_dir: Path,
     *,
     con: duckdb.DuckDBPyConnection | None = None,
+    open_con: Callable[[], AbstractContextManager[duckdb.DuckDBPyConnection]] | None = None,
     with_postcard: bool = False,
     frontend_dist: Path | None = None,
 ) -> ExportResult:
@@ -128,18 +131,20 @@ def export_static_site(
     data_dir = out / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
 
-    def _run_with_con(db_con: duckdb.DuckDBPyConnection) -> tuple[str, str, str]:
+    con_ctx = (
+        nullcontext(con)
+        if con is not None
+        else open_con()
+        if open_con is not None
+        else lake.session(read_only=True)
+    )
+    with con_ctx as db_con:
         lake.export_repo_parquet(db_con, owner, repo, data_dir)
         matched = lake.get_repo(db_con, owner, repo)
-        if matched is None:
-            return "A", "Sunlit Civic Metropolis", f"{owner}/{repo}"
-        return matched.latest_grade, matched.latest_title, matched.repo_url_or_path
-
-    if con is not None:
-        grade, title, source = _run_with_con(con)
+    if matched is None:
+        grade, title, source = "A", "Sunlit Civic Metropolis", f"{owner}/{repo}"
     else:
-        with lake.session(read_only=True) as local_con:
-            grade, title, source = _run_with_con(local_con)
+        grade, title, source = matched.latest_grade, matched.latest_title, matched.repo_url_or_path
 
     manifest = {
         "mode": "static",

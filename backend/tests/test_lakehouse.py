@@ -45,8 +45,6 @@ def test_ducklake_nested_schema_quack_multiwriter_and_parquet_export(tmp_path: P
                         total_lint_issues=idx,
                         language_breakdown={"python": 1},
                         health_score=92.5 - idx,
-                        health_grade="A",
-                        city_archetype_title="Sunlit Civic Metropolis",
                         advisor_alerts=[
                             AdvisorAlert(
                                 severity="info",
@@ -67,8 +65,6 @@ def test_ducklake_nested_schema_quack_multiwriter_and_parquet_export(tmp_path: P
                         bounds_w=20.0,
                         bounds_d=20.0,
                         file_count=1,
-                        avg_health=92.0,
-                        summary_blurb="Core engine",
                     )
                     fm = FileMetric(
                         snapshot_idx=idx,
@@ -77,19 +73,9 @@ def test_ducklake_nested_schema_quack_multiwriter_and_parquet_export(tmp_path: P
                         language="python",
                         zone_type=ZoneType.DOWNTOWN_CORE,
                         building_archetype=BuildingArchetype.CITY_HALL,
-                        role_confidence=0.95,
-                        role_signals={"fan_in": 12},
                         sloc=120 + idx * 10,
-                        symbol_count=6,
-                        max_complexity=4,
-                        type_or_doc_ratio=0.9,
                         lint_issue_count=idx,
-                        format_drift=False,
                         lint_by_category={"style": idx},
-                        churn_90d=5 + idx,
-                        bugfix_commits_90d=0,
-                        distinct_authors_90d=2,
-                        hotspot_score=1.5 + idx,
                         condition_flags={"crane": idx >= 2},
                         layout_x=2.0,
                         layout_z=2.0,

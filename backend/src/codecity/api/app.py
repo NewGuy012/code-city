@@ -3,30 +3,36 @@
 from __future__ import annotations
 
 import asyncio
+import http.client
 import json
 import re
 import tempfile
 import threading
 import uuid
 from collections.abc import AsyncIterator, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import duckdb
-import httpx
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from codecity.analyzer.git_history import resolve_git_repo
 from codecity.analyzer.pipeline import analyze_repository
 from codecity.analyzer.plugins import preview_file_fix
-from codecity.api.exporter import export_static_site, render_grade_badge_svg
+from codecity.api.exporter import (
+    default_frontend_dist,
+    export_static_site,
+    render_grade_badge_svg,
+)
 from codecity.api.mayor import (
     ensure_mayor_branch,
     execute_live_mayor_tool,
@@ -42,7 +48,9 @@ from codecity.storage.lakehouse import (
 from codecity.storage.quack_server import QuackServerManager
 
 _LOCAL_ORIGIN_RE = re.compile(r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$")
-_HOP_BY_HOP_REQ_HEADERS = frozenset({"host", "content-length", "connection"})
+_HOP_BY_HOP_REQ_HEADERS = frozenset(
+    {"host", "content-length", "connection", "transfer-encoding", "keep-alive", "cookie"}
+)
 _HOP_BY_HOP_RESP_HEADERS = frozenset(
     {"content-length", "transfer-encoding", "connection", "keep-alive"}
 )
@@ -99,6 +107,23 @@ class AnalyzeJob:
     lock: threading.Lock = field(default_factory=threading.Lock)
 
 
+def _proxy_local_http(
+    host: str,
+    port: int,
+    method: str,
+    path: str,
+    headers: dict[str, str],
+    body: bytes,
+) -> tuple[int, list[tuple[str, str]], bytes]:
+    conn = http.client.HTTPConnection(host, port, timeout=30.0)
+    try:
+        conn.request(method, path, body=body or None, headers=headers)
+        resp = conn.getresponse()
+        return resp.status, resp.getheaders(), resp.read()
+    finally:
+        conn.close()
+
+
 def create_app(
     *,
     lakehouse: LakehouseManager | None = None,
@@ -109,9 +134,10 @@ def create_app(
     lake = lakehouse or LakehouseManager()
     quack_mgr = QuackServerManager(lake) if enable_quack else None
     jobs: dict[str, AnalyzeJob] = {}
+    repo_locks: dict[tuple[str, str], threading.Lock] = {}
     jobs_lock = threading.Lock()
     db_lock = threading.Lock()
-    proxy_http: httpx.AsyncClient | None = None
+    job_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="codecity-job")
 
     @contextmanager
     def open_con(*, read_only: bool = True) -> Iterator[duckdb.DuckDBPyConnection]:
@@ -121,6 +147,11 @@ def create_app(
         else:
             with lake.session(read_only=read_only) as con:
                 yield con
+
+    @contextmanager
+    def locked_read_con(*, read_only: bool = True) -> Iterator[duckdb.DuckDBPyConnection]:
+        with db_lock, open_con(read_only=read_only) as con:
+            yield con
 
     @contextmanager
     def write_con() -> Iterator[tuple[duckdb.DuckDBPyConnection, str | None]]:
@@ -136,15 +167,12 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-        nonlocal proxy_http
         if quack_mgr is not None:
             quack_mgr.start()
-        proxy_http = httpx.AsyncClient(timeout=30.0)
         try:
             yield
         finally:
-            await proxy_http.aclose()
-            proxy_http = None
+            job_pool.shutdown(wait=False, cancel_futures=True)
             if quack_mgr is not None:
                 quack_mgr.stop()
 
@@ -157,31 +185,44 @@ def create_app(
         allow_headers=["*"],
     )
 
+    @app.middleware("http")
+    async def _security_headers(request: Request, call_next: Any) -> Response:
+        resp: Response = await call_next(request)
+        resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+        if request.url.path.startswith(("/api/", "/quack")):
+            resp.headers.setdefault("X-Frame-Options", "DENY")
+        return resp
+
+    @app.exception_handler(duckdb.Error)
+    def _handle_duckdb_error(_: Request, __: duckdb.Error) -> JSONResponse:
+        return JSONResponse(status_code=404, content={"detail": "Repository or table not found"})
+
     def _cors_headers_for(request: Request) -> dict[str, str]:
         origin = request.headers.get("origin", "")
         if _LOCAL_ORIGIN_RE.match(origin):
             return {"Access-Control-Allow-Origin": origin, "Vary": "Origin"}
         return {}
 
-    def _run_job(job: AnalyzeJob, req: AnalyzeRequest) -> None:
+    def _run_job(job: AnalyzeJob, req: AnalyzeRequest, repo_lock: threading.Lock) -> None:
         def on_prog(evt: dict[str, Any]) -> None:
             with job.lock:
                 job.events.append(evt)
 
         try:
-            with job.lock:
-                job.status = "running"
-            summary = analyze_repository(
-                req.source,
-                lakehouse=lake,
-                quack_server=quack_mgr,
-                owner=job.owner,
-                repo=job.repo,
-                max_keyframes=req.max_keyframes,
-                workers=req.workers,
-                semantic=req.semantic,
-                on_progress=on_prog,
-            )
+            with repo_lock:
+                with job.lock:
+                    job.status = "running"
+                summary = analyze_repository(
+                    req.source,
+                    lakehouse=lake,
+                    quack_server=quack_mgr,
+                    owner=job.owner,
+                    repo=job.repo,
+                    max_keyframes=req.max_keyframes,
+                    workers=req.workers,
+                    semantic=req.semantic,
+                    on_progress=on_prog,
+                )
             with job.lock:
                 job.status = "completed"
                 job.events.append(
@@ -200,14 +241,14 @@ def create_app(
                 job.events.append({"stage": "error", "message": str(exc), "percent": 100.0})
 
     def _resolve_repo_path(owner: str, repo: str) -> Path:
-        with db_lock, open_con() as con:
+        with locked_read_con() as con:
             matched = lake.get_repo(con, owner, repo)
         if matched is None:
             raise HTTPException(status_code=404, detail="Repository not found")
         try:
             return resolve_git_repo(matched.repo_url_or_path, lake.data_dir / "clones")
         except (FileNotFoundError, ValueError) as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
+            raise HTTPException(status_code=404, detail="Repository source unavailable") from exc
 
     def _safe_export_dir(owner: str, repo: str) -> Path:
         exports_root = (lake.data_dir / "exports").resolve()
@@ -218,7 +259,7 @@ def create_app(
         return dest
 
     def _compute_fan_in(owner: str, repo: str, target_path: str) -> int:
-        with db_lock, open_con() as con:
+        with locked_read_con() as con:
             pfx = lake.schema_prefix(owner, repo)
             try:
                 row = con.execute(
@@ -243,7 +284,6 @@ def create_app(
             "duckdb_version": duckdb.__version__,
             "quack_enabled": quack_mgr is not None,
             "quack_uri": ep.quack_uri if ep else None,
-            "quack_http_url": ep.http_url if ep else None,
         }
 
     @app.post("/api/analyze")
@@ -253,13 +293,14 @@ def create_app(
         job = AnalyzeJob(job_id=job_id, owner=owner, repo=repo)
         with jobs_lock:
             if len(jobs) >= _MAX_JOBS_RETAINED:
-                for old_id in list(jobs.keys()):
+                for old_id in list(jobs):
                     if jobs[old_id].status in {"completed", "failed"}:
                         del jobs[old_id]
                         if len(jobs) < _MAX_JOBS_RETAINED:
                             break
             jobs[job_id] = job
-        threading.Thread(target=_run_job, args=(job, req), daemon=True).start()
+            repo_lock = repo_locks.setdefault((owner, repo), threading.Lock())
+        job_pool.submit(_run_job, job, req, repo_lock)
         return {"job_id": job_id, "owner": owner, "repo": repo}
 
     @app.get("/api/jobs/{job_id}")
@@ -306,23 +347,17 @@ def create_app(
 
     @app.get("/api/repos")
     def api_list_repos() -> list[dict[str, Any]]:
-        with db_lock, open_con(read_only=False) as con:
+        with locked_read_con(read_only=False) as con:
             return [r.model_dump() for r in lake.list_repos(con)]
 
     @app.get("/api/repos/{owner}/{repo}/parquet/{table_name}.parquet")
     def api_repo_parquet(owner: str, repo: str, table_name: str) -> Response:
         if table_name not in EXPORT_TABLES:
             raise HTTPException(status_code=404, detail="Unknown table")
-        with (
-            db_lock,
-            open_con() as con,
-            tempfile.TemporaryDirectory(prefix="codecity_pq_") as td,
-        ):
+        with tempfile.TemporaryDirectory(prefix="codecity_pq_") as td:
             dest = Path(td) / f"{table_name}.parquet"
-            try:
+            with locked_read_con() as con:
                 lake.export_table_parquet(con, owner, repo, table_name, dest)
-            except duckdb.Error as exc:
-                raise HTTPException(status_code=404, detail=str(exc)) from exc
             data = dest.read_bytes()
         return Response(
             content=data,
@@ -370,7 +405,8 @@ def create_app(
 
     @app.get("/api/repos/{owner}/{repo}/quack-snippet")
     def api_quack_snippet(owner: str, repo: str, request: Request) -> dict[str, Any]:
-        proxy_url = f"{str(request.base_url).rstrip('/')}/quack"
+        raw_base = str(request.base_url).rstrip("/")
+        proxy_url = f"{raw_base}/quack" if _LOCAL_ORIGIN_RE.match(raw_base) else "/quack"
         if quack_mgr and quack_mgr.endpoint:
             ep = quack_mgr.endpoint
             return {
@@ -397,36 +433,26 @@ def create_app(
             created_at=datetime.now(UTC).replace(tzinfo=None),
         )
         with write_con() as (con, pfx):
-            try:
-                lake.add_annotation(con, owner, repo, note, catalog_prefix=pfx)
-            except duckdb.Error as exc:
-                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            lake.add_annotation(con, owner, repo, note, catalog_prefix=pfx)
         return note.model_dump(mode="json")
 
     @app.get("/api/repos/{owner}/{repo}/annotations/changes")
     def api_annotation_changes(owner: str, repo: str) -> list[dict[str, Any]]:
-        with db_lock, open_con() as con:
-            try:
-                return lake.get_annotation_changes(con, owner, repo)
-            except duckdb.Error as exc:
-                raise HTTPException(status_code=404, detail=str(exc)) from exc
+        with locked_read_con() as con:
+            return lake.get_annotation_changes(con, owner, repo)
 
     @app.get("/api/repos/{owner}/{repo}/sandbox-actions")
     def api_get_sandbox_actions(owner: str, repo: str) -> list[dict[str, Any]]:
-        with db_lock, open_con() as con:
-            try:
-                actions = lake.query_sandbox_actions(con, owner, repo)
-            except duckdb.Error as exc:
-                raise HTTPException(status_code=404, detail=str(exc)) from exc
+        with locked_read_con() as con:
+            actions = lake.query_sandbox_actions(con, owner, repo)
         return [a.model_dump(mode="json") for a in actions]
 
     @app.post("/api/repos/{owner}/{repo}/sandbox-actions")
     def api_add_sandbox_action(
         owner: str, repo: str, body: SandboxActionCreateRequest
     ) -> dict[str, Any]:
-        action_id = body.action_id or f"sbx-{uuid.uuid4().hex[:10]}"
         act = SandboxAction(
-            action_id=action_id,
+            action_id=body.action_id or f"sbx-{uuid.uuid4().hex[:10]}",
             session_id=body.session_id,
             author=body.author.strip() or "mayor",
             tool=body.tool,
@@ -439,10 +465,7 @@ def create_app(
             created_at=datetime.now(UTC).replace(tzinfo=None),
         )
         with write_con() as (con, pfx):
-            try:
-                persisted = lake.add_sandbox_action(con, owner, repo, act, catalog_prefix=pfx)
-            except duckdb.Error as exc:
-                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            persisted = lake.add_sandbox_action(con, owner, repo, act, catalog_prefix=pfx)
         return persisted.model_dump(mode="json")
 
     @app.post("/api/repos/{owner}/{repo}/sandbox-actions/{action_id}/toggle")
@@ -456,46 +479,44 @@ def create_app(
                 )
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
-            except duckdb.Error as exc:
-                raise HTTPException(status_code=404, detail=str(exc)) from exc
         return {"ok": True, "action_id": action_id, "active": body.active}
 
     @app.delete("/api/repos/{owner}/{repo}/sandbox-actions")
     def api_clear_sandbox_actions(owner: str, repo: str) -> dict[str, Any]:
         with write_con() as (con, pfx):
-            try:
-                lake.clear_sandbox_actions(con, owner, repo, catalog_prefix=pfx)
-            except duckdb.Error as exc:
-                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            lake.clear_sandbox_actions(con, owner, repo, catalog_prefix=pfx)
         return {"ok": True}
 
     @app.get("/api/repos/{owner}/{repo}/badge.svg")
     def api_badge_svg(owner: str, repo: str) -> Response:
-        with db_lock, open_con() as con:
+        with locked_read_con() as con:
             matched = lake.get_repo(con, owner, repo)
         if matched is None:
             raise HTTPException(status_code=404, detail="Repository not found")
         svg = render_grade_badge_svg(
             matched.latest_grade, matched.latest_title, matched.owner, matched.repo
         )
-        return Response(content=svg, media_type="image/svg+xml")
+        return Response(
+            content=svg,
+            media_type="image/svg+xml",
+            headers={"Content-Security-Policy": "default-src 'none'; sandbox"},
+        )
 
     @app.post("/api/repos/{owner}/{repo}/export")
     def api_export_static(owner: str, repo: str, body: ExportRequest) -> dict[str, Any]:
         export_dir = _safe_export_dir(owner, repo)
-        with db_lock, open_con() as con:
-            try:
-                res = export_static_site(
-                    lake,
-                    owner,
-                    repo,
-                    export_dir,
-                    con=con,
-                    with_postcard=body.with_postcard,
-                    frontend_dist=frontend_dist,
-                )
-            except (KeyError, duckdb.Error) as exc:
-                raise HTTPException(status_code=404, detail=str(exc)) from exc
+        try:
+            res = export_static_site(
+                lake,
+                owner,
+                repo,
+                export_dir,
+                open_con=locked_read_con,
+                with_postcard=body.with_postcard,
+                frontend_dist=frontend_dist,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="Repository not found") from exc
         return {
             "output_dir": str(res.output_dir),
             "badge_url": f"/api/repos/{owner}/{repo}/badge.svg",
@@ -526,7 +547,7 @@ def create_app(
                     "Access-Control-Allow-Headers": "*",
                 },
             )
-        if quack_mgr is None or quack_mgr.endpoint is None or proxy_http is None:
+        if quack_mgr is None or quack_mgr.endpoint is None:
             raise HTTPException(status_code=503, detail="Quack server is not active")
 
         clean_sub = subpath.lstrip("/")
@@ -538,38 +559,31 @@ def create_app(
         ):
             raise HTTPException(status_code=400, detail="Invalid proxy subpath")
 
-        target_base = quack_mgr.endpoint.http_url.rstrip("/")
-        target_url = f"{target_base}/{clean_sub}" if clean_sub else f"{target_base}/"
+        parsed = urlsplit(quack_mgr.endpoint.http_url)
+        host = parsed.hostname or "127.0.0.1"
+        port = parsed.port or 80
+        req_path = f"/{clean_sub}" if clean_sub else "/"
         if request.url.query:
-            target_url = f"{target_url}?{request.url.query}"
+            req_path = f"{req_path}?{request.url.query}"
 
         raw_body = await request.body()
         fwd_headers = {
             k: v for k, v in request.headers.items() if k.lower() not in _HOP_BY_HOP_REQ_HEADERS
         }
         try:
-            upstream = await proxy_http.request(
-                method=request.method,
-                url=target_url,
-                headers=fwd_headers,
-                content=raw_body,
+            status, raw_headers, payload = await asyncio.to_thread(
+                _proxy_local_http, host, port, request.method, req_path, fwd_headers, raw_body
             )
-        except httpx.TimeoutException as exc:
+        except TimeoutError as exc:
             raise HTTPException(status_code=504, detail="Quack upstream timed out") from exc
-        except httpx.HTTPError as exc:
-            raise HTTPException(status_code=502, detail=f"Quack upstream error: {exc}") from exc
+        except (OSError, http.client.HTTPException) as exc:
+            raise HTTPException(status_code=502, detail="Quack upstream unavailable") from exc
 
-        resp_headers = {
-            k: v for k, v in upstream.headers.items() if k.lower() not in _HOP_BY_HOP_RESP_HEADERS
-        }
+        resp_headers = {k: v for k, v in raw_headers if k.lower() not in _HOP_BY_HOP_RESP_HEADERS}
         resp_headers.update(cors_hdrs)
-        return Response(
-            content=upstream.content,
-            status_code=upstream.status_code,
-            headers=resp_headers,
-        )
+        return Response(content=payload, status_code=status, headers=resp_headers)
 
-    dist_dir = frontend_dist or (Path(__file__).resolve().parents[4] / "frontend" / "dist")
+    dist_dir = frontend_dist or default_frontend_dist()
     if dist_dir.exists() and (dist_dir / "index.html").exists():
         app.mount("/", StaticFiles(directory=dist_dir, html=True), name="studio")
 
