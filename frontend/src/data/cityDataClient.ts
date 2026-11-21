@@ -1,8 +1,8 @@
 import * as duckdb from "@duckdb/duckdb-wasm";
-import duckdbMvpWorker from "@duckdb/duckdb-wasm/dist/duckdb-browser-mvp.worker.js?url";
 import duckdbEhWorker from "@duckdb/duckdb-wasm/dist/duckdb-browser-eh.worker.js?url";
-import duckdbMvpWasm from "@duckdb/duckdb-wasm/dist/duckdb-mvp.wasm?url";
+import duckdbMvpWorker from "@duckdb/duckdb-wasm/dist/duckdb-browser-mvp.worker.js?url";
 import duckdbEhWasm from "@duckdb/duckdb-wasm/dist/duckdb-eh.wasm?url";
+import duckdbMvpWasm from "@duckdb/duckdb-wasm/dist/duckdb-mvp.wasm?url";
 
 import type {
   Annotation,
@@ -15,7 +15,9 @@ import type {
   FileImport,
   FileMetric,
   LintDiagnostic,
+  RepoRef,
   Snapshot,
+  StaticManifest,
   ZoneType,
 } from "../types/city";
 
@@ -39,6 +41,82 @@ export interface CitySnapshotBundle {
   imports: FileImport[];
   cochanges: CochangePair[];
   deps: ExternalDep[];
+}
+
+export interface TourLandmark {
+  step: number;
+  title: string;
+  subtitle: string;
+  narration: string;
+  file_path: string;
+  district_path: string;
+  zone_type: ZoneType;
+  building_archetype: BuildingArchetype;
+  sloc: number;
+  max_complexity: number;
+  churn_90d: number;
+  hotspot_score: number;
+  lint_issue_count: number;
+  layout_x: number;
+  layout_z: number;
+  layout_w: number;
+  layout_d: number;
+}
+
+export interface FixDiffResult {
+  file_path: string;
+  linter: string;
+  has_changes: boolean;
+  diff: string;
+  fixed_content?: string | null;
+  message: string;
+}
+
+export interface HealthReportData {
+  owner: string;
+  repo: string;
+  snapshot_idx: number;
+  commit_sha: string;
+  git_tag: string | null;
+  health_score: number;
+  health_grade: string;
+  city_archetype_title: string;
+  total_files: number;
+  total_sloc: number;
+  total_lint_issues: number;
+  greenbelt_pct: number;
+  lone_keeper_files: number;
+  language_breakdown: Record<string, number>;
+  advisor_alerts: Snapshot["advisor_alerts"];
+  top_hotspots: Array<{
+    file_path: string;
+    district_path: string;
+    building_archetype: BuildingArchetype;
+    hotspot_score: number;
+    churn_90d: number;
+    lint_issue_count: number;
+    max_complexity: number;
+    distinct_authors_90d: number;
+  }>;
+}
+
+export interface QuackSnippetInfo {
+  quack_uri: string | null;
+  token: string | null;
+  proxy_url: string;
+  snippet: string;
+}
+
+export interface AnnotationChangeEvent {
+  snapshot_id: number;
+  rowid: number;
+  change_type: string;
+  annotation_id: string;
+  file_path: string;
+  author: string;
+  tag: string;
+  body: string;
+  created_at: string;
 }
 
 export class CityDataClient {
@@ -67,8 +145,8 @@ export class CityDataClient {
     return this.conn;
   }
 
-  async loadParquetTables(baseUrl: string, cacheKey: string): Promise<void> {
-    if (this.loadedKey === cacheKey && this.conn) return;
+  async loadParquetTables(baseUrl: string, cacheKey: string, force = false): Promise<void> {
+    if (!force && this.loadedKey === cacheKey && this.conn) return;
     const conn = await this.initWasm();
     const db = this.db!;
     const tables = [
@@ -95,6 +173,17 @@ export class CityDataClient {
       );
     }
     this.loadedKey = cacheKey;
+  }
+
+  async detectStaticManifest(): Promise<StaticManifest | null> {
+    try {
+      const resp = await fetch("./data/manifest.json", { cache: "no-store" });
+      if (!resp.ok) return null;
+      const data = (await resp.json()) as StaticManifest;
+      return data && data.mode === "static" ? data : null;
+    } catch {
+      return null;
+    }
   }
 
   async querySnapshots(): Promise<Snapshot[]> {
@@ -237,7 +326,7 @@ export class CityDataClient {
         FROM file_imports fi
         JOIN impacted i ON fi.target_file = i.file_path
         WHERE fi.snapshot_idx = ${snapshotIdx}
-          AND i.hop_distance < 5
+          AND i.hop_distance < 6
           AND NOT list_contains(i.path, fi.source_file)
       ),
       dedup AS (
@@ -284,10 +373,138 @@ export class CityDataClient {
     return { source_file: sourceFile, snapshot_idx: snapshotIdx, impacted_files, fault_lines };
   }
 
-  async queryFileHistory(
-    filePath: string,
-  ): Promise<
-    Array<{ snapshot_idx: number; sloc: number; hotspot_score: number; lint_issue_count: number }>
+  async queryTourLandmarks(snapshotIdx: number): Promise<TourLandmark[]> {
+    const bundle = await this.querySnapshotBundle(snapshotIdx);
+    const files = [...bundle.files].sort((a, b) => b.sloc - a.sloc);
+    if (files.length === 0) return [];
+    const used = new Set<string>();
+    const stops: TourLandmark[] = [];
+
+    const pick = (
+      title: string,
+      subtitle: string,
+      candidates: FileMetric[],
+      narrate: (f: FileMetric) => string,
+    ) => {
+      const pool = candidates.filter((f) => !used.has(f.file_path));
+      const fallback = files.filter((f) => !used.has(f.file_path));
+      const chosen = pool[0] ?? fallback[0];
+      if (!chosen) return;
+      used.add(chosen.file_path);
+      stops.push({
+        step: stops.length + 1,
+        title,
+        subtitle,
+        narration: narrate(chosen),
+        file_path: chosen.file_path,
+        district_path: chosen.district_path,
+        zone_type: chosen.zone_type,
+        building_archetype: chosen.building_archetype,
+        sloc: chosen.sloc,
+        max_complexity: chosen.max_complexity,
+        churn_90d: chosen.churn_90d,
+        hotspot_score: chosen.hotspot_score,
+        lint_issue_count: chosen.lint_issue_count,
+        layout_x: chosen.layout_x,
+        layout_z: chosen.layout_z,
+        layout_w: chosen.layout_w,
+        layout_d: chosen.layout_d,
+      });
+    };
+
+    pick(
+      "Harbor & City Gate",
+      "Where requests and CLI traffic enter the city",
+      files.filter((f) => f.building_archetype === "grand_terminal"),
+      (f) =>
+        `Start at ${f.file_path} in ${f.district_path}/ — entrypoint handling external traffic (${f.sloc} SLOC).`,
+    );
+    pick(
+      "Downtown City Hall",
+      "Core architectural hub & central orchestrator",
+      files.filter(
+        (f) => f.building_archetype === "city_hall" || f.building_archetype === "office_tower",
+      ),
+      (f) =>
+        `${f.file_path} anchors core domain logic (${f.sloc} SLOC, max complexity ${f.max_complexity}).`,
+    );
+    pick(
+      "Vaults & Reservoir",
+      "Schemas, models, and persistent state",
+      files.filter(
+        (f) => f.building_archetype === "twin_silos" || f.building_archetype === "archive_vault",
+      ),
+      (f) => `${f.file_path} safeguards data contracts and storage (${f.sloc} SLOC).`,
+    );
+    pick(
+      "Active Construction Zone",
+      "Highest 90-day churn & refactor hotspot",
+      [...files].sort((a, b) => b.hotspot_score - a.hotspot_score),
+      (f) =>
+        `Hardhats on at ${f.file_path} — ${f.churn_90d} churn weight and hotspot score ${f.hotspot_score.toFixed(1)}.`,
+    );
+    pick(
+      "Greenbelt Proving Parks",
+      "Automated test suites protecting the skyline",
+      files.filter((f) => f.building_archetype === "park_stadium"),
+      (f) => `${f.file_path} anchors automated verification (${f.sloc} SLOC).`,
+    );
+    return stops;
+  }
+
+  async queryHealthReport(
+    owner: string,
+    repo: string,
+    snapshotIdx: number,
+  ): Promise<HealthReportData> {
+    const bundle = await this.querySnapshotBundle(snapshotIdx);
+    const snap = bundle.snapshot;
+    const testSloc = bundle.files
+      .filter((f) => f.building_archetype === "park_stadium")
+      .reduce((acc, f) => acc + f.sloc, 0);
+    const loneKeepers = bundle.files.filter(
+      (f) => f.distinct_authors_90d === 1 && f.sloc >= 40,
+    ).length;
+    const topHotspots = [...bundle.files]
+      .sort((a, b) => b.hotspot_score - a.hotspot_score)
+      .slice(0, 8)
+      .map((f) => ({
+        file_path: f.file_path,
+        district_path: f.district_path,
+        building_archetype: f.building_archetype,
+        hotspot_score: f.hotspot_score,
+        churn_90d: f.churn_90d,
+        lint_issue_count: f.lint_issue_count,
+        max_complexity: f.max_complexity,
+        distinct_authors_90d: f.distinct_authors_90d,
+      }));
+    return {
+      owner,
+      repo,
+      snapshot_idx: snap.snapshot_idx,
+      commit_sha: snap.commit_sha,
+      git_tag: snap.git_tag,
+      health_score: snap.health_score,
+      health_grade: snap.health_grade,
+      city_archetype_title: snap.city_archetype_title,
+      total_files: snap.total_files,
+      total_sloc: snap.total_sloc,
+      total_lint_issues: snap.total_lint_issues,
+      greenbelt_pct: Math.round((1000 * testSloc) / Math.max(1, snap.total_sloc)) / 10,
+      lone_keeper_files: loneKeepers,
+      language_breakdown: snap.language_breakdown,
+      advisor_alerts: snap.advisor_alerts,
+      top_hotspots: topHotspots,
+    };
+  }
+
+  async queryFileHistory(filePath: string): Promise<
+    Array<{
+      snapshot_idx: number;
+      sloc: number;
+      hotspot_score: number;
+      lint_issue_count: number;
+    }>
   > {
     const conn = await this.initWasm();
     const esc = filePath.replace(/'/g, "''");
@@ -349,6 +566,62 @@ export class CityDataClient {
         created_at: String(r.created_at),
       };
     });
+  }
+
+  // Live Control Plane API calls (unavailable in zero-backend Static Report mode)
+  async fetchRepos(): Promise<RepoRef[]> {
+    const resp = await fetch("/api/repos");
+    if (!resp.ok) throw new Error(`Failed to fetch repos: ${resp.status}`);
+    return (await resp.json()) as RepoRef[];
+  }
+
+  async startAnalyze(
+    source: string,
+    maxKeyframes = 16,
+  ): Promise<{ job_id: string; owner: string; repo: string }> {
+    const resp = await fetch("/api/analyze", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ source, max_keyframes: maxKeyframes }),
+    });
+    if (!resp.ok) throw new Error(`Analyze request failed: ${resp.status}`);
+    return (await resp.json()) as { job_id: string; owner: string; repo: string };
+  }
+
+  async fetchFixDiff(owner: string, repo: string, filePath: string): Promise<FixDiffResult> {
+    const resp = await fetch(`/api/repos/${owner}/${repo}/fix-diff`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ file_path: filePath }),
+    });
+    if (!resp.ok) throw new Error(`Fix diff failed: ${resp.status}`);
+    return (await resp.json()) as FixDiffResult;
+  }
+
+  async postAnnotation(
+    owner: string,
+    repo: string,
+    payload: { file_path: string; author: string; tag: string; body: string },
+  ): Promise<Annotation> {
+    const resp = await fetch(`/api/repos/${owner}/${repo}/annotations`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!resp.ok) throw new Error(`Failed to save annotation: ${resp.status}`);
+    return (await resp.json()) as Annotation;
+  }
+
+  async fetchAnnotationChanges(owner: string, repo: string): Promise<AnnotationChangeEvent[]> {
+    const resp = await fetch(`/api/repos/${owner}/${repo}/annotations/changes`);
+    if (!resp.ok) return [];
+    return (await resp.json()) as AnnotationChangeEvent[];
+  }
+
+  async fetchQuackSnippet(owner: string, repo: string): Promise<QuackSnippetInfo> {
+    const resp = await fetch(`/api/repos/${owner}/${repo}/quack-snippet`);
+    if (!resp.ok) throw new Error(`Failed to fetch quack snippet: ${resp.status}`);
+    return (await resp.json()) as QuackSnippetInfo;
   }
 
   async close(): Promise<void> {
