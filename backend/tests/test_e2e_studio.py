@@ -155,10 +155,36 @@ def test_live_studio_e2e_2d_datamaps_tour_notes_3d_timescrub_and_quack(tmp_path:
             _assert_no_hud_overlap(page)
             page.click('[data-testid="time-collapse-btn"]')
 
-            # Toggle 2D <-> 3D in bottom-right viewport cluster
+            # Toggle 2D <-> 3D in bottom-right viewport cluster and verify 3D hover + selection
+            page.click('[data-testid="inspector-drawer"] button[title="Close inspector"]')
             page.click('[data-testid="toggle-2d-3d"]')
             page.wait_for_selector('[data-testid="city-canvas-3d"]', timeout=15000)
-            page.wait_for_timeout(350)
+            page.wait_for_timeout(600)
+
+            hit_pt = None
+            for gx in (480, 560, 640, 720, 800):
+                for gy in (340, 420, 500):
+                    page.mouse.move(gx, gy)
+                    page.wait_for_timeout(60)
+                    if page.locator('[data-testid="building-tooltip"]').count() > 0:
+                        hit_pt = (gx, gy)
+                        break
+                if hit_pt is not None:
+                    break
+            assert hit_pt is not None, "Expected 3D hover tooltip on city buildings"
+            tooltip_txt = page.inner_text('[data-testid="building-tooltip"]')
+            assert "SLOC" in tooltip_txt
+            hovered_file = tooltip_txt.splitlines()[0].strip()
+
+            page.mouse.click(*hit_pt)
+            page.wait_for_selector('[data-testid="inspector-drawer"]', timeout=5000)
+            assert hovered_file in page.inner_text('[data-testid="inspector-drawer"]')
+
+            # Clicking empty harbor water deselects the building
+            page.mouse.click(200, 200)
+            page.wait_for_timeout(150)
+            assert page.locator('[data-testid="inspector-drawer"]').count() == 0
+
             page.click('[data-testid="toggle-2d-3d"]')
             page.wait_for_selector('[data-testid="city-canvas-2d"]', timeout=10000)
 

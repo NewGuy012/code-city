@@ -12,6 +12,7 @@ import {
   Component,
   type ComponentRef,
   type ReactNode,
+  memo,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -748,6 +749,149 @@ function FaultArcs3D({
   );
 }
 
+const CityScene3D = memo(function CityScene3D({
+  districts,
+  files,
+  cochanges,
+  deps,
+  dataMap,
+  selectedFile,
+  hoveredFile,
+  blastRadius,
+  activeTool,
+  vehicles,
+  fireFiles,
+  blackoutFiles,
+  plazas,
+  streetLines,
+  projection,
+  timeOfDay,
+  skyBg,
+  onSelectFile,
+  onToolAction,
+  onHoverBuilding,
+  onLeaveBuilding,
+  onOrbitStart,
+}: {
+  districts: District[];
+  files: FileMetric[];
+  cochanges: CochangePair[];
+  deps: ExternalDep[];
+  dataMap: DataMapMode;
+  selectedFile: string | null;
+  hoveredFile: string | null;
+  blastRadius: BlastRadiusResult | null;
+  activeTool: string;
+  vehicles: SimVehicleRender[];
+  fireFiles?: Set<string>;
+  blackoutFiles?: Set<string>;
+  plazas: Array<{ x: number; z: number; w: number; d: number; kind: string }>;
+  streetLines?: { xLines: number[]; zLines: number[] };
+  projection: "perspective" | "orthographic";
+  timeOfDay: TimeOfDay;
+  skyBg: string;
+  onSelectFile: (filePath: string | null) => void;
+  onToolAction?: (file: FileMetric) => void;
+  onHoverBuilding: (file: FileMetric, clientX: number, clientY: number) => void;
+  onLeaveBuilding: (filePath: string) => void;
+  onOrbitStart: () => void;
+}) {
+  return (
+    <Canvas
+      shadows
+      dpr={[1, 2]}
+      gl={{ antialias: true, powerPreference: "high-performance" }}
+      onPointerMissed={() => onSelectFile(null)}
+    >
+      {projection === "orthographic" ? (
+        <OrthographicCamera makeDefault near={-400} far={1200} position={[85, 72, 85]} />
+      ) : (
+        <PerspectiveCamera makeDefault fov={42} near={0.5} far={1000} position={[85, 72, 85]} />
+      )}
+
+      <color attach="background" args={[skyBg]} />
+      <fog attach="fog" args={[skyBg, 145, 360]} />
+      <ambientLight intensity={timeOfDay === "night" ? 0.35 : 0.6} />
+      <directionalLight
+        position={timeOfDay === "golden" ? [115, 42, 72] : [80, 120, 60]}
+        intensity={timeOfDay === "night" ? 0.48 : timeOfDay === "golden" ? 1.65 : 1.4}
+        color={timeOfDay === "golden" ? "#fbbf24" : "#ffffff"}
+        castShadow
+        shadow-mapSize={[1024, 1024]}
+        shadow-camera-left={-90}
+        shadow-camera-right={90}
+        shadow-camera-top={90}
+        shadow-camera-bottom={-90}
+      />
+      <directionalLight position={[-65, 45, -65]} intensity={0.38} color="#38bdf8" />
+
+      <Environment resolution={128}>
+        <Lightformer
+          form="rect"
+          intensity={timeOfDay === "night" ? 0.4 : 1.6}
+          color={timeOfDay === "golden" ? "#fb923c" : "#bae6fd"}
+          scale={[40, 15, 1]}
+          position={[0, 35, -30]}
+          rotation={[Math.PI * 0.35, 0, 0]}
+        />
+        <Lightformer
+          form="ring"
+          intensity={timeOfDay === "night" ? 0.3 : 1.2}
+          color="#38bdf8"
+          scale={20}
+          position={[25, 22, 25]}
+        />
+      </Environment>
+
+      <HarborWater3D timeOfDay={timeOfDay} />
+      <mesh position={[0, -0.35, 0]} receiveShadow>
+        <boxGeometry args={[146, 0.55, 110]} />
+        <meshStandardMaterial color="#334155" roughness={0.88} />
+      </mesh>
+      <mesh position={[0, -0.1, 0]} receiveShadow>
+        <boxGeometry args={[142, 0.22, 106]} />
+        <meshStandardMaterial color="#0f172a" roughness={0.85} />
+      </mesh>
+
+      <DistrictPlates3D districts={districts} plazas={plazas} streetLines={streetLines} />
+      <WaterfrontDocks3D deps={deps} />
+      <MultiPartCityBuildings
+        files={files}
+        dataMap={dataMap}
+        selectedFile={selectedFile}
+        hoveredFile={hoveredFile}
+        blastRadius={blastRadius}
+        blackoutFiles={blackoutFiles}
+        timeOfDay={timeOfDay}
+        activeTool={activeTool}
+        onSelectFile={onSelectFile}
+        onToolAction={onToolAction}
+        onHoverBuilding={onHoverBuilding}
+        onLeaveBuilding={onLeaveBuilding}
+      />
+      <LiveVehiclesAndFires3D vehicles={vehicles} files={files} fireFiles={fireFiles} />
+      <FaultArcs3D
+        files={files}
+        cochanges={cochanges}
+        selectedFile={selectedFile}
+        blastRadius={blastRadius}
+      />
+      <CameraRig3D onOrbitStart={onOrbitStart} />
+
+      <PostprocessingBoundary>
+        <EffectComposer multisampling={0}>
+          <N8AO aoRadius={2.2} intensity={1.4} distanceFalloff={1.2} />
+          <Bloom
+            luminanceThreshold={0.9}
+            mipmapBlur
+            intensity={timeOfDay === "night" ? 0.95 : timeOfDay === "golden" ? 0.65 : 0.3}
+          />
+        </EffectComposer>
+      </PostprocessingBoundary>
+    </Canvas>
+  );
+});
+
 export default function CityCanvas3D({
   districts,
   files,
@@ -805,98 +949,30 @@ export default function CityCanvas3D({
             : "cursor-grab active:cursor-grabbing"
       }`}
     >
-      <Canvas
-        shadows
-        dpr={[1, 2]}
-        gl={{ antialias: true, powerPreference: "high-performance" }}
-        onPointerMissed={() => onSelectFile(null)}
-      >
-        {projection === "orthographic" ? (
-          <OrthographicCamera makeDefault near={-400} far={1200} position={[85, 72, 85]} />
-        ) : (
-          <PerspectiveCamera makeDefault fov={42} near={0.5} far={1000} position={[85, 72, 85]} />
-        )}
-
-        <color attach="background" args={[skyBg]} />
-        <fog attach="fog" args={[skyBg, 145, 360]} />
-        <ambientLight intensity={timeOfDay === "night" ? 0.35 : 0.6} />
-        <directionalLight
-          position={timeOfDay === "golden" ? [115, 42, 72] : [80, 120, 60]}
-          intensity={timeOfDay === "night" ? 0.48 : timeOfDay === "golden" ? 1.65 : 1.4}
-          color={timeOfDay === "golden" ? "#fbbf24" : "#ffffff"}
-          castShadow
-          shadow-mapSize={[1024, 1024]}
-          shadow-camera-left={-90}
-          shadow-camera-right={90}
-          shadow-camera-top={90}
-          shadow-camera-bottom={-90}
-        />
-        <directionalLight position={[-65, 45, -65]} intensity={0.38} color="#38bdf8" />
-
-        <Environment resolution={128}>
-          <Lightformer
-            form="rect"
-            intensity={timeOfDay === "night" ? 0.4 : 1.6}
-            color={timeOfDay === "golden" ? "#fb923c" : "#bae6fd"}
-            scale={[40, 15, 1]}
-            position={[0, 35, -30]}
-            rotation={[Math.PI * 0.35, 0, 0]}
-          />
-          <Lightformer
-            form="ring"
-            intensity={timeOfDay === "night" ? 0.3 : 1.2}
-            color="#38bdf8"
-            scale={20}
-            position={[25, 22, 25]}
-          />
-        </Environment>
-
-        <HarborWater3D timeOfDay={timeOfDay} />
-        <mesh position={[0, -0.35, 0]} receiveShadow>
-          <boxGeometry args={[146, 0.55, 110]} />
-          <meshStandardMaterial color="#334155" roughness={0.88} />
-        </mesh>
-        <mesh position={[0, -0.1, 0]} receiveShadow>
-          <boxGeometry args={[142, 0.22, 106]} />
-          <meshStandardMaterial color="#0f172a" roughness={0.85} />
-        </mesh>
-
-        <DistrictPlates3D districts={districts} plazas={plazas} streetLines={streetLines} />
-        <WaterfrontDocks3D deps={deps} />
-        <MultiPartCityBuildings
-          files={files}
-          dataMap={dataMap}
-          selectedFile={selectedFile}
-          hoveredFile={hoveredHit?.file.file_path ?? null}
-          blastRadius={blastRadius}
-          blackoutFiles={blackoutFiles}
-          timeOfDay={timeOfDay}
-          activeTool={activeTool}
-          onSelectFile={onSelectFile}
-          onToolAction={onToolAction}
-          onHoverBuilding={handleHoverBuilding}
-          onLeaveBuilding={handleLeaveBuilding}
-        />
-        <LiveVehiclesAndFires3D vehicles={vehicles} files={files} fireFiles={fireFiles} />
-        <FaultArcs3D
-          files={files}
-          cochanges={cochanges}
-          selectedFile={selectedFile}
-          blastRadius={blastRadius}
-        />
-        <CameraRig3D onOrbitStart={clearHover} />
-
-        <PostprocessingBoundary>
-          <EffectComposer multisampling={0}>
-            <N8AO aoRadius={2.2} intensity={1.4} distanceFalloff={1.2} />
-            <Bloom
-              luminanceThreshold={0.9}
-              mipmapBlur
-              intensity={timeOfDay === "night" ? 0.95 : timeOfDay === "golden" ? 0.65 : 0.3}
-            />
-          </EffectComposer>
-        </PostprocessingBoundary>
-      </Canvas>
+      <CityScene3D
+        districts={districts}
+        files={files}
+        cochanges={cochanges}
+        deps={deps}
+        dataMap={dataMap}
+        selectedFile={selectedFile}
+        hoveredFile={hoveredHit?.file.file_path ?? null}
+        blastRadius={blastRadius}
+        activeTool={activeTool}
+        vehicles={vehicles}
+        fireFiles={fireFiles}
+        blackoutFiles={blackoutFiles}
+        plazas={plazas}
+        streetLines={streetLines}
+        projection={projection}
+        timeOfDay={timeOfDay}
+        skyBg={skyBg}
+        onSelectFile={onSelectFile}
+        onToolAction={onToolAction}
+        onHoverBuilding={handleHoverBuilding}
+        onLeaveBuilding={handleLeaveBuilding}
+        onOrbitStart={clearHover}
+      />
 
       {hoveredHit && (
         <BuildingTooltip
