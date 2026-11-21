@@ -992,7 +992,7 @@ export function App() {
         </header>
       )}
 
-      {effectiveBundle && (
+      {!zenMode && effectiveBundle && (
         <MayorToolbar
           activeTool={activeTool}
           onSelectTool={(t) => {
@@ -1008,6 +1008,9 @@ export function App() {
           baseBundle={bundle}
           effectiveBundle={effectiveBundle}
           pendingTransitStart={pendingTransitStart}
+          isModePopoverOpen={openPopover === "mayorMode"}
+          onToggleModePopover={() => togglePopover("mayorMode")}
+          onClosePopover={closePopover}
           onUndo={() => void handleUndo()}
           onRedo={() => void handleRedo()}
           onReset={() => void handleResetSandbox()}
@@ -1035,13 +1038,13 @@ export function App() {
       {toastMsg && (
         <div
           data-testid="mayor-toast"
-          className="sim-panel pointer-events-none fixed top-28 left-1/2 z-40 -translate-x-1/2 rounded-xl border-amber-400/40 px-4 py-2 text-xs font-medium text-amber-200 shadow-2xl"
+          className="sim-panel pointer-events-none fixed top-16 left-1/2 z-40 -translate-x-1/2 rounded-xl border-amber-400/40 px-4 py-2 text-xs font-medium text-amber-200 shadow-2xl"
         >
           {toastMsg}
         </div>
       )}
 
-      {tourActive && (
+      {!zenMode && tourActive && (
         <OnboardingTour
           stops={tourStops}
           stepIndex={tourStep}
@@ -1052,33 +1055,35 @@ export function App() {
         />
       )}
 
-      <InspectorDrawer
-        file={selectedFileMetric}
-        blastRadius={blastRadius}
-        diagnostics={fileDiagnostics}
-        history={fileHistory}
-        annotations={annotations}
-        isStaticMode={isStaticMode}
-        onRequestFixDiff={async (fpath) => {
-          if (!activeRepo) {
-            return {
-              file_path: fpath,
-              linter: "none",
-              has_changes: false,
-              diff: "",
-              message: "No repository active",
-            };
-          }
-          return client.fetchFixDiff(activeRepo.owner, activeRepo.repo, fpath);
-        }}
-        onAddAnnotation={async (payload) => {
-          if (!activeRepo) return;
-          const created = await client.postAnnotation(activeRepo.owner, activeRepo.repo, payload);
-          setAnnotations((prev) => [created, ...prev]);
-        }}
-        onSelectFile={handleFocusFile}
-        onClose={() => setSelectedFile(null)}
-      />
+      {!zenMode && (
+        <InspectorDrawer
+          file={selectedFileMetric}
+          blastRadius={blastRadius}
+          diagnostics={fileDiagnostics}
+          history={fileHistory}
+          annotations={annotations}
+          isStaticMode={isStaticMode}
+          onRequestFixDiff={async (fpath) => {
+            if (!activeRepo) {
+              return {
+                file_path: fpath,
+                linter: "none",
+                has_changes: false,
+                diff: "",
+                message: "No repository active",
+              };
+            }
+            return client.fetchFixDiff(activeRepo.owner, activeRepo.repo, fpath);
+          }}
+          onAddAnnotation={async (payload) => {
+            if (!activeRepo) return;
+            const created = await client.postAnnotation(activeRepo.owner, activeRepo.repo, payload);
+            setAnnotations((prev) => [created, ...prev]);
+          }}
+          onSelectFile={handleFocusFile}
+          onClose={() => setSelectedFile(null)}
+        />
+      )}
 
       {bundle && snapshots.length > 0 && (
         <footer className="pointer-events-none absolute inset-x-0 bottom-0 z-20 flex items-end justify-between gap-3 p-3">

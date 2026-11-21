@@ -38,14 +38,18 @@ interface MayorToolbarProps {
   baseBundle: CitySnapshotBundle | null;
   effectiveBundle: CitySnapshotBundle | null;
   pendingTransitStart: string | null;
+  isModePopoverOpen: boolean;
+  onToggleModePopover: () => void;
+  onClosePopover: () => void;
   onUndo: () => void;
   onRedo: () => void;
   onReset: () => void;
   onToggleLiveMode: () => void;
   onToggleCoopSync: () => void;
+  className?: string;
 }
 
-const TOOLS: Array<{
+export const MAYOR_TOOLS: Array<{
   id: MayorToolId;
   label: string;
   desc: string;
@@ -57,7 +61,7 @@ const TOOLS: Array<{
     label: "Inspect",
     desc: "Select buildings & inspect blast radius (Esc)",
     icon: MousePointer,
-    accent: "text-slate-200",
+    accent: "text-slate-100",
   },
   {
     id: "sweeper",
@@ -69,7 +73,7 @@ const TOOLS: Array<{
   {
     id: "splitter",
     label: "Split Tower",
-    desc: "Split monolith (SLOC > 400 or Cx > 15) into 2-3 balanced towers",
+    desc: "Split monolith (SLOC > 400 or Cx > 15) into balanced towers",
     icon: Scissors,
     accent: "text-amber-300",
   },
@@ -115,11 +119,15 @@ export function MayorToolbar({
   baseBundle,
   effectiveBundle,
   pendingTransitStart,
+  isModePopoverOpen,
+  onToggleModePopover,
+  onClosePopover,
   onUndo,
   onRedo,
   onReset,
   onToggleLiveMode,
   onToggleCoopSync,
+  className = "absolute top-1/2 left-3 z-20 -translate-y-1/2",
 }: MayorToolbarProps) {
   const [blueprintOpen, setBlueprintOpen] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -147,127 +155,184 @@ export function MayorToolbar({
     <>
       <aside
         data-testid="mayor-toolbar"
-        className="sim-panel pointer-events-auto absolute top-32 left-3 z-20 flex flex-col gap-1 rounded-2xl p-1.5 text-xs"
+        className={`sim-panel pointer-events-auto flex w-11 flex-col items-center gap-1 rounded-2xl p-1.5 text-xs ${className}`}
       >
-        {/* Sandbox / Live Mayor Mode Pill */}
-        <button
-          type="button"
-          data-testid="toggle-mayor-mode"
-          disabled={isStaticMode}
-          onClick={onToggleLiveMode}
-          title={
-            isStaticMode
-              ? "Static export runs in Sandbox Mode"
-              : "Toggle Refactor Sandbox vs Live Git Branch Mayor Mode"
-          }
-          className={`flex items-center justify-center gap-1 rounded-xl px-2 py-1 text-[10px] font-bold uppercase tracking-wider transition ${
-            liveMode
-              ? "bg-rose-500/25 text-rose-200 ring-1 ring-rose-400/50"
-              : "bg-sky-500/20 text-sky-200 ring-1 ring-sky-400/35"
-          } disabled:opacity-70`}
-        >
-          <GitBranch className="h-3 w-3" />
-          <span>{liveMode ? "Live Git" : "Sandbox"}</span>
-        </button>
-
-        {liveMode && liveBranchName && (
-          <div className="max-w-[96px] truncate rounded-lg bg-slate-900/90 px-1.5 py-0.5 text-center font-mono text-[9px] text-rose-300">
-            {liveBranchName}
-          </div>
-        )}
-
-        {!isStaticMode && (
+        {/* Sandbox / Live Git Mode & Co-Op Popover */}
+        <div data-popover-id="mayorMode" className="relative">
           <button
             type="button"
-            data-testid="toggle-coop-sync"
-            onClick={onToggleCoopSync}
-            title="Sync Sandbox Actions with teammates via Quack + DuckLake"
-            className={`rounded-lg px-2 py-0.5 text-[9px] font-semibold transition ${
-              coopSyncEnabled
-                ? "bg-emerald-500/20 text-emerald-300 ring-1 ring-emerald-400/40"
-                : "bg-slate-900/70 text-slate-400 hover:text-slate-200"
+            data-testid="mayor-mode-btn"
+            onClick={onToggleModePopover}
+            title={
+              liveMode
+                ? `Live Git Mayor Mode (${liveBranchName ?? "branch"})`
+                : `Refactor Sandbox Mode${coopSyncEnabled ? " · Co-Op ON" : ""}`
+            }
+            aria-label="Mayor Execution Mode"
+            className={`relative flex h-8 w-8 items-center justify-center rounded-xl transition ${
+              liveMode
+                ? "bg-rose-500/20 text-rose-300 ring-1 ring-rose-400/50"
+                : isModePopoverOpen
+                  ? "bg-white/[0.12] text-white ring-1 ring-white/15"
+                  : "text-slate-300 hover:bg-white/[0.08] hover:text-white"
             }`}
           >
-            {coopSyncEnabled ? "Co-Op: ON" : "Co-Op: OFF"}
+            <GitBranch className="h-4 w-4" />
+            {coopSyncEnabled && !isStaticMode && (
+              <span className="absolute top-1 right-1 h-1.5 w-1.5 rounded-full bg-emerald-400" />
+            )}
           </button>
-        )}
 
-        <div className="my-0.5 h-px bg-slate-700/80" />
+          {isModePopoverOpen && (
+            <div
+              data-testid="mayor-mode-popover"
+              className="sim-popover absolute top-0 left-full z-40 ml-2.5 w-60 rounded-2xl p-3 text-xs"
+            >
+              <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-slate-400">
+                Execution Mode
+              </div>
 
-        {/* 6 Mayor Tools + Inspect */}
-        {TOOLS.map((t) => {
+              <button
+                type="button"
+                data-testid="toggle-mayor-mode"
+                disabled={isStaticMode}
+                onClick={() => {
+                  onToggleLiveMode();
+                  onClosePopover();
+                }}
+                className={`flex w-full items-center justify-between gap-2 rounded-xl px-2.5 py-2 text-left transition ${
+                  liveMode
+                    ? "bg-rose-500/20 text-rose-200 ring-1 ring-rose-400/40"
+                    : "bg-sky-500/15 text-sky-200 ring-1 ring-sky-400/30 hover:bg-sky-500/25"
+                } disabled:opacity-60`}
+              >
+                <div>
+                  <div className="font-semibold">{liveMode ? "Live Git Mode" : "Sandbox Mode"}</div>
+                  <div className="text-[10px] text-slate-400">
+                    {isStaticMode
+                      ? "Static export runs in Sandbox"
+                      : liveMode
+                        ? "Commits changes to Mayor branch"
+                        : "Safe DuckDB-Wasm overlay"}
+                  </div>
+                </div>
+                <span className="rounded-md bg-slate-950/60 px-1.5 py-0.5 text-[10px] font-semibold">
+                  {liveMode ? "LIVE" : "SAFE"}
+                </span>
+              </button>
+
+              {liveMode && liveBranchName && (
+                <div className="mt-1.5 truncate rounded-lg bg-slate-950/70 px-2 py-1 font-mono text-[10px] text-rose-300">
+                  {liveBranchName}
+                </div>
+              )}
+
+              {!isStaticMode && (
+                <button
+                  type="button"
+                  data-testid="toggle-coop-sync"
+                  onClick={onToggleCoopSync}
+                  className="mt-2 flex w-full items-center justify-between rounded-xl bg-white/[0.04] px-2.5 py-2 text-left text-slate-200 transition hover:bg-white/[0.08]"
+                >
+                  <div>
+                    <div className="font-medium">Co-Op Sync</div>
+                    <div className="text-[10px] text-slate-400">Quack + DuckLake live sync</div>
+                  </div>
+                  <span
+                    className={`rounded-md px-1.5 py-0.5 text-[10px] font-bold ${
+                      coopSyncEnabled
+                        ? "bg-emerald-500/20 text-emerald-300"
+                        : "bg-white/[0.06] text-slate-400"
+                    }`}
+                  >
+                    {coopSyncEnabled ? "ON" : "OFF"}
+                  </span>
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+
+        <div className="my-0.5 h-px w-6 bg-white/10" />
+
+        {/* 7 Mayor Tools (Icon Rail + Rich Side Tooltips) */}
+        {MAYOR_TOOLS.map((t) => {
           const Icon = t.icon;
           const active = activeTool === t.id;
           const cost = t.id === "inspect" ? null : TOOL_COSTS[t.id];
+          const waitingSecondClick = t.id === "transit_hub" && Boolean(pendingTransitStart);
           return (
-            <button
-              key={t.id}
-              type="button"
-              data-testid={`tool-${t.id}`}
-              onClick={() => onSelectTool(t.id)}
-              title={t.desc}
-              className={`group flex items-center justify-between gap-2 rounded-xl px-2 py-1.5 text-left transition ${
-                active
-                  ? "bg-amber-500/20 text-white ring-1 ring-amber-400/70"
-                  : "text-slate-300 hover:bg-slate-800/80 hover:text-white"
-              }`}
-            >
-              <span className="flex items-center gap-1.5">
-                <Icon
-                  className={`h-3.5 w-3.5 ${active ? t.accent : "text-slate-400 group-hover:text-slate-200"}`}
-                />
-                <span className="hidden text-[11px] font-medium md:inline">{t.label}</span>
-              </span>
-              {cost !== null && (
-                <span className="hidden font-mono text-[9px] text-amber-300/80 md:inline">
-                  {cost}
-                </span>
-              )}
-            </button>
+            <div key={t.id} className="group relative">
+              <button
+                type="button"
+                data-testid={`tool-${t.id}`}
+                onClick={() => onSelectTool(t.id)}
+                aria-label={t.label}
+                className={`relative flex h-8 w-8 items-center justify-center rounded-xl transition ${
+                  active
+                    ? "bg-amber-400/20 text-white ring-1 ring-amber-400/60"
+                    : "text-slate-400 hover:bg-white/[0.08] hover:text-slate-100"
+                }`}
+              >
+                <Icon className={`h-4 w-4 ${active ? t.accent : ""}`} />
+                {waitingSecondClick && (
+                  <span className="absolute top-1 right-1 h-1.5 w-1.5 animate-ping rounded-full bg-sky-400" />
+                )}
+              </button>
+
+              {/* Floating Side Tooltip */}
+              <div className="sim-popover pointer-events-none invisible absolute top-1/2 left-full z-30 ml-2.5 w-52 -translate-y-1/2 rounded-xl px-2.5 py-2 text-left opacity-0 transition-opacity duration-100 group-hover:visible group-hover:opacity-100">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-semibold text-white">{t.label}</span>
+                  {cost !== null && (
+                    <span className="font-mono text-[10px] font-bold text-amber-300">
+                      -{cost} ⚡
+                    </span>
+                  )}
+                </div>
+                <p className="mt-0.5 text-[11px] leading-snug text-slate-400">{t.desc}</p>
+              </div>
+            </div>
           );
         })}
 
-        {pendingTransitStart && activeTool === "transit_hub" && (
-          <div className="max-w-[106px] truncate rounded-lg bg-sky-500/20 px-1.5 py-1 text-[10px] text-sky-200">
-            Link: {pendingTransitStart.split("/").pop()} → ?
-          </div>
+        {/* Progressive History Controls (only shown once edits exist) */}
+        {actions.length > 0 && (
+          <>
+            <div className="my-0.5 h-px w-6 bg-white/10" />
+            <button
+              type="button"
+              data-testid="sandbox-undo-btn"
+              disabled={!canUndo}
+              onClick={onUndo}
+              title="Undo last Mayor action"
+              className="flex h-7 w-8 items-center justify-center rounded-lg text-slate-300 transition hover:bg-white/[0.08] hover:text-white disabled:opacity-30"
+            >
+              <Undo2 className="h-3.5 w-3.5" />
+            </button>
+            <button
+              type="button"
+              data-testid="sandbox-redo-btn"
+              disabled={!canRedo}
+              onClick={onRedo}
+              title="Redo Mayor action"
+              className="flex h-7 w-8 items-center justify-center rounded-lg text-slate-300 transition hover:bg-white/[0.08] hover:text-white disabled:opacity-30"
+            >
+              <Redo2 className="h-3.5 w-3.5" />
+            </button>
+            <button
+              type="button"
+              data-testid="sandbox-reset-btn"
+              onClick={onReset}
+              title="Reset sandbox to HEAD"
+              className="flex h-7 w-8 items-center justify-center rounded-lg text-rose-300/80 transition hover:bg-rose-500/15 hover:text-rose-200"
+            >
+              <RotateCcw className="h-3.5 w-3.5" />
+            </button>
+          </>
         )}
 
-        <div className="my-0.5 h-px bg-slate-700/80" />
-
-        {/* Undo / Redo / Reset */}
-        <div className="flex items-center justify-between gap-1">
-          <button
-            type="button"
-            data-testid="sandbox-undo-btn"
-            disabled={!canUndo}
-            onClick={onUndo}
-            title="Undo last Mayor action"
-            className="rounded-lg p-1.5 text-slate-300 hover:bg-slate-800 disabled:opacity-35"
-          >
-            <Undo2 className="h-3.5 w-3.5" />
-          </button>
-          <button
-            type="button"
-            data-testid="sandbox-redo-btn"
-            disabled={!canRedo}
-            onClick={onRedo}
-            title="Redo Mayor action"
-            className="rounded-lg p-1.5 text-slate-300 hover:bg-slate-800 disabled:opacity-35"
-          >
-            <Redo2 className="h-3.5 w-3.5" />
-          </button>
-          <button
-            type="button"
-            data-testid="sandbox-reset-btn"
-            disabled={actions.length === 0}
-            onClick={onReset}
-            title="Reset sandbox to HEAD"
-            className="rounded-lg p-1.5 text-rose-300 hover:bg-slate-800 disabled:opacity-35"
-          >
-            <RotateCcw className="h-3.5 w-3.5" />
-          </button>
-        </div>
+        <div className="my-0.5 h-px w-6 bg-white/10" />
 
         {/* Export Refactor Blueprint */}
         <button
@@ -275,12 +340,16 @@ export function MayorToolbar({
           data-testid="export-blueprint-btn"
           onClick={() => setBlueprintOpen(true)}
           title="Export Mayor's Refactor Blueprint (Markdown / GitHub Issues)"
-          className="flex items-center justify-center gap-1 rounded-xl bg-amber-500/20 px-2 py-1.5 text-[11px] font-semibold text-amber-200 ring-1 ring-amber-400/35 hover:bg-amber-500/30"
+          aria-label="Refactor Blueprint"
+          className={`relative flex h-8 w-8 items-center justify-center rounded-xl transition ${
+            activeCount > 0
+              ? "bg-amber-500/20 text-amber-300 ring-1 ring-amber-400/40 hover:bg-amber-500/30"
+              : "text-slate-300 hover:bg-white/[0.08] hover:text-white"
+          }`}
         >
-          <FileText className="h-3.5 w-3.5" />
-          <span className="hidden md:inline">Blueprint</span>
+          <FileText className="h-4 w-4" />
           {activeCount > 0 && (
-            <span className="rounded-full bg-amber-400 px-1.5 text-[9px] font-bold text-slate-950">
+            <span className="sim-pixel-badge absolute -top-1 -right-1 rounded-full bg-amber-400 px-1 font-mono text-[9px] font-bold leading-tight text-slate-950">
               {activeCount}
             </span>
           )}
@@ -326,8 +395,8 @@ export function MayorToolbar({
           </>
         }
       >
-        <div className="flex-1 overflow-y-auto p-6">
-          <pre className="whitespace-pre-wrap rounded-2xl border border-slate-700 bg-slate-950 p-4 font-mono text-xs leading-relaxed text-slate-200">
+        <div className="sim-scrollbar flex-1 overflow-y-auto p-6">
+          <pre className="whitespace-pre-wrap rounded-2xl border border-white/10 bg-slate-950 p-4 font-mono text-xs leading-relaxed text-slate-200">
             {blueprintMd}
           </pre>
         </div>
