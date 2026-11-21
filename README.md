@@ -75,10 +75,10 @@ Catalog data defaults to `.codecity/` (override with `codecity --data-dir <path>
 
 | Layer | Stack | Role |
 | :--- | :--- | :--- |
-| **Analyzer** | `Tree-sitter`, `ruff`, `bun` / `oxlint`, `git worktree` | Multi-worker keyframe AST, complexity, lint, churn, and dependency extraction |
+| **Analyzer** | `Tree-sitter`, `ruff`, `bun` / `oxlint`, `git worktree` | Multi-worker keyframe AST, complexity, lint, churn, and dependency extraction with symlink-safe scanning and hook-disabled Git execution |
 | **Lakehouse** | `DuckDB 2.0`, `DuckLake 1.1`, `Quack` | Concurrent nested schemas (`repos.<owner>.<repo>`), `VARIANT` metrics, Parquet export, and audit feeds |
-| **Control Plane** | `FastAPI`, `uvicorn`, SSE | Thin local server for analysis jobs, SSE progress, Parquet serving, localhost Quack proxy, Notes/Sandbox sync, and Mayor Git actions |
-| **Studio UI** | `React`, `DuckDB-Wasm`, `Canvas 2D`, `Three.js` | Client-side Parquet SQL analytics (snapshots, blast radius, city tours, health reports) across both Live and Static modes |
+| **Control Plane** | `FastAPI`, `uvicorn`, stdlib HTTP, SSE | Thin local server with bounded per-repo job execution, SSE progress, Parquet serving, localhost Quack CORS proxy, sandboxed SVG badges, and Mayor Git actions |
+| **Studio UI** | `React`, `DuckDB-Wasm`, `Canvas 2D`, bare `Three.js` | Client-side Parquet SQL analytics (snapshots, blast radius, city tours, health reports) and instanced 2D/3D rendering across Live and Static modes |
 
 ---
 
