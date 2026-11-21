@@ -10,6 +10,7 @@ import type {
   FileMetric,
 } from "../types/city";
 import { MAX_ZOOM, MIN_ZOOM, cameraStore } from "./cameraStore";
+import { BuildingTooltip } from "./BuildingTooltip";
 import {
   type FloatingStatPopup,
   type GhostLot,
@@ -398,7 +399,11 @@ export function CityCanvas2D({
         ref={canvasRef}
         data-testid="city-canvas-2d"
         className={`block h-full w-full ${
-          activeTool !== "inspect" ? "cursor-crosshair" : "cursor-grab active:cursor-grabbing"
+          activeTool !== "inspect"
+            ? "cursor-crosshair"
+            : hoveredHit
+              ? "cursor-pointer"
+              : "cursor-grab active:cursor-grabbing"
         }`}
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
@@ -410,44 +415,12 @@ export function CityCanvas2D({
       />
 
       {hoveredHit && (
-        <div
-          className="pointer-events-none absolute z-20 max-w-xs rounded-xl border border-slate-600/50 bg-slate-900/95 px-3 py-2 text-xs shadow-xl backdrop-blur"
-          style={{
-            left: Math.min((containerRef.current?.clientWidth || 1280) - 260, hoveredHit.x + 14),
-            top: Math.max(12, hoveredHit.y - 68),
-          }}
-        >
-          <div className="truncate font-mono font-semibold text-amber-300">
-            {hoveredHit.file.file_path}
-          </div>
-          <div className="mt-1 flex flex-wrap gap-2 text-slate-300">
-            <span className="rounded bg-slate-800 px-1.5 py-0.5 capitalize">
-              {hoveredHit.file.building_archetype.replace(/_/g, " ")}
-            </span>
-            <span>{hoveredHit.file.sloc} SLOC</span>
-            <span>Cx {hoveredHit.file.max_complexity}</span>
-            <span>Hotspot {hoveredHit.file.hotspot_score.toFixed(1)}</span>
-          </div>
-          {(hoveredHit.file.lint_issue_count > 0 ||
-            hoveredHit.file.condition_flags?.crane ||
-            hoveredHit.file.condition_flags?.lone_keeper) && (
-            <div className="mt-1 flex flex-wrap gap-1.5 text-[11px]">
-              {hoveredHit.file.condition_flags?.crane && (
-                <span className="text-amber-400">🏗️ Active Churn</span>
-              )}
-              {hoveredHit.file.lint_issue_count > 0 && (
-                <span className="text-purple-300">🌫️ {hoveredHit.file.lint_issue_count} lints</span>
-              )}
-              {hoveredHit.file.condition_flags?.lone_keeper && (
-                <span className="text-rose-400">🚨 Bus Factor 1</span>
-              )}
-            </div>
-          )}
-          <div className="mt-1 text-[10px] text-slate-400">
-            Heading {cameraStore.getCompassLabel()} · Pitch{" "}
-            {Math.round(cameraStore.getState().pitch)}°
-          </div>
-        </div>
+        <BuildingTooltip
+          file={hoveredHit.file}
+          x={hoveredHit.x}
+          y={hoveredHit.y}
+          containerWidth={containerRef.current?.clientWidth}
+        />
       )}
     </div>
   );

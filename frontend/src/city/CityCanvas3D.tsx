@@ -8,7 +8,17 @@ import {
 } from "@react-three/drei";
 import { Canvas, type ThreeEvent, useFrame, useThree } from "@react-three/fiber";
 import { Bloom, EffectComposer, N8AO } from "@react-three/postprocessing";
-import { Component, type ComponentRef, type ReactNode, useEffect, useMemo, useRef } from "react";
+import {
+  Component,
+  type ComponentRef,
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import * as THREE from "three";
 
 import type {
@@ -20,6 +30,7 @@ import type {
   ExternalDep,
   FileMetric,
 } from "../types/city";
+import { BuildingTooltip } from "./BuildingTooltip";
 import {
   type TimeOfDay,
   WORLD_CENTER_X,
@@ -80,7 +91,7 @@ class PostprocessingBoundary extends Component<{ children: ReactNode }, { failed
   }
 }
 
-function CameraRig3D() {
+function CameraRig3D({ onOrbitStart }: { onOrbitStart: () => void }) {
   const controlsRef = useRef<OrbitControlsImpl | null>(null);
   const { camera, size } = useThree();
   const syncingFromStoreRef = useRef(false);
@@ -140,6 +151,7 @@ function CameraRig3D() {
       maxPolarAngle={(78 * Math.PI) / 180}
       onStart={() => {
         userInteractingRef.current = true;
+        onOrbitStart();
         cameraStore.cancelTween();
         cameraStore.setState(
           { followVehicleId: null, cinematicOrbit: false },
@@ -175,6 +187,43 @@ function CameraRig3D() {
   );
 }
 
+const UNIT_BOX_EDGES = new THREE.EdgesGeometry(new THREE.BoxGeometry(1, 1, 1));
+const NO_RAYCAST = () => {};
+
+function BuildingHighlightBox3D({
+  file,
+  color,
+  opacity,
+}: {
+  file: FileMetric;
+  color: string;
+  opacity: number;
+}) {
+  const pad = Math.min(0.45, Math.min(file.layout_w, file.layout_d) * 0.14);
+  const bw = Math.max(0.8, file.layout_w - pad * 2);
+  const bd = Math.max(0.8, file.layout_d - pad * 2);
+  const h = buildingHeight3D(file);
+  const cx = file.layout_x + file.layout_w * 0.5 - WORLD_CX;
+  const cz = file.layout_z + file.layout_d * 0.5 - WORLD_CZ;
+
+  return (
+    <group>
+      <lineSegments
+        geometry={UNIT_BOX_EDGES}
+        position={[cx, h * 0.5 + 0.12, cz]}
+        scale={[bw + 0.36, h + 0.24, bd + 0.36]}
+        raycast={NO_RAYCAST}
+      >
+        <lineBasicMaterial color={color} transparent opacity={opacity} />
+      </lineSegments>
+      <mesh position={[cx, 0.18, cz]} rotation={[-Math.PI / 2, 0, 0]} raycast={NO_RAYCAST}>
+        <planeGeometry args={[bw + 0.72, bd + 0.72]} />
+        <meshBasicMaterial color={color} transparent opacity={0.22} depthWrite={false} />
+      </mesh>
+    </group>
+  );
+}
+
 function ArchetypePartMesh({
   part,
   groupFiles,
@@ -186,6 +235,8 @@ function ArchetypePartMesh({
   activeTool,
   onSelectFile,
   onToolAction,
+  onHoverBuilding,
+  onLeaveBuilding,
 }: {
   part: ArchetypePartSpec;
   groupFiles: FileMetric[];
@@ -197,6 +248,8 @@ function ArchetypePartMesh({
   activeTool: string;
   onSelectFile: (filePath: string | null) => void;
   onToolAction?: (file: FileMetric) => void;
+  onHoverBuilding: (file: FileMetric, clientX: number, clientY: number) => void;
+  onLeaveBuilding: (filePath: string) => void;
 }) {
   const meshRef = useRef<THREE.InstancedMesh | null>(null);
   const geom = useMemo(() => getSharedPartGeometry(part.geom), [part.geom]);
@@ -206,13 +259,11 @@ function ArchetypePartMesh({
   );
   const turfMap = useMemo(() => (part.role === "turf" ? getTurfTexture() : null), [part.role]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const mesh = meshRef.current;
     if (!mesh || groupFiles.length === 0) return;
 
     const dummy = new THREE.Object3D();
-    const color = new THREE.Color();
-
     groupFiles.forEach((f, idx) => {
       const pad = Math.min(0.45, Math.min(f.layout_w, f.layout_d) * 0.14);
       const bw = Math.max(0.8, f.layout_w - pad * 2);
@@ -230,7 +281,19 @@ function ArchetypePartMesh({
       dummy.scale.set(sx, sy, sz);
       dummy.updateMatrix();
       mesh.setMatrixAt(idx, dummy.matrix);
+    });
+    mesh.instanceMatrix.needsUpdate = true;
+    // Recompute spatial bounds after scattering instances so Three.js raycasting & frustum culling stay accurate
+    mesh.computeBoundingSphere();
+    mesh.computeBoundingBox();
+  }, [groupFiles, part]);
 
+  useEffect(() => {
+    const mesh = meshRef.current;
+    if (!mesh || groupFiles.length === 0) return;
+
+    const color = new THREE.Color();
+    groupFiles.forEach((f, idx) => {
       const isBlackout = blackoutFiles?.has(f.file_path);
       if (isBlackout) {
         color.set("#1e293b");
@@ -243,12 +306,12 @@ function ArchetypePartMesh({
       }
       mesh.setColorAt(idx, color);
     });
-    mesh.instanceMatrix.needsUpdate = true;
     if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
   }, [blackoutFiles, dataMap, groupFiles, impactedHop, part, selectedFile]);
 
   function handleClick(e: ThreeEvent<MouseEvent>) {
     e.stopPropagation();
+    if (e.delta > 5) return;
     if (e.instanceId !== undefined && groupFiles[e.instanceId]) {
       const f = groupFiles[e.instanceId];
       if (activeTool !== "inspect" && onToolAction) {
@@ -256,6 +319,19 @@ function ArchetypePartMesh({
       } else {
         onSelectFile(f.file_path);
       }
+    }
+  }
+
+  function handlePointerMove(e: ThreeEvent<PointerEvent>) {
+    e.stopPropagation();
+    if (e.instanceId !== undefined && groupFiles[e.instanceId]) {
+      onHoverBuilding(groupFiles[e.instanceId], e.nativeEvent.clientX, e.nativeEvent.clientY);
+    }
+  }
+
+  function handlePointerOut(e: ThreeEvent<PointerEvent>) {
+    if (e.instanceId !== undefined && groupFiles[e.instanceId]) {
+      onLeaveBuilding(groupFiles[e.instanceId].file_path);
     }
   }
 
@@ -275,6 +351,8 @@ function ArchetypePartMesh({
       ref={meshRef}
       args={[geom, undefined, Math.max(1, groupFiles.length)]}
       onClick={handleClick}
+      onPointerMove={handlePointerMove}
+      onPointerOut={handlePointerOut}
       castShadow={part.role !== "turf"}
       receiveShadow
     >
@@ -299,22 +377,28 @@ function MultiPartCityBuildings({
   files,
   dataMap,
   selectedFile,
+  hoveredFile,
   blastRadius,
   blackoutFiles,
   timeOfDay,
   activeTool,
   onSelectFile,
   onToolAction,
+  onHoverBuilding,
+  onLeaveBuilding,
 }: {
   files: FileMetric[];
   dataMap: DataMapMode;
   selectedFile: string | null;
+  hoveredFile: string | null;
   blastRadius: BlastRadiusResult | null;
   blackoutFiles?: Set<string>;
   timeOfDay: TimeOfDay;
   activeTool: string;
   onSelectFile: (filePath: string | null) => void;
   onToolAction?: (file: FileMetric) => void;
+  onHoverBuilding: (file: FileMetric, clientX: number, clientY: number) => void;
+  onLeaveBuilding: (filePath: string) => void;
 }) {
   const impactedHop = useMemo(() => {
     const map = new Map<string, number>();
@@ -337,6 +421,18 @@ function MultiPartCityBuildings({
     return Array.from(map.entries());
   }, [files]);
 
+  const selectedFileObj = useMemo(
+    () => (selectedFile ? (files.find((f) => f.file_path === selectedFile) ?? null) : null),
+    [files, selectedFile],
+  );
+  const hoveredFileObj = useMemo(
+    () =>
+      hoveredFile && hoveredFile !== selectedFile
+        ? (files.find((f) => f.file_path === hoveredFile) ?? null)
+        : null,
+    [files, hoveredFile, selectedFile],
+  );
+
   return (
     <group>
       {byArchetype.map(([arch, groupFiles]) => {
@@ -356,11 +452,19 @@ function MultiPartCityBuildings({
                 activeTool={activeTool}
                 onSelectFile={onSelectFile}
                 onToolAction={onToolAction}
+                onHoverBuilding={onHoverBuilding}
+                onLeaveBuilding={onLeaveBuilding}
               />
             ))}
           </group>
         );
       })}
+      {selectedFileObj && (
+        <BuildingHighlightBox3D file={selectedFileObj} color="#fef08a" opacity={0.95} />
+      )}
+      {hoveredFileObj && (
+        <BuildingHighlightBox3D file={hoveredFileObj} color="#ffffff" opacity={0.8} />
+      )}
     </group>
   );
 }
@@ -663,11 +767,44 @@ export default function CityCanvas3D({
 }: CityCanvas3DProps) {
   const projection = useCameraSelector((s) => s.projection);
   const timeOfDay = useCameraSelector((s) => s.timeOfDay);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const [hoveredHit, setHoveredHit] = useState<{
+    file: FileMetric;
+    x: number;
+    y: number;
+  } | null>(null);
+
+  const handleHoverBuilding = useCallback((file: FileMetric, clientX: number, clientY: number) => {
+    const rect = containerRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    setHoveredHit({
+      file,
+      x: clientX - rect.left,
+      y: clientY - rect.top,
+    });
+  }, []);
+
+  const handleLeaveBuilding = useCallback((filePath: string) => {
+    setHoveredHit((prev) => (prev?.file.file_path === filePath ? null : prev));
+  }, []);
+
+  const clearHover = useCallback(() => setHoveredHit(null), []);
 
   const skyBg = timeOfDay === "golden" ? "#1b1433" : timeOfDay === "night" ? "#030712" : "#071121";
 
   return (
-    <div data-testid="city-canvas-3d" className="h-full w-full bg-slate-950">
+    <div
+      ref={containerRef}
+      data-testid="city-canvas-3d"
+      onPointerLeave={clearHover}
+      className={`relative h-full w-full overflow-hidden bg-slate-950 ${
+        activeTool !== "inspect"
+          ? "cursor-crosshair"
+          : hoveredHit
+            ? "cursor-pointer"
+            : "cursor-grab active:cursor-grabbing"
+      }`}
+    >
       <Canvas
         shadows
         dpr={[1, 2]}
@@ -730,12 +867,15 @@ export default function CityCanvas3D({
           files={files}
           dataMap={dataMap}
           selectedFile={selectedFile}
+          hoveredFile={hoveredHit?.file.file_path ?? null}
           blastRadius={blastRadius}
           blackoutFiles={blackoutFiles}
           timeOfDay={timeOfDay}
           activeTool={activeTool}
           onSelectFile={onSelectFile}
           onToolAction={onToolAction}
+          onHoverBuilding={handleHoverBuilding}
+          onLeaveBuilding={handleLeaveBuilding}
         />
         <LiveVehiclesAndFires3D vehicles={vehicles} files={files} fireFiles={fireFiles} />
         <FaultArcs3D
@@ -744,7 +884,7 @@ export default function CityCanvas3D({
           selectedFile={selectedFile}
           blastRadius={blastRadius}
         />
-        <CameraRig3D />
+        <CameraRig3D onOrbitStart={clearHover} />
 
         <PostprocessingBoundary>
           <EffectComposer multisampling={0}>
@@ -757,6 +897,15 @@ export default function CityCanvas3D({
           </EffectComposer>
         </PostprocessingBoundary>
       </Canvas>
+
+      {hoveredHit && (
+        <BuildingTooltip
+          file={hoveredHit.file}
+          x={hoveredHit.x}
+          y={hoveredHit.y}
+          containerWidth={containerRef.current?.clientWidth}
+        />
+      )}
     </div>
   );
 }
