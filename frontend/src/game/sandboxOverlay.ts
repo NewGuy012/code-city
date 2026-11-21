@@ -136,15 +136,18 @@ export function validateToolOnFile(
   return { ok: true, cost };
 }
 
+const GRADE_THRESHOLDS: ReadonlyArray<[number, string]> = [
+  [92, "A+"],
+  [85, "A"],
+  [80, "A-"],
+  [74, "B+"],
+  [68, "B"],
+  [60, "C+"],
+  [50, "C"],
+];
+
 function gradeFromScore(score: number): string {
-  if (score >= 92) return "A+";
-  if (score >= 85) return "A";
-  if (score >= 80) return "A-";
-  if (score >= 74) return "B+";
-  if (score >= 68) return "B";
-  if (score >= 60) return "C+";
-  if (score >= 50) return "C";
-  return "D";
+  return GRADE_THRESHOLDS.find(([floor]) => score >= floor)?.[1] ?? "D";
 }
 
 export function applySandboxOverlay(

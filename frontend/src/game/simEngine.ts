@@ -1,7 +1,26 @@
 import type { CitySnapshotBundle } from "../data/cityDataClient";
 import type { FloatingStatPopup, SimVehicleRender } from "../city/isoRenderer2D";
-import type { FileMetric } from "../types/city";
+import type { FileImport, FileMetric } from "../types/city";
 import { type RoadGraph, buildRoadGraph, detectImportCycles, findStreetPath } from "./roadGraph";
+
+export function computeImpactedFiles(targetFile: string, imports: FileImport[]): string[] {
+  const visited = new Set<string>();
+  const queue = [targetFile];
+  while (queue.length > 0) {
+    const cur = queue.shift()!;
+    for (const imp of imports) {
+      if (
+        imp.target_file === cur &&
+        imp.source_file !== targetFile &&
+        !visited.has(imp.source_file)
+      ) {
+        visited.add(imp.source_file);
+        queue.push(imp.source_file);
+      }
+    }
+  }
+  return [...visited];
+}
 
 export type SimSpeed = 0 | 1 | 2 | 3;
 
@@ -50,7 +69,7 @@ export interface SimStateSnapshot {
 
 const TICKS_PER_SPRINT = 40; // 4 seconds per sprint at 1x (10Hz)
 
-export function computeCityMilestone(
+function computeCityMilestone(
   healthScore: number,
   totalFiles: number,
   happiness: number,
@@ -76,6 +95,13 @@ export class CitySimulationEngine {
 
   private graph: RoadGraph | null = null;
   private bundleKey = "";
+  private bundleStats = {
+    totalLint: 0,
+    complexPenalty: 0,
+    greenbeltBoost: 0,
+    smogCount: 0,
+    featureFiles: [] as string[],
+  };
   private cycles: string[][] = [];
   private vehicles: SimVehicle[] = [];
   private fireFiles = new Set<string>();
@@ -113,13 +139,48 @@ export class CitySimulationEngine {
   }
 
   private ensureGraph(bundle: CitySnapshotBundle): void {
-    const key = `${bundle.snapshot.commit_sha}:${bundle.snapshot.snapshot_idx}:${bundle.files.length}:${bundle.imports.length}`;
+    const key = `${bundle.snapshot.commit_sha}:${bundle.snapshot.snapshot_idx}:${bundle.files.length}:${bundle.imports.length}:${bundle.snapshot.total_lint_issues}`;
     if (this.graph && this.bundleKey === key) return;
 
     this.bundleKey = key;
     this.graph = buildRoadGraph(bundle.districts, bundle.files, bundle.imports);
     this.cycles = detectImportCycles(bundle.imports);
+    let totalLint = 0;
+    let complexCount = 0;
+    let greenbeltFiles = 0;
+    let smogCount = 0;
+    const featureFiles: string[] = [];
+    for (const f of bundle.files) {
+      totalLint += f.lint_issue_count;
+      if (f.max_complexity >= 12) complexCount++;
+      if (f.building_archetype === "park_stadium") greenbeltFiles++;
+      if (f.condition_flags?.smog || f.format_drift) smogCount++;
+      if (
+        (f.zone_type === "harbor_gates" ||
+          f.zone_type === "downtown_core" ||
+          f.zone_type === "gallery_storefront") &&
+        f.lint_issue_count < 3
+      ) {
+        featureFiles.push(f.file_path);
+      }
+    }
+    this.bundleStats = {
+      totalLint,
+      complexPenalty: complexCount * 2,
+      greenbeltBoost: Math.min(18, greenbeltFiles * 4.5),
+      smogCount,
+      featureFiles,
+    };
     this.seedTraffic(bundle);
+  }
+
+  reset(): void {
+    this.clearDisaster();
+    this.brownoutFiles.clear();
+    this.floatingPopups = [];
+    this.vehicles = [];
+    this.graph = null;
+    this.bundleKey = "";
   }
 
   private seedTraffic(bundle: CitySnapshotBundle): void {
@@ -363,18 +424,12 @@ export class CitySimulationEngine {
         .map((p) => ({ ...p, progress: p.progress + 0.055 }))
         .filter((p) => p.progress < 1);
 
-      // Compute city economy & mood metrics
-      const healthyFeatures = bundle.files.filter(
-        (f) =>
-          (f.zone_type === "harbor_gates" ||
-            f.zone_type === "downtown_core" ||
-            f.zone_type === "gallery_storefront") &&
-          f.lint_issue_count < 3 &&
-          !this.blackoutFiles.has(f.file_path) &&
-          !this.fireFiles.has(f.file_path),
-      ).length;
-      const totalLint = bundle.files.reduce((acc, f) => acc + f.lint_issue_count, 0);
-      const complexPenalty = bundle.files.filter((f) => f.max_complexity >= 12).length * 2;
+      const { totalLint, complexPenalty, greenbeltBoost, smogCount, featureFiles } =
+        this.bundleStats;
+      let healthyFeatures = 0;
+      for (const fp of featureFiles) {
+        if (!this.blackoutFiles.has(fp) && !this.fireFiles.has(fp)) healthyFeatures++;
+      }
       const firePenalty = this.fireFiles.size * 5;
       const income = Math.max(15, 22 + healthyFeatures * 4);
       const upkeep = Math.round(
@@ -436,7 +491,6 @@ export class CitySimulationEngine {
             v.wpIdx = 0;
             remainingVehicles.push(v);
           } else {
-            // Service vehicle arrived!
             if (v.type === "fire_truck" && v.targetFile && this.fireFiles.has(v.targetFile)) {
               this.fireFiles.delete(v.targetFile);
               this.spawnFloatingPopup(v.x, v.z, "🔥 Fire Contained", "#4ade80");
@@ -454,15 +508,7 @@ export class CitySimulationEngine {
       }
       this.vehicles = remainingVehicles;
 
-      // Update Happiness & City Level
       const jammedCount = this.vehicles.filter((v) => v.jammed).length;
-      const greenbeltFiles = bundle.files.filter(
-        (f) => f.building_archetype === "park_stadium",
-      ).length;
-      const greenbeltBoost = Math.min(18, greenbeltFiles * 4.5);
-      const smogCount = bundle.files.filter(
-        (f) => f.condition_flags?.smog || f.format_drift,
-      ).length;
       const targetHappiness = Math.max(
         18,
         Math.min(

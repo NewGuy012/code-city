@@ -1,5 +1,6 @@
 import type {
   BlastRadiusResult,
+  BuildingArchetype,
   CochangePair,
   DataMapMode,
   District,
@@ -13,12 +14,15 @@ import {
   type TimeOfDay,
   WORLD_CENTER_X,
   WORLD_CENTER_Z,
+  compassStepFromYaw,
 } from "./cameraStore";
 import {
   type ShadePalette,
   ZONE_PALETTES,
+  buildImpactedHopMap,
   buildingPalette,
   computeBuildingHeight,
+  selectFaultLines,
   vehicleColor,
 } from "./cityTheme";
 import {
@@ -60,7 +64,7 @@ export interface FloatingStatPopup {
   z: number;
   text: string;
   color: string;
-  progress: number; // 0..1
+  progress: number;
 }
 
 export interface RenderCitySceneArgs {
@@ -92,27 +96,65 @@ export interface RenderCitySceneArgs {
 
 export interface HitBuilding {
   file: FileMetric;
-  screenX: number;
-  screenY: number;
   minX: number;
   maxX: number;
   minY: number;
   maxY: number;
 }
 
+interface IsoProjector {
+  zoom: number;
+  yaw: number;
+  pitch: number;
+  viewX: number;
+  viewZ: number;
+  heightScale: number;
+  compassStep: 0 | 1 | 2 | 3;
+  project(wx: number, wz: number, wy: number): { x: number; y: number };
+}
+
 const ISO_X = 7.4;
 const ISO_Y = 3.7;
+const BASE_PITCH_RAD = (DEFAULT_PITCH * Math.PI) / 180;
 
-export function getTiltFactors(pitchDeg = DEFAULT_PITCH): {
-  isoYScale: number;
-  heightScale: number;
-} {
-  const clamped = Math.max(12, Math.min(85, pitchDeg));
-  const baseRad = (DEFAULT_PITCH * Math.PI) / 180;
-  const rad = (clamped * Math.PI) / 180;
+function getTiltFactors(pitchDeg = DEFAULT_PITCH): { isoYScale: number; heightScale: number } {
+  const rad = (Math.max(12, Math.min(85, pitchDeg)) * Math.PI) / 180;
   return {
-    isoYScale: Math.max(0.42, Math.min(1.85, Math.sin(rad) / Math.sin(baseRad))),
-    heightScale: Math.max(0.12, Math.min(1.22, Math.cos(rad) / Math.cos(baseRad))),
+    isoYScale: Math.max(0.42, Math.min(1.85, Math.sin(rad) / Math.sin(BASE_PITCH_RAD))),
+    heightScale: Math.max(0.12, Math.min(1.22, Math.cos(rad) / Math.cos(BASE_PITCH_RAD))),
+  };
+}
+
+function makeProjector(width: number, height: number, camera: Camera2D): IsoProjector {
+  const yaw = camera.yaw ?? DEFAULT_YAW;
+  const pitch = camera.pitch ?? DEFAULT_PITCH;
+  const theta = yaw - DEFAULT_YAW;
+  const cosT = Math.cos(theta);
+  const sinT = Math.sin(theta);
+  const { isoYScale, heightScale } = getTiltFactors(pitch);
+  const isoYEff = ISO_Y * isoYScale;
+  const ox = width * 0.5 + camera.panX;
+  const oy = height * 0.52 + camera.panY;
+  const zoom = camera.zoom;
+
+  return {
+    zoom,
+    yaw,
+    pitch,
+    viewX: Math.sin(yaw),
+    viewZ: Math.cos(yaw),
+    heightScale,
+    compassStep: compassStepFromYaw(yaw),
+    project(wx: number, wz: number, wy: number) {
+      const dx = wx - WORLD_CENTER_X;
+      const dz = wz - WORLD_CENTER_Z;
+      const rx = dx * cosT - dz * sinT;
+      const rz = dx * sinT + dz * cosT;
+      return {
+        x: ox + (rx - rz) * ISO_X * zoom,
+        y: oy + ((rx + rz) * isoYEff - wy * heightScale) * zoom,
+      };
+    },
   };
 }
 
@@ -124,13 +166,7 @@ export function cameraFromTarget(
   pitch = DEFAULT_PITCH,
 ): Camera2D {
   const iso = worldToIso(targetX, targetZ, 0, yaw, pitch);
-  return {
-    panX: -iso.x * zoom,
-    panY: -iso.y * zoom,
-    zoom,
-    yaw,
-    pitch,
-  };
+  return { panX: -iso.x * zoom, panY: -iso.y * zoom, zoom, yaw, pitch };
 }
 
 export function worldToIso(
@@ -154,19 +190,6 @@ export function worldToIso(
   };
 }
 
-export function isoToScreen(
-  isoX: number,
-  isoY: number,
-  width: number,
-  height: number,
-  camera: Camera2D,
-): { x: number; y: number } {
-  return {
-    x: width * 0.5 + camera.panX + isoX * camera.zoom,
-    y: height * 0.52 + camera.panY + isoY * camera.zoom,
-  };
-}
-
 export function worldToScreen(
   wx: number,
   wz: number,
@@ -176,7 +199,10 @@ export function worldToScreen(
   camera: Camera2D,
 ): { x: number; y: number } {
   const iso = worldToIso(wx, wz, wy, camera.yaw ?? DEFAULT_YAW, camera.pitch ?? DEFAULT_PITCH);
-  return isoToScreen(iso.x, iso.y, width, height, camera);
+  return {
+    x: width * 0.5 + camera.panX + iso.x * camera.zoom,
+    y: height * 0.52 + camera.panY + iso.y * camera.zoom,
+  };
 }
 
 export function screenToWorldGround(
@@ -187,8 +213,7 @@ export function screenToWorldGround(
   camera: Camera2D,
 ): { x: number; z: number } {
   const yaw = camera.yaw ?? DEFAULT_YAW;
-  const pitch = camera.pitch ?? DEFAULT_PITCH;
-  const { isoYScale } = getTiltFactors(pitch);
+  const { isoYScale } = getTiltFactors(camera.pitch ?? DEFAULT_PITCH);
   const isoX = (sx - width * 0.5 - camera.panX) / camera.zoom;
   const isoY = (sy - height * 0.52 - camera.panY) / camera.zoom;
   const isoYEff = ISO_Y * isoYScale;
@@ -197,11 +222,9 @@ export function screenToWorldGround(
   const theta = yaw - DEFAULT_YAW;
   const cosT = Math.cos(theta);
   const sinT = Math.sin(theta);
-  const dx = rx * cosT + rz * sinT;
-  const dz = -rx * sinT + rz * cosT;
   return {
-    x: dx + WORLD_CENTER_X,
-    z: dz + WORLD_CENTER_Z,
+    x: rx * cosT + rz * sinT + WORLD_CENTER_X,
+    z: -rx * sinT + rz * cosT + WORLD_CENTER_Z,
   };
 }
 
@@ -214,9 +237,7 @@ function drawQuad(
 ): void {
   ctx.beginPath();
   ctx.moveTo(pts[0].x, pts[0].y);
-  for (let i = 1; i < pts.length; i++) {
-    ctx.lineTo(pts[i].x, pts[i].y);
-  }
+  for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
   ctx.closePath();
   ctx.fillStyle = fill;
   ctx.fill();
@@ -227,8 +248,9 @@ function drawQuad(
   }
 }
 
-export function drawIsoPrism(
+function drawIsoPrism(
   ctx: CanvasRenderingContext2D,
+  proj: IsoProjector,
   x: number,
   z: number,
   w: number,
@@ -236,56 +258,35 @@ export function drawIsoPrism(
   yBase: number,
   h: number,
   palette: ShadePalette,
-  wScreen: number,
-  hScreen: number,
-  cam: Camera2D,
-  strokeColor?: string,
+  stroke?: string,
   lineWidth = 1,
 ): void {
-  const yaw = cam.yaw ?? DEFAULT_YAW;
-  const p00 = worldToScreen(x, z, yBase + h, wScreen, hScreen, cam);
-  const p10 = worldToScreen(x + w, z, yBase + h, wScreen, hScreen, cam);
-  const p11 = worldToScreen(x + w, z + d, yBase + h, wScreen, hScreen, cam);
-  const p01 = worldToScreen(x, z + d, yBase + h, wScreen, hScreen, cam);
+  const p00 = proj.project(x, z, yBase + h);
+  const p10 = proj.project(x + w, z, yBase + h);
+  const p11 = proj.project(x + w, z + d, yBase + h);
+  const p01 = proj.project(x, z + d, yBase + h);
+  const b00 = proj.project(x, z, yBase);
+  const b10 = proj.project(x + w, z, yBase);
+  const b11 = proj.project(x + w, z + d, yBase);
+  const b01 = proj.project(x, z + d, yBase);
 
-  const b00 = worldToScreen(x, z, yBase, wScreen, hScreen, cam);
-  const b10 = worldToScreen(x + w, z, yBase, wScreen, hScreen, cam);
-  const b11 = worldToScreen(x + w, z + d, yBase, wScreen, hScreen, cam);
-  const b01 = worldToScreen(x, z + d, yBase, wScreen, hScreen, cam);
-
-  const viewX = Math.sin(yaw);
-  const viewZ = Math.cos(yaw);
-
-  // Determine the 2 front-facing walls for any camera yaw
-  const candidates: Array<{ pts: Array<{ x: number; y: number }>; midX: number }> = [];
-  if (viewZ >= -1e-4) {
-    // +Z wall
-    candidates.push({ pts: [p01, p11, b11, b01], midX: (p01.x + p11.x) * 0.5 });
-  } else {
-    // -Z wall
-    candidates.push({ pts: [p10, p00, b00, b10], midX: (p10.x + p00.x) * 0.5 });
-  }
-  if (viewX >= -1e-4) {
-    // +X wall
-    candidates.push({ pts: [p10, p11, b11, b10], midX: (p10.x + p11.x) * 0.5 });
-  } else {
-    // -X wall
-    candidates.push({ pts: [p00, p01, b01, b00], midX: (p00.x + p01.x) * 0.5 });
-  }
-
-  candidates.sort((a, b) => a.midX - b.midX);
-  if (candidates[0]) {
-    drawQuad(ctx, candidates[0].pts, palette.left, strokeColor, lineWidth);
-  }
-  if (candidates[1]) {
-    drawQuad(ctx, candidates[1].pts, palette.right, strokeColor, lineWidth);
-  }
-
-  drawQuad(ctx, [p00, p10, p11, p01], palette.roof, strokeColor, lineWidth);
+  const walls = [
+    proj.viewZ >= -1e-4
+      ? { pts: [p01, p11, b11, b01], midX: (p01.x + p11.x) * 0.5 }
+      : { pts: [p10, p00, b00, b10], midX: (p10.x + p00.x) * 0.5 },
+    proj.viewX >= -1e-4
+      ? { pts: [p10, p11, b11, b10], midX: (p10.x + p11.x) * 0.5 }
+      : { pts: [p00, p01, b01, b00], midX: (p00.x + p01.x) * 0.5 },
+  ];
+  walls.sort((a, b) => a.midX - b.midX);
+  drawQuad(ctx, walls[0].pts, palette.left, stroke, lineWidth);
+  drawQuad(ctx, walls[1].pts, palette.right, stroke, lineWidth);
+  drawQuad(ctx, [p00, p10, p11, p01], palette.roof, stroke, lineWidth);
 }
 
 function drawGroundQuad(
   ctx: CanvasRenderingContext2D,
+  proj: IsoProjector,
   x: number,
   z: number,
   w: number,
@@ -293,36 +294,46 @@ function drawGroundQuad(
   y: number,
   fill: string,
   stroke: string | null,
-  wScreen: number,
-  hScreen: number,
-  cam: Camera2D,
   lineWidth = 1,
 ): void {
-  const a = worldToScreen(x, z, y, wScreen, hScreen, cam);
-  const b = worldToScreen(x + w, z, y, wScreen, hScreen, cam);
-  const c = worldToScreen(x + w, z + d, y, wScreen, hScreen, cam);
-  const e = worldToScreen(x, z + d, y, wScreen, hScreen, cam);
-  drawQuad(ctx, [a, b, c, e], fill, stroke, lineWidth);
+  drawQuad(
+    ctx,
+    [
+      proj.project(x, z, y),
+      proj.project(x + w, z, y),
+      proj.project(x + w, z + d, y),
+      proj.project(x, z + d, y),
+    ],
+    fill,
+    stroke,
+    lineWidth,
+  );
 }
 
 function drawCastShadow(
   ctx: CanvasRenderingContext2D,
+  proj: IsoProjector,
   bx: number,
   bz: number,
   bw: number,
   bd: number,
   height: number,
   timeOfDay: TimeOfDay,
-  wScreen: number,
-  hScreen: number,
-  cam: Camera2D,
 ): void {
-  const shadowReach = timeOfDay === "golden" ? 0.34 : timeOfDay === "night" ? 0.14 : 0.22;
-  const sx = bx + bw * 0.12 + height * shadowReach;
-  const sz = bz + bd * 0.12 + height * shadowReach * 0.55;
+  const reach = timeOfDay === "golden" ? 0.34 : timeOfDay === "night" ? 0.14 : 0.22;
   ctx.save();
   ctx.globalAlpha *= timeOfDay === "night" ? 0.22 : 0.32;
-  drawGroundQuad(ctx, sx, sz, bw, bd, 0.35, "#020617", null, wScreen, hScreen, cam);
+  drawGroundQuad(
+    ctx,
+    proj,
+    bx + bw * 0.12 + height * reach,
+    bz + bd * 0.12 + height * reach * 0.55,
+    bw,
+    bd,
+    0.35,
+    "#020617",
+    null,
+  );
   ctx.restore();
 }
 
@@ -333,19 +344,19 @@ function drawConditionSignals(
   bz: number,
   zoom: number,
   timeSec: number,
-  roofCenter: { x: number; y: number },
+  roof: { x: number; y: number },
   isBurning: boolean,
   isBlackout: boolean,
 ): void {
   if (file.condition_flags?.crane) {
-    const mastTop = { x: roofCenter.x, y: roofCenter.y - 16 * zoom };
+    const mastTop = { x: roof.x, y: roof.y - 16 * zoom };
     const angle = Math.sin(timeSec * 1.1 + bx) * 0.55;
     const jibLen = 17 * zoom;
     ctx.save();
     ctx.strokeStyle = "#facc15";
     ctx.lineWidth = Math.max(1.5, 2 * zoom);
     ctx.beginPath();
-    ctx.moveTo(roofCenter.x, roofCenter.y);
+    ctx.moveTo(roof.x, roof.y);
     ctx.lineTo(mastTop.x, mastTop.y);
     ctx.lineTo(mastTop.x + Math.cos(angle) * jibLen, mastTop.y + Math.sin(angle) * 5 * zoom);
     ctx.moveTo(mastTop.x, mastTop.y);
@@ -364,13 +375,17 @@ function drawConditionSignals(
 
   if (file.condition_flags?.smog || file.lint_issue_count >= 3) {
     ctx.save();
+    ctx.fillStyle = "rgba(168, 85, 247, 0.34)";
     for (let i = 0; i < 3; i++) {
       const phase = timeSec * 0.9 + i * 2.1 + bz;
-      const sx = roofCenter.x + Math.sin(phase) * 7 * zoom;
-      const sy = roofCenter.y - (8 + ((phase * 6) % 16)) * zoom;
       ctx.beginPath();
-      ctx.arc(sx, sy, Math.max(2.5, (4.8 - i * 0.8) * zoom), 0, Math.PI * 2);
-      ctx.fillStyle = "rgba(168, 85, 247, 0.34)";
+      ctx.arc(
+        roof.x + Math.sin(phase) * 7 * zoom,
+        roof.y - (8 + ((phase * 6) % 16)) * zoom,
+        Math.max(2.5, (4.8 - i * 0.8) * zoom),
+        0,
+        Math.PI * 2,
+      );
       ctx.fill();
     }
     ctx.restore();
@@ -380,12 +395,12 @@ function drawConditionSignals(
     const pulse = 0.5 + 0.5 * Math.sin(timeSec * 3.4);
     ctx.save();
     ctx.beginPath();
-    ctx.arc(roofCenter.x, roofCenter.y - 4 * zoom, (5 + pulse * 6) * zoom, 0, Math.PI * 2);
+    ctx.arc(roof.x, roof.y - 4 * zoom, (5 + pulse * 6) * zoom, 0, Math.PI * 2);
     ctx.strokeStyle = `rgba(251, 113, 133, ${0.85 - pulse * 0.55})`;
     ctx.lineWidth = Math.max(1.2, 1.8 * zoom);
     ctx.stroke();
     ctx.beginPath();
-    ctx.arc(roofCenter.x, roofCenter.y - 4 * zoom, Math.max(2, 2.5 * zoom), 0, Math.PI * 2);
+    ctx.arc(roof.x, roof.y - 4 * zoom, Math.max(2, 2.5 * zoom), 0, Math.PI * 2);
     ctx.fillStyle = "#fb7185";
     ctx.fill();
     ctx.restore();
@@ -395,9 +410,9 @@ function drawConditionSignals(
     ctx.save();
     for (let i = 0; i < 4; i++) {
       const flicker = Math.sin(timeSec * 9 + i * 1.9 + bx) * 3.2 * zoom;
-      const fy = roofCenter.y - (4 + ((timeSec * 14 + i * 5) % 14)) * zoom;
+      const fy = roof.y - (4 + ((timeSec * 14 + i * 5) % 14)) * zoom;
       ctx.beginPath();
-      ctx.arc(roofCenter.x + flicker, fy, Math.max(2.2, (5 - i * 0.8) * zoom), 0, Math.PI * 2);
+      ctx.arc(roof.x + flicker, fy, Math.max(2.2, (5 - i * 0.8) * zoom), 0, Math.PI * 2);
       ctx.fillStyle = i % 2 === 0 ? "rgba(249, 115, 22, 0.86)" : "rgba(250, 204, 21, 0.78)";
       ctx.fill();
     }
@@ -405,8 +420,65 @@ function drawConditionSignals(
   }
 }
 
+interface CrownSpec {
+  ox: number;
+  oz: number;
+  wFrac: number;
+  dFrac: number;
+  hFrac?: number;
+  hFixed?: number;
+  roofColor?: string | "accent";
+  minH?: number;
+  lineWidth?: number;
+}
+
+const ROOFTOP_CROWNS: Partial<Record<BuildingArchetype, CrownSpec[]>> = {
+  city_hall: [{ ox: 0.22, oz: 0.22, wFrac: 0.56, dFrac: 0.56, hFrac: 0.34 }],
+  twin_silos: [
+    {
+      ox: 0.16,
+      oz: 0.28,
+      wFrac: 0.28,
+      dFrac: 0.44,
+      hFrac: 0.25,
+      roofColor: "accent",
+      lineWidth: 0.7,
+    },
+    {
+      ox: 0.56,
+      oz: 0.28,
+      wFrac: 0.28,
+      dFrac: 0.44,
+      hFrac: 0.25,
+      roofColor: "accent",
+      lineWidth: 0.7,
+    },
+  ],
+  factory: [{ ox: 0.15, oz: 0.15, wFrac: 0.32, dFrac: 0.7, hFixed: 7, lineWidth: 0.7 }],
+  grand_terminal: [
+    { ox: 0.18, oz: 0.18, wFrac: 0.64, dFrac: 0.64, hFixed: 9, roofColor: "#fef08a" },
+  ],
+  archive_vault: [{ ox: 0.1, oz: 0.1, wFrac: 0.8, dFrac: 0.8, hFixed: 5, roofColor: "#e2e8f0" }],
+  watchtower: [{ ox: 0.28, oz: 0.28, wFrac: 0.44, dFrac: 0.44, hFixed: 10 }],
+  office_tower: [
+    { ox: 0.18, oz: 0.18, wFrac: 0.64, dFrac: 0.64, hFrac: 0.24, minH: 30, lineWidth: 0.7 },
+  ],
+  glass_pavilion: [
+    {
+      ox: 0.16,
+      oz: 0.16,
+      wFrac: 0.68,
+      dFrac: 0.68,
+      hFixed: 5,
+      roofColor: "#f472b6",
+      lineWidth: 0.7,
+    },
+  ],
+};
+
 function drawBuildingDetails(
   ctx: CanvasRenderingContext2D,
+  proj: IsoProjector,
   file: FileMetric,
   bx: number,
   bz: number,
@@ -417,36 +489,28 @@ function drawBuildingDetails(
   dataMap: DataMapMode,
   timeSec: number,
   timeOfDay: TimeOfDay,
-  wScreen: number,
-  hScreen: number,
-  cam: Camera2D,
   stroke: string,
   isBurning: boolean,
   isBlackout: boolean,
 ): void {
   const arch = file.building_archetype;
-  const zoom = cam.zoom;
-  const pitch = cam.pitch ?? DEFAULT_PITCH;
+  const zoom = proj.zoom;
 
-  // Try pre-rendered 30-sprite isometric atlas when ready & in isometric pitch range
   const atlas = spriteAtlas.ensureLoaded();
-  const compassStep = (((Math.round(((cam.yaw ?? DEFAULT_YAW) - DEFAULT_YAW) / (Math.PI / 2)) % 4) +
-    4) %
-    4) as 0 | 1 | 2 | 3;
   const canUseSprite =
     atlas.ready &&
     atlas.buildings !== null &&
-    pitch <= 58 &&
+    proj.pitch <= 58 &&
     !isBlackout &&
     Math.max(bw / Math.max(0.4, bd), bd / Math.max(0.4, bw)) <= 1.85;
 
   if (canUseSprite && atlas.buildings) {
-    // Ground lot pad + cast shadow
     if (arch !== "park_stadium") {
-      drawCastShadow(ctx, bx, bz, bw, bd, height, timeOfDay, wScreen, hScreen, cam);
+      drawCastShadow(ctx, proj, bx, bz, bw, bd, height, timeOfDay);
     }
     drawGroundQuad(
       ctx,
+      proj,
       bx,
       bz,
       bw,
@@ -454,24 +518,18 @@ function drawBuildingDetails(
       0.38,
       arch === "park_stadium" ? "#14532d" : "#1e293b",
       stroke,
-      wScreen,
-      hScreen,
-      cam,
       stroke.startsWith("#") ? 1.6 : 0.8,
     );
 
-    const rect = spriteAtlas.getBuildingSpriteRect(arch, height, compassStep);
-    const baseScreen = worldToScreen(bx + bw * 0.5, bz + bd * 0.5, 0, wScreen, hScreen, cam);
-    const { heightScale } = getTiltFactors(pitch);
-    const lotSpanPx = (bw + bd) * ISO_X * zoom;
-    const scaleX = Math.max(0.28, lotSpanPx / 64.8);
-    const scaleY = Math.max(0.24, scaleX * (0.72 + 0.28 * heightScale));
+    const rect = spriteAtlas.getBuildingSpriteRect(arch, height, proj.compassStep);
+    const baseScreen = proj.project(bx + bw * 0.5, bz + bd * 0.5, 0);
+    const scaleX = Math.max(0.28, ((bw + bd) * ISO_X * zoom) / 64.8);
+    const scaleY = Math.max(0.24, scaleX * (0.72 + 0.28 * proj.heightScale));
     const dw = ATLAS_CELL_W * scaleX;
     const dh = ATLAS_CELL_H * scaleY;
     const dx = baseScreen.x - ATLAS_ANCHOR_X * scaleX;
     const dy = baseScreen.y - ATLAS_ANCHOR_Y * scaleY;
 
-    const tintHex = dataMap === "living" ? null : palette.left;
     spriteAtlas.drawTintedSprite(
       ctx,
       atlas.buildings,
@@ -483,9 +541,8 @@ function drawBuildingDetails(
       dy,
       dw,
       dh,
-      tintHex,
+      dataMap === "living" ? null : palette.left,
     );
-
     if (atlas.emissive && timeOfDay !== "day") {
       ctx.save();
       ctx.globalAlpha *= timeOfDay === "night" ? 0.95 : 0.45;
@@ -493,24 +550,14 @@ function drawBuildingDetails(
       ctx.restore();
     }
 
-    // Condition overlays (crane, smog, lone-keeper, fire) on top of sprite
-    const roofCenter = worldToScreen(
-      bx + bw * 0.5,
-      bz + bd * 0.5,
-      (height * 0.78 + 6) * zoom,
-      wScreen,
-      hScreen,
-      cam,
-    );
-    drawConditionSignals(ctx, file, bx, bz, zoom, timeSec, roofCenter, isBurning, false);
+    const roof = proj.project(bx + bw * 0.5, bz + bd * 0.5, (height * 0.78 + 6) * zoom);
+    drawConditionSignals(ctx, file, bx, bz, zoom, timeSec, roof, isBurning, false);
     return;
   }
 
   if (arch === "park_stadium") {
-    drawGroundQuad(ctx, bx, bz, bw, bd, 1, "#14532d", "#4ade80", wScreen, hScreen, cam, 1.1);
-    const cx = bx + bw * 0.5;
-    const cz = bz + bd * 0.5;
-    const center = worldToScreen(cx, cz, 2.5, wScreen, hScreen, cam);
+    drawGroundQuad(ctx, proj, bx, bz, bw, bd, 1, "#14532d", "#4ade80", 1.1);
+    const center = proj.project(bx + bw * 0.5, bz + bd * 0.5, 2.5);
     ctx.save();
     ctx.translate(center.x, center.y);
     ctx.scale(1, 0.5);
@@ -521,69 +568,47 @@ function drawBuildingDetails(
     ctx.stroke();
     ctx.restore();
 
+    ctx.fillStyle = "#22c55e";
     for (const [ox, oz] of [
       [0.24, 0.28],
       [0.74, 0.72],
     ]) {
-      const tp = worldToScreen(bx + bw * ox, bz + bd * oz, 5 * zoom, wScreen, hScreen, cam);
+      const tp = proj.project(bx + bw * ox, bz + bd * oz, 5 * zoom);
       ctx.beginPath();
       ctx.arc(tp.x, tp.y, Math.max(2.5, 4.2 * zoom), 0, Math.PI * 2);
-      ctx.fillStyle = "#22c55e";
       ctx.fill();
     }
     return;
   }
 
-  // Directional cast ground shadow
-  drawCastShadow(ctx, bx, bz, bw, bd, height, timeOfDay, wScreen, hScreen, cam);
-
-  const effectivePalette = isBlackout
+  drawCastShadow(ctx, proj, bx, bz, bw, bd, height, timeOfDay);
+  const effPal = isBlackout
     ? { roof: "#1e293b", left: "#0f172a", right: "#020617", accent: "#475569" }
     : palette;
 
-  drawIsoPrism(
-    ctx,
-    bx,
-    bz,
-    bw,
-    bd,
-    0,
-    height * zoom,
-    effectivePalette,
-    wScreen,
-    hScreen,
-    cam,
-    stroke,
-    1,
-  );
+  drawIsoPrism(ctx, proj, bx, bz, bw, bd, 0, height * zoom, effPal, stroke, 1);
 
-  // Floor window bands when zoomed in comfortably
   if (zoom >= 0.75 && height > 14 && !isBlackout) {
     const floors = Math.min(8, Math.max(2, Math.floor(height / 9)));
     ctx.save();
-    const winColor =
+    ctx.strokeStyle =
       timeOfDay === "night"
         ? "rgba(253, 224, 71, 0.72)"
         : timeOfDay === "golden"
           ? "rgba(254, 240, 138, 0.58)"
           : "rgba(224, 242, 254, 0.32)";
-    ctx.strokeStyle = winColor;
     ctx.lineWidth = Math.max(0.8, 1.1 * zoom);
-    const yaw = cam.yaw ?? DEFAULT_YAW;
-    const vx = Math.sin(yaw) >= 0 ? bx + bw : bx;
-    const vz = Math.cos(yaw) >= 0 ? bz + bd : bz;
+    const vx = proj.viewX >= 0 ? bx + bw : bx;
+    const vz = proj.viewZ >= 0 ? bz + bd : bz;
     for (let fl = 1; fl < floors; fl++) {
       const fy = height * (fl / floors) * zoom;
-      const pA = worldToScreen(bx + bw * 0.14, vz, fy, wScreen, hScreen, cam);
-      const pB = worldToScreen(bx + bw * 0.86, vz, fy, wScreen, hScreen, cam);
+      const pA = proj.project(bx + bw * 0.14, vz, fy);
+      const pB = proj.project(bx + bw * 0.86, vz, fy);
+      const pC = proj.project(vx, bz + bd * 0.14, fy);
+      const pD = proj.project(vx, bz + bd * 0.86, fy);
       ctx.beginPath();
       ctx.moveTo(pA.x, pA.y);
       ctx.lineTo(pB.x, pB.y);
-      ctx.stroke();
-
-      const pC = worldToScreen(vx, bz + bd * 0.14, fy, wScreen, hScreen, cam);
-      const pD = worldToScreen(vx, bz + bd * 0.86, fy, wScreen, hScreen, cam);
-      ctx.beginPath();
       ctx.moveTo(pC.x, pC.y);
       ctx.lineTo(pD.x, pD.y);
       ctx.stroke();
@@ -591,195 +616,53 @@ function drawBuildingDetails(
     ctx.restore();
   }
 
-  if (arch === "city_hall") {
+  for (const crown of ROOFTOP_CROWNS[arch] ?? []) {
+    if (crown.minH && height <= crown.minH) continue;
+    const crownPal = crown.roofColor
+      ? { ...effPal, roof: crown.roofColor === "accent" ? effPal.accent : crown.roofColor }
+      : effPal;
+    const crownH = crown.hFrac ? height * crown.hFrac * zoom : (crown.hFixed ?? 6) * zoom;
     drawIsoPrism(
       ctx,
-      bx + bw * 0.22,
-      bz + bd * 0.22,
-      bw * 0.56,
-      bd * 0.56,
+      proj,
+      bx + bw * crown.ox,
+      bz + bd * crown.oz,
+      bw * crown.wFrac,
+      bd * crown.dFrac,
       height * zoom,
-      height * 0.34 * zoom,
-      effectivePalette,
-      wScreen,
-      hScreen,
-      cam,
+      crownH,
+      crownPal,
       stroke,
-      0.8,
+      crown.lineWidth ?? 0.8,
     );
-    const tipBase = worldToScreen(
-      bx + bw * 0.5,
-      bz + bd * 0.5,
-      height * 1.34 * zoom,
-      wScreen,
-      hScreen,
-      cam,
-    );
-    const tipTop = worldToScreen(
-      bx + bw * 0.5,
-      bz + bd * 0.5,
-      (height * 1.34 + 14) * zoom,
-      wScreen,
-      hScreen,
-      cam,
-    );
+  }
+
+  if (arch === "city_hall") {
+    const base = proj.project(bx + bw * 0.5, bz + bd * 0.5, height * 1.34 * zoom);
+    const tip = proj.project(bx + bw * 0.5, bz + bd * 0.5, (height * 1.34 + 14) * zoom);
     ctx.beginPath();
-    ctx.moveTo(tipBase.x, tipBase.y);
-    ctx.lineTo(tipTop.x, tipTop.y);
+    ctx.moveTo(base.x, base.y);
+    ctx.lineTo(tip.x, tip.y);
     ctx.strokeStyle = "#fef08a";
     ctx.lineWidth = Math.max(1.5, 2 * zoom);
     ctx.stroke();
     ctx.beginPath();
-    ctx.arc(tipTop.x, tipTop.y, Math.max(2, 2.8 * zoom), 0, Math.PI * 2);
+    ctx.arc(tip.x, tip.y, Math.max(2, 2.8 * zoom), 0, Math.PI * 2);
     ctx.fillStyle = "#fde047";
     ctx.fill();
-  } else if (arch === "twin_silos") {
-    for (const ox of [0.3, 0.7]) {
-      drawIsoPrism(
-        ctx,
-        bx + bw * (ox - 0.14),
-        bz + bd * 0.28,
-        bw * 0.28,
-        bd * 0.44,
-        height * zoom,
-        height * 0.25 * zoom,
-        { ...effectivePalette, roof: effectivePalette.accent },
-        wScreen,
-        hScreen,
-        cam,
-        stroke,
-        0.7,
-      );
-    }
   } else if (arch === "factory") {
-    drawIsoPrism(
-      ctx,
-      bx + bw * 0.15,
-      bz + bd * 0.15,
-      bw * 0.32,
-      bd * 0.7,
-      height * zoom,
-      7 * zoom,
-      effectivePalette,
-      wScreen,
-      hScreen,
-      cam,
-      stroke,
-      0.7,
-    );
-    const stackPos = worldToScreen(
-      bx + bw * 0.78,
-      bz + bd * 0.26,
-      height * zoom,
-      wScreen,
-      hScreen,
-      cam,
-    );
-    const stackTop = worldToScreen(
-      bx + bw * 0.78,
-      bz + bd * 0.26,
-      (height + 11) * zoom,
-      wScreen,
-      hScreen,
-      cam,
-    );
+    const base = proj.project(bx + bw * 0.78, bz + bd * 0.26, height * zoom);
+    const top = proj.project(bx + bw * 0.78, bz + bd * 0.26, (height + 11) * zoom);
     ctx.beginPath();
-    ctx.moveTo(stackPos.x, stackPos.y);
-    ctx.lineTo(stackTop.x, stackTop.y);
+    ctx.moveTo(base.x, base.y);
+    ctx.lineTo(top.x, top.y);
     ctx.strokeStyle = "#475569";
     ctx.lineWidth = Math.max(2.5, 3.5 * zoom);
     ctx.stroke();
-  } else if (arch === "grand_terminal") {
-    drawIsoPrism(
-      ctx,
-      bx + bw * 0.18,
-      bz + bd * 0.18,
-      bw * 0.64,
-      bd * 0.64,
-      height * zoom,
-      9 * zoom,
-      { ...effectivePalette, roof: "#fef08a" },
-      wScreen,
-      hScreen,
-      cam,
-      stroke,
-      0.8,
-    );
-  } else if (arch === "archive_vault") {
-    drawIsoPrism(
-      ctx,
-      bx + bw * 0.1,
-      bz + bd * 0.1,
-      bw * 0.8,
-      bd * 0.8,
-      height * zoom,
-      5 * zoom,
-      { ...effectivePalette, roof: "#e2e8f0" },
-      wScreen,
-      hScreen,
-      cam,
-      stroke,
-      0.8,
-    );
-  } else if (arch === "watchtower") {
-    drawIsoPrism(
-      ctx,
-      bx + bw * 0.28,
-      bz + bd * 0.28,
-      bw * 0.44,
-      bd * 0.44,
-      height * zoom,
-      10 * zoom,
-      effectivePalette,
-      wScreen,
-      hScreen,
-      cam,
-      stroke,
-      0.8,
-    );
-  } else if (arch === "office_tower" && height > 30) {
-    drawIsoPrism(
-      ctx,
-      bx + bw * 0.18,
-      bz + bd * 0.18,
-      bw * 0.64,
-      bd * 0.64,
-      height * zoom,
-      height * 0.24 * zoom,
-      effectivePalette,
-      wScreen,
-      hScreen,
-      cam,
-      stroke,
-      0.7,
-    );
-  } else if (arch === "glass_pavilion") {
-    drawIsoPrism(
-      ctx,
-      bx + bw * 0.16,
-      bz + bd * 0.16,
-      bw * 0.68,
-      bd * 0.68,
-      height * zoom,
-      5 * zoom,
-      { ...effectivePalette, roof: "#f472b6" },
-      wScreen,
-      hScreen,
-      cam,
-      stroke,
-      0.7,
-    );
   }
 
-  const roofCenter = worldToScreen(
-    bx + bw * 0.5,
-    bz + bd * 0.5,
-    (height + 4) * zoom,
-    wScreen,
-    hScreen,
-    cam,
-  );
-  drawConditionSignals(ctx, file, bx, bz, zoom, timeSec, roofCenter, isBurning, isBlackout);
+  const roof = proj.project(bx + bw * 0.5, bz + bd * 0.5, (height + 4) * zoom);
+  drawConditionSignals(ctx, file, bx, bz, zoom, timeSec, roof, isBurning, isBlackout);
 }
 
 export function renderCityScene(args: RenderCitySceneArgs): HitBuilding[] {
@@ -810,9 +693,12 @@ export function renderCityScene(args: RenderCitySceneArgs): HitBuilding[] {
     floatingPopups = [],
   } = args;
 
+  const proj = makeProjector(width, height, camera);
+  const zoom = proj.zoom;
+
   ctx.clearRect(0, 0, width, height);
 
-  // 1. Deep harbor water backdrop + time-of-day gradient & animated ripples
+  // 1. Harbor water backdrop & ripples
   const grad = ctx.createLinearGradient(0, 0, 0, height);
   if (timeOfDay === "golden") {
     grad.addColorStop(0, "#1c1938");
@@ -848,56 +734,38 @@ export function renderCityScene(args: RenderCitySceneArgs): HitBuilding[] {
   }
   ctx.restore();
 
-  // 2. Stepped Stone Seawall + Asphalt Foundation Island Slab
+  // 2. Island seawall, asphalt deck & streets
   drawIsoPrism(
     ctx,
+    proj,
     -2.5,
     -2.5,
     145,
     109,
-    -5.5 * camera.zoom,
-    5.5 * camera.zoom,
+    -5.5 * zoom,
+    5.5 * zoom,
     { roof: "#1e293b", left: "#334155", right: "#1e293b", accent: "#475569" },
-    width,
-    height,
-    camera,
     "rgba(56, 189, 248, 0.35)",
     1.4,
   );
+  drawGroundQuad(ctx, proj, 0, 0, 140, 104, 0.05, "#0f172a", "rgba(148, 163, 184, 0.25)", 1);
 
-  // Inner paved city asphalt deck
-  drawGroundQuad(
-    ctx,
-    0,
-    0,
-    140,
-    104,
-    0.05,
-    "#0f172a",
-    "rgba(148, 163, 184, 0.25)",
-    width,
-    height,
-    camera,
-    1,
-  );
-
-  // Explicit avenue/street centerlines, crosswalks & corner traffic signals
   if (streetLines && (streetLines.xLines.length > 0 || streetLines.zLines.length > 0)) {
     ctx.save();
     ctx.strokeStyle = "rgba(250, 204, 21, 0.28)";
-    ctx.lineWidth = Math.max(0.8, 1.1 * camera.zoom);
-    ctx.setLineDash([4 * camera.zoom, 4 * camera.zoom]);
+    ctx.lineWidth = Math.max(0.8, 1.1 * zoom);
+    ctx.setLineDash([4 * zoom, 4 * zoom]);
     for (const xl of streetLines.xLines) {
-      const a = worldToScreen(xl, 1.2, 0.15, width, height, camera);
-      const b = worldToScreen(xl, 102.8, 0.15, width, height, camera);
+      const a = proj.project(xl, 1.2, 0.15);
+      const b = proj.project(xl, 102.8, 0.15);
       ctx.beginPath();
       ctx.moveTo(a.x, a.y);
       ctx.lineTo(b.x, b.y);
       ctx.stroke();
     }
     for (const zl of streetLines.zLines) {
-      const a = worldToScreen(1.2, zl, 0.15, width, height, camera);
-      const b = worldToScreen(138.8, zl, 0.15, width, height, camera);
+      const a = proj.project(1.2, zl, 0.15);
+      const b = proj.project(138.8, zl, 0.15);
       ctx.beginPath();
       ctx.moveTo(a.x, a.y);
       ctx.lineTo(b.x, b.y);
@@ -905,28 +773,25 @@ export function renderCityScene(args: RenderCitySceneArgs): HitBuilding[] {
     }
     ctx.setLineDash([]);
 
-    // Zebra crosswalk ticks & traffic signal beacons at intersections when zoomed in
-    if (camera.zoom >= 0.72) {
+    if (zoom >= 0.72) {
       const phase = Math.floor(timeSec * 0.5) % 2 === 0;
       for (let xi = 0; xi < streetLines.xLines.length; xi++) {
         for (let zi = 0; zi < streetLines.zLines.length; zi++) {
           const ix = streetLines.xLines[xi];
           const iz = streetLines.zLines[zi];
-          // Zebra stripes
           ctx.strokeStyle = "rgba(226, 232, 240, 0.36)";
-          ctx.lineWidth = Math.max(0.8, 1.2 * camera.zoom);
+          ctx.lineWidth = Math.max(0.8, 1.2 * zoom);
           for (const d of [-0.6, 0, 0.6]) {
-            const c0 = worldToScreen(ix + d, iz - 1.25, 0.18, width, height, camera);
-            const c1 = worldToScreen(ix + d, iz - 0.85, 0.18, width, height, camera);
+            const c0 = proj.project(ix + d, iz - 1.25, 0.18);
+            const c1 = proj.project(ix + d, iz - 0.85, 0.18);
             ctx.beginPath();
             ctx.moveTo(c0.x, c0.y);
             ctx.lineTo(c1.x, c1.y);
             ctx.stroke();
           }
-          // Traffic signal corner dot
-          const sig = worldToScreen(ix + 1.2, iz + 1.2, 2.2 * camera.zoom, width, height, camera);
+          const sig = proj.project(ix + 1.2, iz + 1.2, 2.2 * zoom);
           ctx.beginPath();
-          ctx.arc(sig.x, sig.y, Math.max(1.2, 1.8 * camera.zoom), 0, Math.PI * 2);
+          ctx.arc(sig.x, sig.y, Math.max(1.2, 1.8 * zoom), 0, Math.PI * 2);
           ctx.fillStyle = (phase ? (xi + zi) % 2 === 0 : (xi + zi) % 2 === 1)
             ? "#4ade80"
             : "#ef4444";
@@ -937,59 +802,53 @@ export function renderCityScene(args: RenderCitySceneArgs): HitBuilding[] {
     ctx.restore();
   }
 
-  // 3. Waterfront Supply Docks (timber piers + bobbing cargo barges)
+  // 3. Waterfront supply docks & moored barges
   const directDeps = deps.filter((d) => d.is_direct).slice(0, 8);
-  if (directDeps.length > 0) {
-    directDeps.forEach((dep, idx) => {
-      const dockX = 10 + idx * 16;
-      const dockZ = 107;
-      drawIsoPrism(
-        ctx,
-        dockX,
-        dockZ,
-        11,
-        5.5,
-        -2 * camera.zoom,
-        4 * camera.zoom,
-        { roof: "#92400e", left: "#78350f", right: "#451a03", accent: "#fbbf24" },
-        width,
-        height,
-        camera,
-        "rgba(251, 191, 36, 0.45)",
-        0.9,
-      );
-      // Bobbing cargo barge moored beside the timber pier
-      const bobY = Math.sin(timeSec * 1.6 + idx * 1.1) * 0.7 * camera.zoom;
-      drawIsoPrism(
-        ctx,
-        dockX + 2.2,
-        dockZ + 6.4,
-        6.5,
-        2.6,
-        (-1.2 + bobY) * camera.zoom,
-        2.6 * camera.zoom,
-        { roof: "#38bdf8", left: "#0284c7", right: "#075985", accent: "#fde047" },
-        width,
-        height,
-        camera,
-        "rgba(226, 232, 240, 0.4)",
-        0.7,
-      );
-      if (camera.zoom >= 0.7) {
-        const lbl = worldToScreen(dockX + 5.5, dockZ + 3, 5 * camera.zoom, width, height, camera);
-        ctx.fillStyle = "rgba(226, 232, 240, 0.85)";
-        ctx.font = `${Math.max(8, Math.round(9 * camera.zoom))}px ui-monospace, monospace`;
-        ctx.textAlign = "center";
-        ctx.fillText(dep.package_name.slice(0, 14), lbl.x, lbl.y);
-      }
-    });
-  }
+  directDeps.forEach((dep, idx) => {
+    const dockX = 10 + idx * 16;
+    const dockZ = 107;
+    drawIsoPrism(
+      ctx,
+      proj,
+      dockX,
+      dockZ,
+      11,
+      5.5,
+      -2 * zoom,
+      4 * zoom,
+      { roof: "#92400e", left: "#78350f", right: "#451a03", accent: "#fbbf24" },
+      "rgba(251, 191, 36, 0.45)",
+      0.9,
+    );
+    const bobY = Math.sin(timeSec * 1.6 + idx * 1.1) * 0.7 * zoom;
+    drawIsoPrism(
+      ctx,
+      proj,
+      dockX + 2.2,
+      dockZ + 6.4,
+      6.5,
+      2.6,
+      (-1.2 + bobY) * zoom,
+      2.6 * zoom,
+      { roof: "#38bdf8", left: "#0284c7", right: "#075985", accent: "#fde047" },
+      "rgba(226, 232, 240, 0.4)",
+      0.7,
+    );
+    if (zoom >= 0.7) {
+      const lbl = proj.project(dockX + 5.5, dockZ + 3, 5 * zoom);
+      ctx.fillStyle = "rgba(226, 232, 240, 0.85)";
+      ctx.font = `${Math.max(8, Math.round(9 * zoom))}px ui-monospace, monospace`;
+      ctx.textAlign = "center";
+      ctx.fillText(dep.package_name.slice(0, 14), lbl.x, lbl.y);
+    }
+  });
 
-  // 4. Concrete Sidewalk Plates & Zoned District Neighborhoods
+  // 4. Sidewalks, zoned districts, plazas & demolished ghost lots
   for (const dist of districts) {
     const zStyle = ZONE_PALETTES[dist.zone_type] ?? ZONE_PALETTES.downtown_core;
     drawGroundQuad(
       ctx,
+      proj,
       dist.bounds_x - 0.35,
       dist.bounds_z - 0.35,
       dist.bounds_w + 0.7,
@@ -997,13 +856,11 @@ export function renderCityScene(args: RenderCitySceneArgs): HitBuilding[] {
       0.2,
       "#334155",
       "rgba(148, 163, 184, 0.28)",
-      width,
-      height,
-      camera,
       0.8,
     );
     drawGroundQuad(
       ctx,
+      proj,
       dist.bounds_x,
       dist.bounds_z,
       dist.bounds_w,
@@ -1011,79 +868,45 @@ export function renderCityScene(args: RenderCitySceneArgs): HitBuilding[] {
       0.32,
       zStyle.fill,
       zStyle.border,
-      width,
-      height,
-      camera,
       1.1,
     );
   }
 
-  // Urban Pocket Plazas & Courtyards
   for (const pz of plazas) {
     const fill =
       pz.kind === "loading_bay" ? "#3f2e21" : pz.kind === "courtyard" ? "#1b4332" : "#273549";
-    drawGroundQuad(
-      ctx,
-      pz.x,
-      pz.z,
-      pz.w,
-      pz.d,
-      0.38,
-      fill,
-      "rgba(148, 163, 184, 0.35)",
-      width,
-      height,
-      camera,
-      0.7,
-    );
-    if (camera.zoom >= 0.75 && pz.kind !== "loading_bay") {
-      const tp = worldToScreen(
-        pz.x + pz.w * 0.5,
-        pz.z + pz.d * 0.5,
-        3.5 * camera.zoom,
-        width,
-        height,
-        camera,
-      );
+    drawGroundQuad(ctx, proj, pz.x, pz.z, pz.w, pz.d, 0.38, fill, "rgba(148, 163, 184, 0.35)", 0.7);
+    if (zoom >= 0.75 && pz.kind !== "loading_bay") {
+      const tp = proj.project(pz.x + pz.w * 0.5, pz.z + pz.d * 0.5, 3.5 * zoom);
       ctx.beginPath();
-      ctx.arc(tp.x, tp.y, Math.max(2, 3.2 * camera.zoom), 0, Math.PI * 2);
+      ctx.arc(tp.x, tp.y, Math.max(2, 3.2 * zoom), 0, Math.PI * 2);
       ctx.fillStyle = "#22c55e";
       ctx.fill();
     }
   }
 
-  // 5. Ghost Diff Demolished Lots
   for (const lot of removedLots) {
     const pad = 0.25;
-    const x = lot.layout_x + pad;
-    const z = lot.layout_z + pad;
-    const w = Math.max(0.8, lot.layout_w - pad * 2);
-    const d = Math.max(0.8, lot.layout_d - pad * 2);
     ctx.save();
     ctx.setLineDash([4, 3]);
     drawGroundQuad(
       ctx,
-      x,
-      z,
-      w,
-      d,
+      proj,
+      lot.layout_x + pad,
+      lot.layout_z + pad,
+      Math.max(0.8, lot.layout_w - pad * 2),
+      Math.max(0.8, lot.layout_d - pad * 2),
       0.8,
       "rgba(239, 68, 68, 0.16)",
       "rgba(248, 113, 113, 0.85)",
-      width,
-      height,
-      camera,
       1.4,
     );
     ctx.restore();
   }
 
-  const fileByPath = new Map<string, FileMetric>();
-  for (const f of files) {
-    fileByPath.set(f.file_path, f);
-  }
+  const fileByPath = new Map(files.map((f) => [f.file_path, f]));
 
-  // 6. Animated Import Artery Traffic Pulses (when no sim vehicles or traffic overlay active)
+  // 5. Traffic pulses or simulation vehicles
   if (showTraffic && imports.length > 0 && vehicles.length === 0) {
     ctx.save();
     const maxEdges = Math.min(80, imports.length);
@@ -1092,21 +915,15 @@ export function renderCityScene(args: RenderCitySceneArgs): HitBuilding[] {
       const src = fileByPath.get(edge.source_file);
       const dst = fileByPath.get(edge.target_file);
       if (!src || !dst) continue;
-      const pA = worldToScreen(
+      const pA = proj.project(
         src.layout_x + src.layout_w * 0.5,
         src.layout_z + src.layout_d * 0.5,
         2,
-        width,
-        height,
-        camera,
       );
-      const pB = worldToScreen(
+      const pB = proj.project(
         dst.layout_x + dst.layout_w * 0.5,
         dst.layout_z + dst.layout_d * 0.5,
         2,
-        width,
-        height,
-        camera,
       );
       ctx.beginPath();
       ctx.moveTo(pA.x, pA.y);
@@ -1116,52 +933,47 @@ export function renderCityScene(args: RenderCitySceneArgs): HitBuilding[] {
       ctx.stroke();
 
       const t = (timeSec * 0.45 + i * 0.17) % 1;
-      const px = pA.x + (pB.x - pA.x) * t;
-      const py = pA.y + (pB.y - pA.y) * t;
       ctx.beginPath();
-      ctx.arc(px, py, Math.max(1.4, 2 * camera.zoom), 0, Math.PI * 2);
+      ctx.arc(
+        pA.x + (pB.x - pA.x) * t,
+        pA.y + (pB.y - pA.y) * t,
+        Math.max(1.4, 2 * zoom),
+        0,
+        Math.PI * 2,
+      );
       ctx.fillStyle = "rgba(125, 211, 252, 0.78)";
       ctx.fill();
     }
     ctx.restore();
   }
 
-  // Street-routed Simulation Vehicles
   if (showTraffic && vehicles.length > 0) {
     ctx.save();
+    const flash = timeSec % 0.4 >= 0.2;
     for (const v of vehicles) {
-      const p = worldToScreen(v.x, v.z, 1.5, width, height, camera);
-      const size = Math.max(2.2, (v.type === "cargo_ship" ? 4.8 : 2.8) * camera.zoom);
+      const p = proj.project(v.x, v.z, 1.5);
+      const size = Math.max(2.2, (v.type === "cargo_ship" ? 4.8 : 2.8) * zoom);
       ctx.beginPath();
       if (v.type === "cargo_ship") {
         ctx.rect(p.x - size * 1.4, p.y - size * 0.7, size * 2.8, size * 1.4);
       } else {
         ctx.arc(p.x, p.y, size, 0, Math.PI * 2);
       }
-      ctx.fillStyle = vehicleColor(v.type, v.jammed, timeSec % 0.4 >= 0.2);
+      ctx.fillStyle = vehicleColor(v.type, v.jammed, flash);
       ctx.fill();
     }
     ctx.restore();
   }
 
-  const impactedHop = new Map<string, number>();
-  if (blastRadius) {
-    for (const node of blastRadius.impacted_files) {
-      impactedHop.set(node.file_path, node.hop_distance);
-    }
-  }
-
-  // 7. Sort Buildings Back-to-Front relative to Camera Yaw
-  const yaw = camera.yaw ?? DEFAULT_YAW;
-  const viewSin = Math.sin(yaw);
-  const viewCos = Math.cos(yaw);
+  // 6. Depth-sorted buildings & hitboxes
+  const impactedHop = buildImpactedHopMap(blastRadius);
   const sortedFiles = [...files].sort((a, b) => {
     const da =
-      (a.layout_x + a.layout_w * 0.5 - WORLD_CENTER_X) * viewSin +
-      (a.layout_z + a.layout_d * 0.5 - WORLD_CENTER_Z) * viewCos;
+      (a.layout_x + a.layout_w * 0.5 - WORLD_CENTER_X) * proj.viewX +
+      (a.layout_z + a.layout_d * 0.5 - WORLD_CENTER_Z) * proj.viewZ;
     const db =
-      (b.layout_x + b.layout_w * 0.5 - WORLD_CENTER_X) * viewSin +
-      (b.layout_z + b.layout_d * 0.5 - WORLD_CENTER_Z) * viewCos;
+      (b.layout_x + b.layout_w * 0.5 - WORLD_CENTER_X) * proj.viewX +
+      (b.layout_z + b.layout_d * 0.5 - WORLD_CENTER_Z) * proj.viewZ;
     return da - db;
   });
 
@@ -1170,9 +982,8 @@ export function renderCityScene(args: RenderCitySceneArgs): HitBuilding[] {
     const pad = Math.min(0.42, Math.min(file.layout_w, file.layout_d) * 0.12);
     const rawW = Math.max(0.85, file.layout_w - pad * 2);
     const rawD = Math.max(0.85, file.layout_d - pad * 2);
-    const maxRatio = 3.2;
-    const bw = rawW > rawD * maxRatio ? rawD * maxRatio : rawW;
-    const bd = rawD > rawW * maxRatio ? rawW * maxRatio : rawD;
+    const bw = Math.min(rawW, rawD * 3.2);
+    const bd = Math.min(rawD, rawW * 3.2);
     const bx = file.layout_x + (file.layout_w - bw) * 0.5;
     const bz = file.layout_z + (file.layout_d - bd) * 0.5;
     const heightVal = computeBuildingHeight(file);
@@ -1180,12 +991,10 @@ export function renderCityScene(args: RenderCitySceneArgs): HitBuilding[] {
     const isSelected = selectedFile === file.file_path;
     const isHovered = hoveredFile === file.file_path;
     const hop = impactedHop.get(file.file_path);
-    const isAdded = addedFiles.has(file.file_path);
 
     let palette = buildingPalette(file, dataMap);
     let stroke = "rgba(15, 23, 42, 0.72)";
-
-    if (isAdded) {
+    if (addedFiles.has(file.file_path)) {
       palette = { roof: "#6ee7b7", left: "#10b981", right: "#065f46", accent: "#d1fae5" };
       stroke = "#34d399";
     }
@@ -1213,6 +1022,7 @@ export function renderCityScene(args: RenderCitySceneArgs): HitBuilding[] {
     ctx.globalAlpha = alpha;
     drawBuildingDetails(
       ctx,
+      proj,
       file,
       bx,
       bz,
@@ -1223,113 +1033,82 @@ export function renderCityScene(args: RenderCitySceneArgs): HitBuilding[] {
       dataMap,
       timeSec,
       timeOfDay,
-      width,
-      height,
-      camera,
       stroke,
       fireFiles?.has(file.file_path) ?? false,
       blackoutFiles?.has(file.file_path) ?? false,
     );
     ctx.restore();
 
-    const topCenter = worldToScreen(
-      bx + bw * 0.5,
-      bz + bd * 0.5,
-      heightVal * camera.zoom,
-      width,
-      height,
-      camera,
-    );
+    const hz = heightVal * zoom;
     const corners = [
-      worldToScreen(bx, bz, heightVal * camera.zoom, width, height, camera),
-      worldToScreen(bx + bw, bz, heightVal * camera.zoom, width, height, camera),
-      worldToScreen(bx + bw, bz + bd, heightVal * camera.zoom, width, height, camera),
-      worldToScreen(bx, bz + bd, heightVal * camera.zoom, width, height, camera),
-      worldToScreen(bx, bz, 0, width, height, camera),
-      worldToScreen(bx + bw, bz, 0, width, height, camera),
-      worldToScreen(bx + bw, bz + bd, 0, width, height, camera),
-      worldToScreen(bx, bz + bd, 0, width, height, camera),
+      proj.project(bx, bz, hz),
+      proj.project(bx + bw, bz, hz),
+      proj.project(bx + bw, bz + bd, hz),
+      proj.project(bx, bz + bd, hz),
+      proj.project(bx, bz, 0),
+      proj.project(bx + bw, bz, 0),
+      proj.project(bx + bw, bz + bd, 0),
+      proj.project(bx, bz + bd, 0),
     ];
-    const xs = corners.map((c) => c.x);
-    const ys = corners.map((c) => c.y);
-    hits.push({
-      file,
-      screenX: topCenter.x,
-      screenY: topCenter.y,
-      minX: Math.min(...xs) - 3,
-      maxX: Math.max(...xs) + 3,
-      minY: Math.min(...ys) - 3,
-      maxY: Math.max(...ys) + 3,
-    });
+    let minX = Infinity;
+    let maxX = -Infinity;
+    let minY = Infinity;
+    let maxY = -Infinity;
+    for (const c of corners) {
+      if (c.x < minX) minX = c.x;
+      if (c.x > maxX) maxX = c.x;
+      if (c.y < minY) minY = c.y;
+      if (c.y > maxY) maxY = c.y;
+    }
+    hits.push({ file, minX: minX - 3, maxX: maxX + 3, minY: minY - 3, maxY: maxY + 3 });
   }
 
-  // 8. Dashed Purple Seismic Fault Lines
-  const faultSource = blastRadius?.fault_lines?.length
-    ? blastRadius.fault_lines
-    : selectedFile
-      ? cochanges.filter((c) => c.file_a === selectedFile || c.file_b === selectedFile)
-      : cochanges.slice(0, 8);
-
+  // 7. Co-change fault lines
+  const faultSource = selectFaultLines(cochanges, selectedFile, blastRadius);
   if (faultSource.length > 0) {
     ctx.save();
     ctx.setLineDash([7, 5]);
     ctx.lineDashOffset = -timeSec * 16;
+    ctx.strokeStyle = selectedFile ? "#e879f9" : "rgba(192, 132, 252, 0.55)";
+    ctx.lineWidth = selectedFile ? 2.4 : 1.5;
     for (const pair of faultSource) {
       const fa = fileByPath.get(pair.file_a);
       const fb = fileByPath.get(pair.file_b);
       if (!fa || !fb) continue;
-      const ha = computeBuildingHeight(fa) * camera.zoom;
-      const hb = computeBuildingHeight(fb) * camera.zoom;
-      const aPt = worldToScreen(
+      const aPt = proj.project(
         fa.layout_x + fa.layout_w * 0.5,
         fa.layout_z + fa.layout_d * 0.5,
-        ha,
-        width,
-        height,
-        camera,
+        computeBuildingHeight(fa) * zoom,
       );
-      const bPt = worldToScreen(
+      const bPt = proj.project(
         fb.layout_x + fb.layout_w * 0.5,
         fb.layout_z + fb.layout_d * 0.5,
-        hb,
-        width,
-        height,
-        camera,
+        computeBuildingHeight(fb) * zoom,
       );
       ctx.beginPath();
       ctx.moveTo(aPt.x, aPt.y);
-      ctx.quadraticCurveTo(
-        (aPt.x + bPt.x) * 0.5,
-        Math.min(aPt.y, bPt.y) - 24 * camera.zoom,
-        bPt.x,
-        bPt.y,
-      );
-      ctx.strokeStyle = selectedFile ? "#e879f9" : "rgba(192, 132, 252, 0.55)";
-      ctx.lineWidth = selectedFile ? 2.4 : 1.5;
+      ctx.quadraticCurveTo((aPt.x + bPt.x) * 0.5, Math.min(aPt.y, bPt.y) - 24 * zoom, bPt.x, bPt.y);
       ctx.stroke();
     }
     ctx.restore();
   }
 
-  // 9. District Name Plaques
-  if (camera.zoom >= 0.6) {
+  // 8. District plaques
+  if (zoom >= 0.6) {
     ctx.save();
     ctx.textAlign = "center";
+    ctx.font = `600 ${Math.max(9, Math.round(10 * Math.min(1.3, zoom)))}px Inter, sans-serif`;
     for (const dist of districts) {
-      if (dist.bounds_w * dist.bounds_d < 45 && camera.zoom < 1.1) continue;
-      const center = worldToScreen(
+      if (dist.bounds_w * dist.bounds_d < 45 && zoom < 1.1) continue;
+      const center = proj.project(
         dist.bounds_x + dist.bounds_w * 0.5,
         dist.bounds_z + dist.bounds_d * 0.5,
         2,
-        width,
-        height,
-        camera,
       );
       const label =
         dist.display_name.length > 22
           ? `…/${dist.display_name.split("/").slice(-1)[0]}`
           : dist.display_name;
-      ctx.font = `600 ${Math.max(9, Math.round(10 * Math.min(1.3, camera.zoom)))}px Inter, sans-serif`;
       const tw = ctx.measureText(label).width + 10;
       ctx.fillStyle = "rgba(7, 11, 20, 0.72)";
       ctx.fillRect(center.x - tw * 0.5, center.y - 8, tw, 15);
@@ -1339,13 +1118,13 @@ export function renderCityScene(args: RenderCitySceneArgs): HitBuilding[] {
     ctx.restore();
   }
 
-  // 10. Floating Stat Popups (+Health / -Smog / +Velocity)
+  // 9. Floating stat popups
   if (floatingPopups.length > 0) {
     ctx.save();
     ctx.font = "700 12px Inter, sans-serif";
     ctx.textAlign = "center";
     for (const pop of floatingPopups) {
-      const p = worldToScreen(pop.x, pop.z, 26 * camera.zoom, width, height, camera);
+      const p = proj.project(pop.x, pop.z, 26 * zoom);
       ctx.globalAlpha = Math.max(0, 1 - pop.progress);
       ctx.fillStyle = "rgba(2, 6, 23, 0.75)";
       const tw = ctx.measureText(pop.text).width + 10;

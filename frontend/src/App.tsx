@@ -25,7 +25,6 @@ import {
 import {
   type CitySnapshotBundle,
   CityDataClient,
-  type HealthReportData,
   type TourLandmark,
   buildHealthReport,
   buildTourLandmarks,
@@ -38,7 +37,12 @@ import {
   applySandboxOverlay,
   validateToolOnFile,
 } from "./game/sandboxOverlay";
-import { CitySimulationEngine, type SimSpeed, type SimStateSnapshot } from "./game/simEngine";
+import {
+  CitySimulationEngine,
+  type SimSpeed,
+  type SimStateSnapshot,
+  computeImpactedFiles,
+} from "./game/simEngine";
 import { soundEngine } from "./game/soundEngine";
 import type {
   Annotation,
@@ -184,7 +188,6 @@ export function App() {
   const [tourActive, setTourActive] = useState(false);
   const [tourAutoPlay, setTourAutoPlay] = useState(true);
   const [healthModalOpen, setHealthModalOpen] = useState(false);
-  const [healthReport, setHealthReport] = useState<HealthReportData | null>(null);
 
   const [repoInput, setRepoInput] = useState(".");
   const [loadingMsg, setLoadingMsg] = useState<string | null>("Booting DuckDB-Wasm...");
@@ -208,7 +211,10 @@ export function App() {
   const closePopover = useCallback(() => setOpenPopover(null), []);
   usePopoverOutsideDismiss(openPopover, closePopover);
 
-  const showToast = useCallback((msg: string) => setToastMsg(msg), []);
+  const handleCanvasSelectFile = useCallback((filePath: string | null) => {
+    setTourAutoPlay(false);
+    setSelectedFile(filePath);
+  }, []);
 
   const flyToLot = useCallback(
     (lot: {
@@ -247,10 +253,10 @@ export function App() {
   useEffect(() => {
     if (!simState.milestoneEvent) return;
     soundEngine.playMilestone();
-    showToast(`🎉 Milestone Unlocked: ${simState.milestoneEvent}!`);
+    setToastMsg(`🎉 Milestone Unlocked: ${simState.milestoneEvent}!`);
     sim.spawnFloatingPopup(70, 52, `★ ${simState.milestoneEvent}!`, "#fde047");
     sim.clearMilestoneEvent();
-  }, [showToast, sim, simState.milestoneEvent]);
+  }, [sim, simState.milestoneEvent]);
 
   useEffect(() => {
     if (!toastMsg) return;
@@ -315,10 +321,15 @@ export function App() {
           client.querySandboxActions(),
         ]);
         const latest = snaps[snaps.length - 1]?.snapshot_idx ?? 0;
+        sim.reset();
+        setSimState(sim.getSnapshot());
         setSnapshots(snaps);
         setSnapshotIdx(latest);
         setAnnotations(notes);
         setSandboxActions(sbx);
+        setClaimedMissions(new Set());
+        setLiveMode(false);
+        setLiveBranchName(null);
         setPendingTransitStart(null);
         setSelectedFile(null);
         setBlastRadius(null);
@@ -329,7 +340,7 @@ export function App() {
         setLoadingMsg(null);
       }
     },
-    [client],
+    [client, sim],
   );
 
   // Boot: detect Static Export vs Live Studio
@@ -502,7 +513,7 @@ export function App() {
         const check = validateToolOnFile(tool, file, effectiveBundle, null);
         if (!check.ok) {
           setPendingTransitStart(file.file_path);
-          showToast(
+          setToastMsg(
             `Selected ${file.file_path} — click a 2nd building to bridge with Interface Hub`,
           );
           return;
@@ -511,7 +522,7 @@ export function App() {
 
       const validation = validateToolOnFile(tool, file, effectiveBundle, pendingTransitStart);
       if (!validation.ok) {
-        showToast(validation.reason ?? "Action cannot be applied to this building.");
+        setToastMsg(validation.reason ?? "Action cannot be applied to this building.");
         return;
       }
 
@@ -522,7 +533,7 @@ export function App() {
             `Live Mayor Mode: stage and commit \`git rm ${file.file_path}\` on safe branch ${liveBranchName ?? "codecity/mayor-session"}?`,
           );
           if (!confirmed) {
-            showToast("Cancelled live git rm.");
+            setToastMsg("Cancelled live git rm.");
             return;
           }
         }
@@ -534,13 +545,13 @@ export function App() {
             district_path: file.district_path,
             confirm: confirmed,
           });
-          showToast(
+          setToastMsg(
             liveRes.committed && liveRes.commit_sha
               ? `${liveRes.message} [${liveRes.commit_sha}]`
               : liveRes.message,
           );
         } catch (err) {
-          showToast(err instanceof Error ? err.message : String(err));
+          setToastMsg(err instanceof Error ? err.message : String(err));
           return;
         }
       }
@@ -590,7 +601,7 @@ export function App() {
       soundEngine.playTool(tool);
       setSimState(sim.getSnapshot());
       if (!liveMode) {
-        showToast(`${summaryMap[tool]} (Sandbox)`);
+        setToastMsg(`${summaryMap[tool]} (Sandbox)`);
       }
     },
     [
@@ -603,9 +614,15 @@ export function App() {
       liveBranchName,
       liveMode,
       pendingTransitStart,
-      showToast,
       sim,
     ],
+  );
+
+  const onCanvasToolAction = useCallback(
+    (f: FileMetric) => {
+      void handleToolAction(f);
+    },
+    [handleToolAction],
   );
 
   const handleUndo = useCallback(async () => {
@@ -617,8 +634,8 @@ export function App() {
         .toggleRemoteSandboxAction(activeRepo.owner, activeRepo.repo, prevActive.action_id, false)
         .catch(() => {});
     }
-    showToast("Undid last Mayor intervention");
-  }, [activeRepo, client, coopSyncEnabled, isStaticMode, sandboxActions, showToast]);
+    setToastMsg("Undid last Mayor intervention");
+  }, [activeRepo, client, coopSyncEnabled, isStaticMode, sandboxActions]);
 
   const handleRedo = useCallback(async () => {
     const nextInactive = sandboxActions.find((a) => !a.active);
@@ -629,8 +646,8 @@ export function App() {
         .toggleRemoteSandboxAction(activeRepo.owner, activeRepo.repo, nextInactive.action_id, true)
         .catch(() => {});
     }
-    showToast("Redid Mayor intervention");
-  }, [activeRepo, client, coopSyncEnabled, isStaticMode, sandboxActions, showToast]);
+    setToastMsg("Redid Mayor intervention");
+  }, [activeRepo, client, coopSyncEnabled, isStaticMode, sandboxActions]);
 
   const handleResetSandbox = useCallback(async () => {
     setSandboxActions(await client.resetSandboxActions());
@@ -638,19 +655,19 @@ export function App() {
     if (coopSyncEnabled && !isStaticMode && activeRepo) {
       void client.clearRemoteSandboxActions(activeRepo.owner, activeRepo.repo).catch(() => {});
     }
-    showToast("Sandbox reset to HEAD");
-  }, [activeRepo, client, coopSyncEnabled, isStaticMode, showToast]);
+    setToastMsg("Sandbox reset to HEAD");
+  }, [activeRepo, client, coopSyncEnabled, isStaticMode]);
+
+  const healthReport = useMemo(() => {
+    const targetBundle = effectiveBundle ?? bundle;
+    if (!healthModalOpen || !targetBundle || !activeRepo) return null;
+    return buildHealthReport(activeRepo.owner, activeRepo.repo, targetBundle);
+  }, [activeRepo, bundle, effectiveBundle, healthModalOpen]);
 
   const handleOpenHealthModal = useCallback(() => {
-    const targetBundle = effectiveBundle ?? bundle;
-    if (!targetBundle || !activeRepo) return;
-    if (healthModalOpen) {
-      setHealthModalOpen(false);
-      return;
-    }
-    setHealthReport(buildHealthReport(activeRepo.owner, activeRepo.repo, targetBundle));
-    setHealthModalOpen(true);
-  }, [activeRepo, bundle, effectiveBundle, healthModalOpen]);
+    if (!(effectiveBundle ?? bundle) || !activeRepo) return;
+    setHealthModalOpen((open) => !open);
+  }, [activeRepo, bundle, effectiveBundle]);
 
   const handleStartTour = useCallback(() => {
     const targetBundle = effectiveBundle ?? bundle;
@@ -711,13 +728,18 @@ export function App() {
       const es = new EventSource(`/api/jobs/${encodeURIComponent(job_id)}/events`);
       analyzeEsRef.current = es;
       es.addEventListener("progress", (evt) => {
-        const payload = JSON.parse((evt as MessageEvent).data) as {
+        let payload: {
           stage: string;
           message: string;
           percent: number;
           owner?: string;
           repo?: string;
         };
+        try {
+          payload = JSON.parse((evt as MessageEvent).data);
+        } catch {
+          return;
+        }
         setLoadingMsg(payload.message);
         setAnalyzePct(payload.percent);
         if (payload.stage === "completed") {
@@ -744,7 +766,12 @@ export function App() {
       });
       es.onerror = () => {
         es.close();
-        if (analyzeEsRef.current === es) analyzeEsRef.current = null;
+        if (analyzeEsRef.current === es) {
+          analyzeEsRef.current = null;
+          setAnalyzePct(null);
+          setLoadingMsg(null);
+          setErrorMsg("Analysis event stream disconnected.");
+        }
       };
     } catch (err) {
       setAnalyzePct(null);
@@ -799,10 +826,10 @@ export function App() {
             blackoutFiles={simState.blackoutFiles}
             floatingPopups={simState.floatingPopups}
             plazas={streetGrid.plazas}
-            streetLines={{ xLines: streetGrid.xLines, zLines: streetGrid.zLines }}
+            streetLines={streetGrid}
             activeTool={activeTool}
-            onSelectFile={setSelectedFile}
-            onToolAction={(f) => void handleToolAction(f)}
+            onSelectFile={handleCanvasSelectFile}
+            onToolAction={onCanvasToolAction}
           />
         ) : (
           <Suspense
@@ -825,10 +852,10 @@ export function App() {
               fireFiles={simState.fireFiles}
               blackoutFiles={simState.blackoutFiles}
               plazas={streetGrid.plazas}
-              streetLines={{ xLines: streetGrid.xLines, zLines: streetGrid.zLines }}
+              streetLines={streetGrid}
               activeTool={activeTool}
-              onSelectFile={setSelectedFile}
-              onToolAction={(f) => void handleToolAction(f)}
+              onSelectFile={handleCanvasSelectFile}
+              onToolAction={onCanvasToolAction}
             />
           </Suspense>
         )
@@ -1064,14 +1091,14 @@ export function App() {
                       .then((res) => {
                         setLiveMode(true);
                         setLiveBranchName(res.branch);
-                        showToast(`Live Mayor Mode active on branch ${res.branch}`);
+                        setToastMsg(`Live Mayor Mode active on branch ${res.branch}`);
                       })
                       .catch((err) => {
-                        showToast(err instanceof Error ? err.message : String(err));
+                        setToastMsg(err instanceof Error ? err.message : String(err));
                       });
                   } else {
                     setLiveMode(false);
-                    showToast("Switched back to safe Refactor Sandbox Mode");
+                    setToastMsg("Switched back to safe Refactor Sandbox Mode");
                   }
                 }}
                 onToggleCoopSync={() => setCoopSyncEnabled((v) => !v)}
@@ -1196,7 +1223,7 @@ export function App() {
           sim.spawnFloatingPopup(70, 52, `+${m.rewardVelocity} Velocity!`, "#fde047");
           soundEngine.playMilestone();
           setSimState(sim.getSnapshot());
-          showToast(`Quest Completed: ${m.title} (+${m.rewardVelocity} Velocity)`);
+          setToastMsg(`Quest Completed: ${m.title} (+${m.rewardVelocity} Velocity)`);
         }}
         onFocusFile={handleFocusFile}
         onClose={closeAdvisorsModal}
@@ -1208,23 +1235,13 @@ export function App() {
         authors={repoAuthors}
         onTriggerPowerOutage={(targetFile) => {
           if (!effectiveBundle) return;
-          const visited = new Set<string>();
-          const queue = [targetFile];
-          while (queue.length > 0) {
-            const cur = queue.shift()!;
-            for (const imp of effectiveBundle.imports) {
-              if (imp.target_file === cur && !visited.has(imp.source_file)) {
-                visited.add(imp.source_file);
-                queue.push(imp.source_file);
-              }
-            }
-          }
+          const impacted = computeImpactedFiles(targetFile, effectiveBundle.imports);
           const protectedSet = new Set(
             effectiveBundle.files
               .filter((f) => overlayResult?.protectedDistricts.has(f.district_path))
               .map((f) => f.file_path),
           );
-          sim.triggerPowerOutage(targetFile, [...visited], protectedSet);
+          sim.triggerPowerOutage(targetFile, impacted, protectedSet);
           soundEngine.playDisaster();
           setSimState(sim.getSnapshot());
           handleFocusFile(targetFile);

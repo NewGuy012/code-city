@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 
+import { isTypingTarget } from "../components/hudPopover";
+
 export type CameraProjection = "perspective" | "orthographic";
 export type TimeOfDay = "day" | "golden" | "night";
 export type CameraPresetId = 1 | 2 | 3 | 4 | 5;
@@ -47,6 +49,10 @@ export const MIN_ZOOM = 0.35;
 export const MAX_ZOOM = 4.0;
 export const MIN_PITCH = 12;
 export const MAX_PITCH = 85;
+
+export function compassStepFromYaw(yaw: number): 0 | 1 | 2 | 3 {
+  return (((Math.round((yaw - DEFAULT_YAW) / (Math.PI / 2)) % 4) + 4) % 4) as 0 | 1 | 2 | 3;
+}
 
 function clamp(v: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, v));
@@ -163,8 +169,7 @@ class CameraStore {
   }
 
   getCompassLabel(): "N" | "E" | "S" | "W" {
-    const idx = ((Math.round((this.state.yaw - DEFAULT_YAW) / (Math.PI / 2)) % 4) + 4) % 4;
-    return (["N", "E", "S", "W"] as const)[idx];
+    return (["N", "E", "S", "W"] as const)[compassStepFromYaw(this.state.yaw)];
   }
 
   flyTo(opts: FlyToOptions): void {
@@ -294,12 +299,6 @@ class CameraStore {
       projection: this.state.projection === "perspective" ? "orthographic" : "perspective",
     });
   }
-
-  cycleTimeOfDay(): void {
-    const order: TimeOfDay[] = ["day", "golden", "night"];
-    const next = order[(order.indexOf(this.state.timeOfDay) + 1) % order.length];
-    this.setState({ timeOfDay: next });
-  }
 }
 
 export const cameraStore = new CameraStore();
@@ -344,12 +343,6 @@ export function useUnifiedCameraHotkeys(viewMode: "2d" | "3d"): void {
     const pressed = new Set<string>();
     let raf = 0;
     let lastTs = performance.now();
-
-    const isTextInput = (target: EventTarget | null): boolean => {
-      if (!(target instanceof HTMLElement)) return false;
-      const tag = target.tagName;
-      return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || target.isContentEditable;
-    };
 
     const tick = (now: number) => {
       const dt = Math.min(0.05, Math.max(0.001, (now - lastTs) / 1000));
@@ -400,7 +393,7 @@ export function useUnifiedCameraHotkeys(viewMode: "2d" | "3d"): void {
     };
 
     const onKeyDown = (e: KeyboardEvent) => {
-      if (isTextInput(e.target) || e.metaKey || e.ctrlKey || e.altKey) return;
+      if (isTypingTarget(e.target) || e.metaKey || e.ctrlKey || e.altKey) return;
       const key = e.key.toLowerCase();
 
       if (key === "q" && viewMode === "2d" && !e.repeat) {

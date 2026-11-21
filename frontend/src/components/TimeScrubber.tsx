@@ -55,6 +55,50 @@ export function TimeScrubber({
   );
   const current = snapshots[curPos] ?? snapshots[0];
   const dateLabel = formatSnapshotDate(current.committed_at);
+  const renderMeta = (compact: boolean) => (
+    <>
+      <span className="flex items-center gap-1 font-mono text-[11px] text-sky-300">
+        <GitCommitHorizontal className={compact ? "h-3 w-3" : "h-3.5 w-3.5"} />
+        {current.commit_sha.slice(0, 7)}
+      </span>
+      <span className={compact ? "hidden text-[11px] text-slate-400 md:inline" : "text-slate-400"}>
+        {dateLabel}
+      </span>
+      {current.git_tag && (
+        <span
+          className={`${compact ? "hidden sm:flex rounded px-1.5 py-px" : "flex rounded-md px-1.5 py-0.5"} items-center gap-0.5 bg-amber-500/15 font-mono text-[10px] font-semibold text-amber-300`}
+        >
+          <Tag className={compact ? "h-2.5 w-2.5" : "h-3 w-3"} />
+          {current.git_tag}
+        </span>
+      )}
+      <span
+        className={`sim-pixel-badge rounded bg-white/[0.07] px-1.5 ${compact ? "py-px font-mono text-[10px] text-slate-200" : "py-0.5 text-slate-300"}`}
+      >
+        {compact
+          ? `${curPos + 1}/${snapshots.length}`
+          : `Snapshot ${curPos + 1}/${snapshots.length}`}
+      </span>
+      {(addedCount > 0 || removedCount > 0) && (
+        <span
+          className={`${compact ? "hidden sm:flex gap-1" : "flex gap-1.5"} items-center font-mono text-[10px]`}
+        >
+          {addedCount > 0 && (
+            <span className="text-emerald-400">
+              +{addedCount}
+              {compact ? "" : " built"}
+            </span>
+          )}
+          {removedCount > 0 && (
+            <span className="text-rose-400">
+              -{removedCount}
+              {compact ? "" : " razed"}
+            </span>
+          )}
+        </span>
+      )}
+    </>
+  );
 
   if (!expanded) {
     return (
@@ -84,26 +128,7 @@ export function TimeScrubber({
           title="Expand commit timeline scrubber"
           className="flex items-center gap-2 rounded-lg px-1.5 py-1 text-left transition hover:bg-white/[0.06]"
         >
-          <span className="flex items-center gap-1 font-mono text-[11px] text-sky-300">
-            <GitCommitHorizontal className="h-3 w-3" />
-            {current.commit_sha.slice(0, 7)}
-          </span>
-          <span className="hidden text-[11px] text-slate-400 md:inline">{dateLabel}</span>
-          {current.git_tag && (
-            <span className="hidden items-center gap-0.5 rounded bg-amber-500/15 px-1.5 py-px font-mono text-[10px] font-semibold text-amber-300 sm:flex">
-              <Tag className="h-2.5 w-2.5" />
-              {current.git_tag}
-            </span>
-          )}
-          <span className="sim-pixel-badge rounded bg-white/[0.07] px-1.5 py-px font-mono text-[10px] text-slate-200">
-            {curPos + 1}/{snapshots.length}
-          </span>
-          {(addedCount > 0 || removedCount > 0) && (
-            <span className="hidden items-center gap-1 font-mono text-[10px] sm:flex">
-              {addedCount > 0 && <span className="text-emerald-400">+{addedCount}</span>}
-              {removedCount > 0 && <span className="text-rose-400">-{removedCount}</span>}
-            </span>
-          )}
+          {renderMeta(true)}
           <ChevronUp className="h-3.5 w-3.5 text-slate-400" />
         </button>
       </div>
@@ -177,28 +202,7 @@ export function TimeScrubber({
       </div>
 
       <div className="flex flex-wrap items-center justify-between gap-2 text-[11px]">
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="flex items-center gap-1 font-mono text-sky-300">
-            <GitCommitHorizontal className="h-3.5 w-3.5" />
-            {current.commit_sha.slice(0, 7)}
-          </span>
-          <span className="text-slate-400">{dateLabel}</span>
-          {current.git_tag && (
-            <span className="flex items-center gap-1 rounded-md bg-amber-500/15 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-amber-300">
-              <Tag className="h-3 w-3" />
-              {current.git_tag}
-            </span>
-          )}
-          <span className="sim-pixel-badge rounded bg-white/[0.07] px-1.5 py-0.5 text-slate-300">
-            Snapshot {curPos + 1}/{snapshots.length}
-          </span>
-          {(addedCount > 0 || removedCount > 0) && (
-            <span className="flex items-center gap-1.5 font-mono text-[10px]">
-              {addedCount > 0 && <span className="text-emerald-400">+{addedCount} built</span>}
-              {removedCount > 0 && <span className="text-rose-400">-{removedCount} razed</span>}
-            </span>
-          )}
-        </div>
+        <div className="flex flex-wrap items-center gap-2">{renderMeta(false)}</div>
 
         <div className="hidden items-center gap-1 sm:flex">
           {snapshots

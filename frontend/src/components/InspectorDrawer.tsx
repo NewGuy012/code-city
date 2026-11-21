@@ -131,7 +131,6 @@ export function InspectorDrawer({
       data-testid="inspector-drawer"
       className={`sim-panel pointer-events-auto flex w-80 max-w-[calc(100vw-4.5rem)] flex-col overflow-hidden rounded-2xl ${className}`}
     >
-      {/* Header */}
       <div className="flex items-start justify-between gap-2 border-b border-white/10 px-3.5 py-2.5">
         <div className="min-w-0">
           <div className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-amber-300">
@@ -161,7 +160,6 @@ export function InspectorDrawer({
         </button>
       </div>
 
-      {/* Compact Pinned Metrics */}
       <div className="grid grid-cols-3 gap-1.5 border-b border-white/[0.07] px-3.5 py-2.5">
         <div className="rounded-lg bg-white/[0.04] px-2 py-1.5">
           <div className="text-[9px] uppercase tracking-wider text-slate-400">SLOC</div>
@@ -204,7 +202,6 @@ export function InspectorDrawer({
         </div>
       </div>
 
-      {/* Section Tabs */}
       <div className="flex items-center gap-1 border-b border-white/10 px-3 py-1.5 text-[11px]">
         <button
           type="button"
@@ -254,7 +251,6 @@ export function InspectorDrawer({
         </button>
       </div>
 
-      {/* Tab Body */}
       <div className="sim-scrollbar flex-1 space-y-3 overflow-y-auto px-3.5 py-3 text-xs">
         {activeTab === "overview" && (
           <>

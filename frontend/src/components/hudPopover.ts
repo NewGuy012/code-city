@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 export type HudPopoverId =
   "repo" | "datamap" | "advisors" | "utilities" | "mayorMode" | "view" | null;
@@ -39,4 +39,30 @@ export function usePopoverOutsideDismiss(openPopover: HudPopoverId, onClose: () 
     window.addEventListener("pointerdown", onPointerDown, true);
     return () => window.removeEventListener("pointerdown", onPointerDown, true);
   }, [onClose, openPopover]);
+}
+
+export function useCopyFeedback(delayMs = 1800): [boolean, (text: string) => void] {
+  const [copied, setCopied] = useState(false);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (timerRef.current !== null) clearTimeout(timerRef.current);
+    };
+  }, []);
+
+  const copy = useCallback(
+    (text: string) => {
+      void navigator.clipboard?.writeText(text).catch(() => {});
+      setCopied(true);
+      if (timerRef.current !== null) clearTimeout(timerRef.current);
+      timerRef.current = setTimeout(() => {
+        setCopied(false);
+        timerRef.current = null;
+      }, delayMs);
+    },
+    [delayMs],
+  );
+
+  return [copied, copy];
 }

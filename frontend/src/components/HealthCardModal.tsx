@@ -17,6 +17,7 @@ import type {
 } from "../data/cityDataClient";
 import type { Annotation } from "../types/city";
 import { ModalShell } from "./ModalShell";
+import { useCopyFeedback } from "./hudPopover";
 
 interface HealthCardModalProps {
   open: boolean;
@@ -48,7 +49,7 @@ export function HealthCardModal({
   const [tab, setTab] = useState<"report" | "quack" | "changelog">("report");
   const [quackInfo, setQuackInfo] = useState<QuackSnippetInfo | null>(null);
   const [changes, setChanges] = useState<AnnotationChangeEvent[]>([]);
-  const [copied, setCopied] = useState(false);
+  const [copied, copyText] = useCopyFeedback();
   const [exporting, setExporting] = useState(false);
   const [exportOut, setExportOut] = useState<{
     output_dir: string;
@@ -74,12 +75,6 @@ export function HealthCardModal({
     langEntries.reduce((acc, [, n]) => acc + n, 0),
   );
 
-  function copyText(txt: string) {
-    void navigator.clipboard?.writeText(txt);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1800);
-  }
-
   async function handleExport() {
     setExporting(true);
     try {
@@ -104,7 +99,6 @@ export function HealthCardModal({
       closeTitle="Close report"
       onClose={onClose}
     >
-      {/* Navigation Tabs */}
       <div className="flex items-center gap-2 border-b border-slate-800 px-6 py-2 text-xs">
         <button
           type="button"
@@ -150,11 +144,9 @@ export function HealthCardModal({
         )}
       </div>
 
-      {/* Body */}
       <div className="flex-1 space-y-4 overflow-y-auto px-6 py-4 text-xs">
         {tab === "report" && (
           <>
-            {/* Score Strip */}
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
               <div className="rounded-2xl bg-slate-900/90 p-3">
                 <div className="text-[10px] uppercase text-slate-400">Health Score</div>

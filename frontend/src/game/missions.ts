@@ -17,11 +17,21 @@ export interface AdvisorMission {
   targetFile: string | null;
 }
 
+interface SqlMissionBaseline {
+  sqlTopComplex: string;
+  sqlBaseSmog: number;
+  sqlBaseGreenPct: number;
+  sqlLoneCount: number;
+}
+
+const baselineCache = new WeakMap<CityDataClient, Map<string, SqlMissionBaseline>>();
+
 export async function evaluateAdvisorMissions(
   client: CityDataClient,
   effectiveBundle: CitySnapshotBundle,
 ): Promise<AdvisorMission[]> {
   const snapIdx = effectiveBundle.snapshot.snapshot_idx;
+  const cacheKey = `${effectiveBundle.snapshot.commit_sha}:${snapIdx}`;
 
   // Parameterized DuckDB-Wasm SQL queries over base snapshot tables
   const transitSql = `SELECT file_path, max_complexity, hotspot_score FROM file_metrics WHERE snapshot_idx = ? ORDER BY max_complexity DESC, hotspot_score DESC LIMIT 3;`;
@@ -29,33 +39,39 @@ export async function evaluateAdvisorMissions(
   const greenSql = `SELECT COALESCE(SUM(CASE WHEN building_archetype = 'park_stadium' THEN sloc ELSE 0 END), 0) AS park_sloc, COALESCE(SUM(sloc), 1) AS total_sloc FROM file_metrics WHERE snapshot_idx = ?;`;
   const busSql = `SELECT file_path, sloc FROM file_metrics WHERE snapshot_idx = ? AND distinct_authors_90d <= 1 AND sloc >= 40 ORDER BY hotspot_score DESC LIMIT 5;`;
 
-  let sqlTopComplex = "";
-  let sqlBaseSmog = 0;
-  let sqlBaseGreenPct = 0;
-  let sqlLoneCount = 0;
-
-  try {
-    const [tRows, aRows, gRows, bRows] = await Promise.all([
-      client.runReadSql(transitSql, [snapIdx]),
-      client.runReadSql(airSql, [snapIdx]),
-      client.runReadSql(greenSql, [snapIdx]),
-      client.runReadSql(busSql, [snapIdx]),
-    ]);
-    if (tRows[0]) {
-      sqlTopComplex = `${String(tRows[0].file_path)} (Cx ${Number(tRows[0].max_complexity)})`;
-    }
-    if (aRows[0]) {
-      sqlBaseSmog = Number(aRows[0].smog_files ?? 0);
-    }
-    if (gRows[0]) {
-      sqlBaseGreenPct = Math.round(
-        (100 * Number(gRows[0].park_sloc ?? 0)) / Math.max(1, Number(gRows[0].total_sloc ?? 1)),
-      );
-    }
-    sqlLoneCount = bRows.length;
-  } catch {
-    // Graceful fallback when running pure unit tests without Wasm worker
+  let clientCache = baselineCache.get(client);
+  if (!clientCache) {
+    clientCache = new Map();
+    baselineCache.set(client, clientCache);
   }
+
+  let base = clientCache.get(cacheKey);
+  if (!base) {
+    base = { sqlTopComplex: "", sqlBaseSmog: 0, sqlBaseGreenPct: 0, sqlLoneCount: 0 };
+    try {
+      const [tRows, aRows, gRows, bRows] = await Promise.all([
+        client.runReadSql(transitSql, [snapIdx]),
+        client.runReadSql(airSql, [snapIdx]),
+        client.runReadSql(greenSql, [snapIdx]),
+        client.runReadSql(busSql, [snapIdx]),
+      ]);
+      if (tRows[0]) {
+        base.sqlTopComplex = `${String(tRows[0].file_path)} (Cx ${Number(tRows[0].max_complexity)})`;
+      }
+      if (aRows[0]) base.sqlBaseSmog = Number(aRows[0].smog_files ?? 0);
+      if (gRows[0]) {
+        base.sqlBaseGreenPct = Math.round(
+          (100 * Number(gRows[0].park_sloc ?? 0)) / Math.max(1, Number(gRows[0].total_sloc ?? 1)),
+        );
+      }
+      base.sqlLoneCount = bRows.length;
+      if (clientCache.size >= 32) clientCache.clear();
+      clientCache.set(cacheKey, base);
+    } catch {
+      // Graceful fallback when running pure unit tests without Wasm worker
+    }
+  }
+  const { sqlTopComplex, sqlBaseSmog, sqlBaseGreenPct, sqlLoneCount } = base;
 
   // Evaluate live status over effectiveBundle (including Sandbox interventions!)
   const files = effectiveBundle.files;

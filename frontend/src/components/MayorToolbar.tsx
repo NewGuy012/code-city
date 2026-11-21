@@ -25,6 +25,7 @@ import {
   generateRefactorBlueprintMarkdown,
 } from "../game/sandboxOverlay";
 import { ModalShell } from "./ModalShell";
+import { useCopyFeedback } from "./hudPopover";
 
 interface MayorToolbarProps {
   activeTool: MayorToolId;
@@ -130,7 +131,7 @@ export function MayorToolbar({
   className = "absolute top-1/2 left-3 z-20 -translate-y-1/2",
 }: MayorToolbarProps) {
   const [blueprintOpen, setBlueprintOpen] = useState(false);
-  const [copied, setCopied] = useState(false);
+  const [copied, copyBlueprint] = useCopyFeedback();
 
   const canUndo = actions.some((a) => a.active);
   const canRedo = actions.some((a) => !a.active);
@@ -371,11 +372,7 @@ export function MayorToolbar({
             <div className="flex items-center gap-2">
               <button
                 type="button"
-                onClick={() => {
-                  void navigator.clipboard?.writeText(blueprintMd);
-                  setCopied(true);
-                  setTimeout(() => setCopied(false), 1800);
-                }}
+                onClick={() => copyBlueprint(blueprintMd)}
                 className="flex items-center gap-1.5 rounded-xl bg-slate-800 px-3 py-1.5 text-xs font-semibold text-slate-200 hover:bg-slate-700"
               >
                 {copied ? (

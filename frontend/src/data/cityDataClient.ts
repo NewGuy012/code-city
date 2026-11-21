@@ -216,11 +216,22 @@ export function buildHealthReport(
   };
 }
 
+function mapCochangeRow(r: Record<string, unknown>): CochangePair {
+  return {
+    snapshot_idx: Number(r.snapshot_idx),
+    file_a: String(r.file_a),
+    file_b: String(r.file_b),
+    shared_commits: Number(r.shared_commits),
+    coupling_ratio: Number(r.coupling_ratio),
+  };
+}
+
 export class CityDataClient {
   private db: duckdb.AsyncDuckDB | null = null;
   private conn: duckdb.AsyncDuckDBConnection | null = null;
   private initPromise: Promise<duckdb.AsyncDuckDBConnection> | null = null;
   private loadedKey: string | null = null;
+  private sandboxTableReady = false;
 
   initWasm(): Promise<duckdb.AsyncDuckDBConnection> {
     if (this.conn) return Promise.resolve(this.conn);
@@ -275,6 +286,7 @@ export class CityDataClient {
       }),
     );
 
+    const repoChanged = this.loadedKey !== null && this.loadedKey !== cacheKey;
     for (const { table, buf } of buffers) {
       const vpath = `${table}.parquet`;
       await db.registerFileBuffer(vpath, buf);
@@ -283,10 +295,14 @@ export class CityDataClient {
       );
     }
     await this.ensureSandboxTable();
+    if (repoChanged) {
+      await conn.query(`DELETE FROM sandbox_actions;`);
+    }
     this.loadedKey = cacheKey;
   }
 
   async ensureSandboxTable(): Promise<void> {
+    if (this.sandboxTableReady) return;
     const conn = await this.initWasm();
     await conn.query(`
       CREATE TABLE IF NOT EXISTS sandbox_actions (
@@ -302,6 +318,7 @@ export class CityDataClient {
         created_at VARCHAR
       );
     `);
+    this.sandboxTableReady = true;
   }
 
   async querySandboxActions(): Promise<SandboxActionRecord[]> {
@@ -479,13 +496,7 @@ export class CityDataClient {
       target_file: String(r.target_file),
     }));
 
-    const cochanges: CochangePair[] = coRows.map((r) => ({
-      snapshot_idx: Number(r.snapshot_idx),
-      file_a: String(r.file_a),
-      file_b: String(r.file_b),
-      shared_commits: Number(r.shared_commits),
-      coupling_ratio: Number(r.coupling_ratio),
-    }));
+    const cochanges: CochangePair[] = coRows.map(mapCochangeRow);
 
     const deps: ExternalDep[] = depRows.map((r) => ({
       snapshot_idx: Number(r.snapshot_idx),
@@ -541,13 +552,7 @@ export class CityDataClient {
         file_path: String(r.file_path),
         hop_distance: Number(r.hop_distance),
       })),
-      fault_lines: coRows.map((r) => ({
-        snapshot_idx: Number(r.snapshot_idx),
-        file_a: String(r.file_a),
-        file_b: String(r.file_b),
-        shared_commits: Number(r.shared_commits),
-        coupling_ratio: Number(r.coupling_ratio),
-      })),
+      fault_lines: coRows.map(mapCochangeRow),
     };
   }
 
@@ -779,18 +784,19 @@ export class CityDataClient {
     actionId: string,
     active: boolean,
   ): Promise<void> {
-    await fetch(
+    await this.requestJson(
       `${this.repoBase(owner, repo)}/sandbox-actions/${encodeURIComponent(actionId)}/toggle`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ active }),
-      },
+      { method: "POST", body: JSON.stringify({ active }) },
+      "Failed to toggle sandbox action",
     );
   }
 
   async clearRemoteSandboxActions(owner: string, repo: string): Promise<void> {
-    await fetch(`${this.repoBase(owner, repo)}/sandbox-actions`, { method: "DELETE" });
+    await this.requestJson(
+      `${this.repoBase(owner, repo)}/sandbox-actions`,
+      { method: "DELETE" },
+      "Failed to clear sandbox actions",
+    );
   }
 
   async close(): Promise<void> {
@@ -804,5 +810,6 @@ export class CityDataClient {
     }
     this.initPromise = null;
     this.loadedKey = null;
+    this.sandboxTableReady = false;
   }
 }

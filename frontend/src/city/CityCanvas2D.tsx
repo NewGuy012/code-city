@@ -11,6 +11,7 @@ import type {
 } from "../types/city";
 import { MAX_ZOOM, MIN_ZOOM, cameraStore } from "./cameraStore";
 import { BuildingTooltip } from "./BuildingTooltip";
+import { canvasCursorClass } from "./cityTheme";
 import {
   type FloatingStatPopup,
   type GhostLot,
@@ -398,13 +399,7 @@ export function CityCanvas2D({
       <canvas
         ref={canvasRef}
         data-testid="city-canvas-2d"
-        className={`block h-full w-full ${
-          activeTool !== "inspect"
-            ? "cursor-crosshair"
-            : hoveredHit
-              ? "cursor-pointer"
-              : "cursor-grab active:cursor-grabbing"
-        }`}
+        className={`block h-full w-full ${canvasCursorClass(activeTool, Boolean(hoveredHit))}`}
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
