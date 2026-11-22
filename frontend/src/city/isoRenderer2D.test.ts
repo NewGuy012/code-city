@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { computeHudMetrics, getHudShellStyle } from "../components/hudPopover";
-import type { FileMetric } from "../types/city";
+import type { District, FileMetric } from "../types/city";
 import {
   DEFAULT_PITCH,
   DEFAULT_ROLL,
@@ -16,7 +16,14 @@ import {
   isAnalyticalDataMap,
   selectFaultLines,
 } from "./cityTheme";
+import { computeSliceHeights, getPartGeometry, lotOrientation } from "./geometries3D";
+import {
+  computeNatureAndStreetPlacements,
+  islandElevation,
+  islandSignedDist,
+} from "./islandLayout";
 import { cameraFromTarget, screenToWorldGround, worldToIso, worldToScreen } from "./isoRenderer2D";
+import { ATLAS_CELL_H, ATLAS_CELL_W, spriteAtlas } from "./spriteAtlas2D";
 
 describe("isoRenderer2D projection", () => {
   test("worldToScreen and screenToWorldGround invert cleanly", () => {
@@ -151,5 +158,70 @@ describe("isoRenderer2D projection", () => {
     ];
     expect(selectFaultLines(cochanges, null, null)).toEqual([]);
     expect(selectFaultLines(cochanges, "a.py", null).length).toBe(1);
+  });
+
+  test("islandLayout heightfield, harbor quay, and nature scatter placement", () => {
+    // Urban plateau stays level at -0.04; distant ocean sits well below sea level
+    expect(islandElevation(0, 0)).toBeCloseTo(-0.04, 6);
+    expect(islandElevation(10, 52.8)).toBeCloseTo(-0.04, 6);
+    expect(islandSignedDist(0, 0)).toBeLessThan(0);
+    expect(islandSignedDist(0, 120)).toBeGreaterThan(0);
+    expect(islandElevation(0, 120)).toBeLessThan(-2.0);
+
+    const districts = [
+      {
+        district_path: "parks",
+        zone_type: "greenbelt_parks",
+        bounds_x: 20,
+        bounds_z: 20,
+        bounds_w: 24,
+        bounds_d: 24,
+      },
+    ] as District[];
+    const files = [
+      {
+        file_path: "park_file.py",
+        layout_x: 28,
+        layout_z: 28,
+        layout_w: 4,
+        layout_d: 4,
+      },
+    ] as FileMetric[];
+    const scatter = computeNatureAndStreetPlacements(districts, files, [], {
+      xLines: [20, 40, 60],
+      zLines: [20, 40, 60],
+    });
+    expect(scatter.trees.length).toBeGreaterThan(30);
+    expect(scatter.rocks.length).toBeGreaterThan(5);
+    expect(scatter.sailboats.length).toBeGreaterThan(2);
+    expect(scatter.streetlights.length).toBe(5);
+  });
+
+  test("spriteAtlas 1x1 vs 1x2 rect selection and 3D architecture slice/part cache", () => {
+    const sample = { file_path: "src/app/tower.tsx", building_archetype: "office_tower" as const };
+    const squareSpec = spriteAtlas.getSpriteSpecForFile(sample, 4, 4, 42, 0);
+    const wideSpec = spriteAtlas.getSpriteSpecForFile(sample, 8, 4, 42, 0);
+    expect(squareSpec.sw).toBe(ATLAS_CELL_W);
+    expect(squareSpec.sh).toBe(ATLAS_CELL_H);
+    expect(wideSpec.sw).toBe(ATLAS_CELL_W);
+    expect(wideSpec.sh).toBe(ATLAS_CELL_H);
+    // Wide lot uses slot 3 (col >= 12) while tall/wide flipped lots rotate by 90 deg
+    expect(wideSpec.sx).toBeGreaterThanOrEqual(12 * ATLAS_CELL_W);
+    const tallSpec = spriteAtlas.getSpriteSpecForFile(sample, 4, 8, 42, 0);
+    expect(Math.abs(tallSpec.rotOffset - wideSpec.rotOffset) % 2).toBe(1);
+
+    const fullFile = { ...sample } as FileMetric;
+    const wideOri = lotOrientation(fullFile, 6, 3);
+    expect(wideOri.localW).toBeGreaterThanOrEqual(wideOri.localD);
+    const tallOri = lotOrientation(fullFile, 3, 6);
+    expect(tallOri.localW).toBeGreaterThanOrEqual(tallOri.localD);
+
+    const slices = computeSliceHeights("office_tower", 12.0);
+    expect(slices.baseH + slices.shaftH + slices.crownH).toBeCloseTo(12.0, 5);
+    expect(slices.shaftH).toBeGreaterThan(slices.baseH);
+
+    const geom = getPartGeometry("box");
+    expect(geom.getAttribute("position").count).toBeGreaterThan(0);
+    expect(getPartGeometry("box")).toBe(geom);
   });
 });

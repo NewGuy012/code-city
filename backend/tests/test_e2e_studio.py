@@ -125,8 +125,14 @@ def test_live_studio_e2e_2d_datamaps_tour_notes_3d_timescrub_and_quack(tmp_path:
             time.sleep(0.1)
 
     try:
-        with urllib.request.urlopen(f"{base_url}/sprites/buildings_atlas.png", timeout=2.0) as r:
-            assert r.status == 200
+        for asset in (
+            "/sprites/buildings_atlas.webp",
+            "/sprites/buildings_emissive.webp",
+            "/sprites/nature_atlas.webp",
+            "/sprites/atlas_manifest.json",
+        ):
+            with urllib.request.urlopen(f"{base_url}{asset}", timeout=2.0) as r:
+                assert r.status == 200
         with sync_playwright() as pw:
             browser = pw.chromium.launch(
                 args=["--use-gl=angle", "--use-angle=swiftshader"],
@@ -289,9 +295,12 @@ def test_live_studio_e2e_2d_datamaps_tour_notes_3d_timescrub_and_quack(tmp_path:
             # Keyboard shortcuts for rotation axes:
             # C rolls Z-axis, X levels, N snaps North, T toggles Top, Shift+X resets
             page.keyboard.down("c")
-            page.wait_for_timeout(160)
-            page.keyboard.up("c")
-            assert page.inner_text('[data-testid="roll-reset-btn"]').strip() != "0°"
+            try:
+                expect(page.locator('[data-testid="roll-reset-btn"]')).not_to_have_text(
+                    "0°", timeout=2000
+                )
+            finally:
+                page.keyboard.up("c")
 
             page.keyboard.press("x")
             expect(page.locator('[data-testid="roll-reset-btn"]')).to_have_text("0°", timeout=3000)

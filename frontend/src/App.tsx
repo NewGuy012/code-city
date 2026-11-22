@@ -1164,7 +1164,10 @@ export function App() {
                 setAnnotations((prev) => [created, ...prev]);
               }}
               onSelectFile={handleFocusFile}
-              onClose={() => setSelectedFile(null)}
+              onClose={() => {
+                setTourAutoPlay(false);
+                setSelectedFile(null);
+              }}
               className="max-h-full shrink-0 self-start"
             />
           </div>
