@@ -1,0 +1,25 @@
+{
+  "cellW": 192,
+  "cellH": 288,
+  "anchorX": 96,
+  "anchorY": 249,
+  "footprintPx": 117,
+  "cols": 24,
+  "rows": 20,
+  "natureW": 96,
+  "natureH": 128,
+  "natureAnchorX": 48,
+  "natureAnchorY": 108,
+  "archetypes": [
+    "grand_terminal",
+    "city_hall",
+    "archive_vault",
+    "twin_silos",
+    "factory",
+    "office_tower",
+    "glass_pavilion",
+    "watchtower",
+    "civic_kiosk",
+    "park_stadium"
+  ]
+}

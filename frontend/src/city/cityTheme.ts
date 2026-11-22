@@ -169,11 +169,20 @@ const LANGUAGE_PALETTES: Record<string, ShadePalette> = {
   other: { roof: "#cbd5e1", left: "#64748b", right: "#334155", accent: "#f1f5f9" },
 };
 
+export function buildingPaletteForVariant(
+  archetype: BuildingArchetype,
+  variantIdx: number,
+): ShadePalette {
+  const variants = LIVING_ARCHETYPE_VARIANTS[archetype] ?? LIVING_ARCHETYPE_VARIANTS.office_tower;
+  return variants[((variantIdx % variants.length) + variants.length) % variants.length];
+}
+
 export function buildingPalette(file: FileMetric, dataMap: DataMapMode): ShadePalette {
   if (dataMap === "living") {
-    const variants =
-      LIVING_ARCHETYPE_VARIANTS[file.building_archetype] ?? LIVING_ARCHETYPE_VARIANTS.office_tower;
-    return variants[buildingVariantIndex(file.file_path, variants.length)];
+    return buildingPaletteForVariant(
+      file.building_archetype,
+      buildingVariantIndex(file.file_path, 3),
+    );
   }
   if (dataMap === "languages") {
     return LANGUAGE_PALETTES[file.language] ?? LANGUAGE_PALETTES.other;

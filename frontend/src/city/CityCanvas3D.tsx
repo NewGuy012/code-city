@@ -40,10 +40,10 @@ import {
   lotOrientation,
 } from "./geometries3D";
 import type { SimVehicleRender } from "./isoRenderer2D";
+import { computeNatureAndStreetPlacements } from "./islandLayout";
 import { type BuildingShaderUniforms, applyBuildingFacadeShader } from "./shaders3D";
 import {
   type CoastalOceanHandle,
-  computeNatureAndStreetPlacements,
   createBroadleafTreeGeometries,
   createCargoShipGeometry,
   createCoastalIslandMesh,
@@ -295,7 +295,7 @@ export default function CityCanvas3D({
     renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
     renderer.setSize(initW, initH);
     renderer.shadowMap.enabled = true;
-    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    renderer.shadowMap.type = THREE.PCFShadowMap;
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
     renderer.toneMappingExposure = 1.05;
     renderer.domElement.style.display = "block";

@@ -22,6 +22,8 @@ import {
   buildImpactedHopMap,
   buildingPalette,
   computeBuildingHeight,
+  hashFilePath,
+  isAnalyticalDataMap,
   selectFaultLines,
   vehicleColor,
 } from "./cityTheme";
@@ -30,8 +32,20 @@ import {
   ATLAS_ANCHOR_Y,
   ATLAS_CELL_H,
   ATLAS_CELL_W,
+  ATLAS_FOOTPRINT_PX,
+  NATURE_ANCHOR_X,
+  NATURE_ANCHOR_Y,
+  NATURE_CELL_H,
+  NATURE_CELL_W,
   spriteAtlas,
 } from "./spriteAtlas2D";
+import {
+  type RockPlacement,
+  type SailboatPlacement,
+  type TreePlacement,
+  computeNatureAndStreetPlacements,
+  islandSignedDist,
+} from "./islandLayout";
 
 export interface Camera2D {
   panX: number;
@@ -117,6 +131,63 @@ interface IsoProjector {
 const ISO_X = 7.4;
 const ISO_Y = 3.7;
 const BASE_PITCH_RAD = (DEFAULT_PITCH * Math.PI) / 180;
+
+/** Precompute organic coastal shoreline polygon matching terrain3D's islandSignedDist. */
+const COAST_POLYGON: Array<{ x: number; z: number }> = (() => {
+  const pts: Array<{ x: number; z: number }> = [];
+  const steps = 72;
+  const cx = WORLD_CENTER_X;
+  const cz = WORLD_CENTER_Z - 6;
+  for (let i = 0; i < steps; i++) {
+    const ang = (i / steps) * Math.PI * 2;
+    const dx = Math.cos(ang);
+    const dz = Math.sin(ang);
+    let lo = 45;
+    let hi = 125;
+    for (let it = 0; it < 10; it++) {
+      const mid = (lo + hi) * 0.5;
+      const sd = islandSignedDist(dx * mid, -6 + dz * mid);
+      if (sd < 0) lo = mid;
+      else hi = mid;
+    }
+    const r = (lo + hi) * 0.5;
+    pts.push({ x: cx + dx * r, z: cz + dz * r });
+  }
+  return pts;
+})();
+
+let cachedNatureInput: {
+  districts: District[];
+  files: FileMetric[];
+  plazas: Array<{ x: number; z: number; w: number; d: number; kind: string }>;
+  streetLines?: { xLines: number[]; zLines: number[] };
+  result: {
+    trees: TreePlacement[];
+    rocks: RockPlacement[];
+    sailboats: SailboatPlacement[];
+    streetlights: Array<{ x: number; z: number }>;
+  };
+} | null = null;
+
+function getCachedNaturePlacements(
+  districts: District[],
+  files: FileMetric[],
+  plazas: Array<{ x: number; z: number; w: number; d: number; kind: string }>,
+  streetLines?: { xLines: number[]; zLines: number[] },
+) {
+  if (
+    cachedNatureInput &&
+    cachedNatureInput.districts === districts &&
+    cachedNatureInput.files === files &&
+    cachedNatureInput.plazas === plazas &&
+    cachedNatureInput.streetLines === streetLines
+  ) {
+    return cachedNatureInput.result;
+  }
+  const result = computeNatureAndStreetPlacements(districts, files, plazas, streetLines);
+  cachedNatureInput = { districts, files, plazas, streetLines, result };
+  return result;
+}
 
 function getTiltFactors(pitchDeg = DEFAULT_PITCH): { isoYScale: number; heightScale: number } {
   const rad = (Math.max(12, Math.min(85, pitchDeg)) * Math.PI) / 180;
@@ -270,6 +341,39 @@ function drawQuad(
   }
 }
 
+function drawCoastPolygon(
+  ctx: CanvasRenderingContext2D,
+  proj: IsoProjector,
+  scaleFromCenter: number,
+  wy: number,
+  fill: string,
+  stroke?: string | null,
+  lineWidth = 1,
+  clampHarborQuay = false,
+): void {
+  ctx.beginPath();
+  const cz = WORLD_CENTER_Z - 4;
+  for (let i = 0; i < COAST_POLYGON.length; i++) {
+    const pt = COAST_POLYGON[i];
+    const wx = WORLD_CENTER_X + (pt.x - WORLD_CENTER_X) * scaleFromCenter;
+    let wz = cz + (pt.z - cz) * scaleFromCenter;
+    if (clampHarborQuay && pt.z > 102 && Math.abs(pt.x - WORLD_CENTER_X) < 62) {
+      wz = Math.min(wz, 105.2);
+    }
+    const p = proj.project(wx, wz, wy);
+    if (i === 0) ctx.moveTo(p.x, p.y);
+    else ctx.lineTo(p.x, p.y);
+  }
+  ctx.closePath();
+  ctx.fillStyle = fill;
+  ctx.fill();
+  if (stroke) {
+    ctx.strokeStyle = stroke;
+    ctx.lineWidth = lineWidth;
+    ctx.stroke();
+  }
+}
+
 function drawIsoPrism(
   ctx: CanvasRenderingContext2D,
   proj: IsoProjector,
@@ -344,7 +448,7 @@ function drawCastShadow(
 ): void {
   const reach = timeOfDay === "golden" ? 0.34 : timeOfDay === "night" ? 0.14 : 0.22;
   ctx.save();
-  ctx.globalAlpha *= timeOfDay === "night" ? 0.22 : 0.32;
+  ctx.globalAlpha *= timeOfDay === "night" ? 0.2 : 0.26;
   drawGroundQuad(
     ctx,
     proj,
@@ -353,7 +457,7 @@ function drawCastShadow(
     bw,
     bd,
     0.35,
-    "#020617",
+    "#0f172a",
     null,
   );
   ctx.restore();
@@ -492,7 +596,7 @@ const ROOFTOP_CROWNS: Partial<Record<BuildingArchetype, CrownSpec[]>> = {
       wFrac: 0.68,
       dFrac: 0.68,
       hFixed: 5,
-      roofColor: "#f472b6",
+      roofColor: "#5da05a",
       lineWidth: 0.7,
     },
   ],
@@ -512,6 +616,9 @@ function drawBuildingDetails(
   timeSec: number,
   timeOfDay: TimeOfDay,
   stroke: string,
+  hasHighlightStroke: boolean,
+  isHopHighlight: boolean,
+  isAdded: boolean,
   isBurning: boolean,
   isBlackout: boolean,
 ): void {
@@ -530,82 +637,103 @@ function drawBuildingDetails(
     isCardinalYaw &&
     proj.pitch <= 58 &&
     !isBlackout &&
-    Math.max(bw / Math.max(0.4, bd), bd / Math.max(0.4, bw)) <= 1.85;
+    Math.max(bw / Math.max(0.4, bd), bd / Math.max(0.4, bw)) <= 3.3;
 
   if (canUseSprite && atlas.buildings) {
     if (arch !== "park_stadium") {
       drawCastShadow(ctx, proj, bx, bz, bw, bd, height, timeOfDay);
     }
+    const padFill =
+      arch === "park_stadium"
+        ? "rgba(77, 142, 65, 0.75)"
+        : hasHighlightStroke
+          ? "rgba(254, 240, 138, 0.28)"
+          : isAdded
+            ? "rgba(16, 185, 129, 0.14)"
+            : "rgba(182, 190, 200, 0.55)";
+    const padStroke = hasHighlightStroke
+      ? stroke
+      : isAdded
+        ? "rgba(16, 185, 129, 0.88)"
+        : "rgba(100, 116, 139, 0.35)";
+    const padWidth = hasHighlightStroke ? 2.0 : isAdded ? 1.5 : 0.7;
     drawGroundQuad(
       ctx,
       proj,
-      bx,
-      bz,
-      bw,
-      bd,
+      bx - 0.08,
+      bz - 0.08,
+      bw + 0.16,
+      bd + 0.16,
       0.38,
-      arch === "park_stadium" ? "#14532d" : "#1e293b",
-      stroke,
-      stroke.startsWith("#") ? 1.6 : 0.8,
+      padFill,
+      padStroke,
+      padWidth,
     );
 
-    const rect = spriteAtlas.getBuildingSpriteRect(arch, height, proj.compassStep);
-    const baseScreen = proj.project(bx + bw * 0.5, bz + bd * 0.5, 0);
-    const scaleX = Math.max(0.28, ((bw + bd) * ISO_X * zoom) / 64.8);
-    const scaleY = Math.max(0.24, scaleX * (0.72 + 0.28 * proj.heightScale));
+    const spec = spriteAtlas.getSpriteSpecForFile(file, bw, bd, height, proj.compassStep);
+    const baseScreen = proj.project(bx + bw * 0.5, bz + bd * 0.5, 0.36);
+    const tierMid = height < 26 ? 19 : height < 50 ? 38 : 66;
+    const heightNudge = Math.max(0.84, Math.min(1.18, 1 + (height - tierMid) * 0.0045));
+    const scaleX = Math.max(0.24, ((bw + bd) * ISO_X * zoom) / ATLAS_FOOTPRINT_PX);
+    const scaleY = Math.max(0.22, scaleX * heightNudge * (0.72 + 0.28 * proj.heightScale));
     const dw = ATLAS_CELL_W * scaleX;
     const dh = ATLAS_CELL_H * scaleY;
     const dx = baseScreen.x - ATLAS_ANCHOR_X * scaleX;
     const dy = baseScreen.y - ATLAS_ANCHOR_Y * scaleY;
 
+    const analytical = isAnalyticalDataMap(dataMap);
+    let tintHex: string | null = null;
+    let tintAlpha = 0.56;
+    if (analytical || isHopHighlight) {
+      tintHex = palette.left;
+      tintAlpha = 0.56;
+    } else if (timeOfDay === "night") {
+      tintHex = "#0b1930";
+      tintAlpha = 0.52;
+    } else if (timeOfDay === "golden") {
+      tintHex = "#f59e0b";
+      tintAlpha = 0.14;
+    }
+
     spriteAtlas.drawTintedSprite(
       ctx,
       atlas.buildings,
-      rect.sx,
-      rect.sy,
-      rect.sw,
-      rect.sh,
+      spec.sx,
+      spec.sy,
+      spec.sw,
+      spec.sh,
       dx,
       dy,
       dw,
       dh,
-      dataMap === "living" ? null : palette.left,
+      tintHex,
+      tintAlpha,
     );
+
     if (atlas.emissive && timeOfDay !== "day") {
       ctx.save();
-      ctx.globalAlpha *= timeOfDay === "night" ? 0.95 : 0.45;
-      ctx.drawImage(atlas.emissive, rect.sx, rect.sy, rect.sw, rect.sh, dx, dy, dw, dh);
+      ctx.globalAlpha *= timeOfDay === "night" ? 0.94 : 0.46;
+      ctx.drawImage(atlas.emissive, spec.sx, spec.sy, spec.sw, spec.sh, dx, dy, dw, dh);
       ctx.restore();
     }
 
-    const roof = proj.project(bx + bw * 0.5, bz + bd * 0.5, (height * 0.78 + 6) * zoom);
+    const roof = proj.project(bx + bw * 0.5, bz + bd * 0.5, (height * 0.72 + 6) * zoom);
     drawConditionSignals(ctx, file, bx, bz, zoom, timeSec, roof, isBurning, false);
     return;
   }
 
   if (arch === "park_stadium") {
-    drawGroundQuad(ctx, proj, bx, bz, bw, bd, 1, "#14532d", "#4ade80", 1.1);
+    drawGroundQuad(ctx, proj, bx, bz, bw, bd, 1, "#4d8e41", "#86efac", 1.1);
     const center = proj.project(bx + bw * 0.5, bz + bd * 0.5, 2.5);
     ctx.save();
     ctx.translate(center.x, center.y);
     ctx.scale(1, 0.5);
     ctx.beginPath();
     ctx.arc(0, 0, Math.min(bw, bd) * 2.2 * zoom, 0, Math.PI * 2);
-    ctx.strokeStyle = "#fde68a";
-    ctx.lineWidth = Math.max(1, 1.5 * zoom);
+    ctx.strokeStyle = "#d97757";
+    ctx.lineWidth = Math.max(1.5, 2.2 * zoom);
     ctx.stroke();
     ctx.restore();
-
-    ctx.fillStyle = "#22c55e";
-    for (const [ox, oz] of [
-      [0.24, 0.28],
-      [0.74, 0.72],
-    ]) {
-      const tp = proj.project(bx + bw * ox, bz + bd * oz, 5 * zoom);
-      ctx.beginPath();
-      ctx.arc(tp.x, tp.y, Math.max(2.5, 4.2 * zoom), 0, Math.PI * 2);
-      ctx.fill();
-    }
     return;
   }
 
@@ -624,7 +752,7 @@ function drawBuildingDetails(
         ? "rgba(253, 224, 71, 0.72)"
         : timeOfDay === "golden"
           ? "rgba(254, 240, 138, 0.58)"
-          : "rgba(224, 242, 254, 0.32)";
+          : "rgba(224, 242, 254, 0.36)";
     ctx.lineWidth = Math.max(0.8, 1.1 * zoom);
     const vx = proj.viewX >= 0 ? bx + bw : bx;
     const vz = proj.viewZ >= 0 ? bz + bd : bz;
@@ -665,33 +793,14 @@ function drawBuildingDetails(
     );
   }
 
-  if (arch === "city_hall") {
-    const base = proj.project(bx + bw * 0.5, bz + bd * 0.5, height * 1.34 * zoom);
-    const tip = proj.project(bx + bw * 0.5, bz + bd * 0.5, (height * 1.34 + 14) * zoom);
-    ctx.beginPath();
-    ctx.moveTo(base.x, base.y);
-    ctx.lineTo(tip.x, tip.y);
-    ctx.strokeStyle = "#fef08a";
-    ctx.lineWidth = Math.max(1.5, 2 * zoom);
-    ctx.stroke();
-    ctx.beginPath();
-    ctx.arc(tip.x, tip.y, Math.max(2, 2.8 * zoom), 0, Math.PI * 2);
-    ctx.fillStyle = "#fde047";
-    ctx.fill();
-  } else if (arch === "factory") {
-    const base = proj.project(bx + bw * 0.78, bz + bd * 0.26, height * zoom);
-    const top = proj.project(bx + bw * 0.78, bz + bd * 0.26, (height + 11) * zoom);
-    ctx.beginPath();
-    ctx.moveTo(base.x, base.y);
-    ctx.lineTo(top.x, top.y);
-    ctx.strokeStyle = "#475569";
-    ctx.lineWidth = Math.max(2.5, 3.5 * zoom);
-    ctx.stroke();
-  }
-
   const roof = proj.project(bx + bw * 0.5, bz + bd * 0.5, (height + 4) * zoom);
   drawConditionSignals(ctx, file, bx, bz, zoom, timeSec, roof, isBurning, isBlackout);
 }
+
+type DepthDrawable =
+  | { depth: number; kind: "building"; file: FileMetric }
+  | { depth: number; kind: "tree"; tree: TreePlacement }
+  | { depth: number; kind: "rock"; rock: RockPlacement };
 
 export function renderCityScene(args: RenderCitySceneArgs): HitBuilding[] {
   const {
@@ -726,38 +835,44 @@ export function renderCityScene(args: RenderCitySceneArgs): HitBuilding[] {
   const rollRad = ((camera.roll ?? 0) * Math.PI) / 180;
   const pivotX = width * 0.5;
   const pivotY = height * 0.52;
+  const analytical = isAnalyticalDataMap(dataMap);
 
   ctx.clearRect(0, 0, width, height);
 
-  // 1. Harbor water backdrop & ripples
+  // 1. Sunlit coastal ocean backdrop & gentle water shimmer
   const grad = ctx.createLinearGradient(0, 0, 0, height);
   if (timeOfDay === "golden") {
-    grad.addColorStop(0, "#1c1938");
-    grad.addColorStop(0.55, "#282348");
-    grad.addColorStop(1, "#0f2942");
+    grad.addColorStop(0, "#4a617d");
+    grad.addColorStop(0.55, "#2b4d6d");
+    grad.addColorStop(1, "#183652");
   } else if (timeOfDay === "night") {
-    grad.addColorStop(0, "#020611");
-    grad.addColorStop(1, "#061326");
+    grad.addColorStop(0, "#0b1b33");
+    grad.addColorStop(1, "#081426");
   } else {
-    grad.addColorStop(0, "#050d1a");
-    grad.addColorStop(1, "#0b1f38");
+    grad.addColorStop(0, "#2472a4");
+    grad.addColorStop(0.55, "#195a87");
+    grad.addColorStop(1, "#11466b");
   }
   ctx.fillStyle = grad;
   ctx.fillRect(0, 0, width, height);
 
   ctx.save();
   ctx.strokeStyle =
-    timeOfDay === "golden" ? "rgba(251, 191, 36, 0.10)" : "rgba(56, 189, 248, 0.08)";
-  ctx.lineWidth = 1;
-  for (let i = 0; i < 16; i++) {
-    const wy = ((i * 58 + timeSec * 8) % (height + 40)) - 20;
+    timeOfDay === "golden"
+      ? "rgba(253, 186, 116, 0.14)"
+      : timeOfDay === "night"
+        ? "rgba(147, 197, 253, 0.08)"
+        : "rgba(224, 242, 254, 0.14)";
+  ctx.lineWidth = 1.1;
+  for (let i = 0; i < 14; i++) {
+    const wy = ((i * 64 + timeSec * 6) % (height + 40)) - 20;
     ctx.beginPath();
     ctx.moveTo(0, wy);
     ctx.bezierCurveTo(
       width * 0.3,
-      wy + Math.sin(timeSec + i) * 6,
+      wy + Math.sin(timeSec * 0.9 + i) * 5,
       width * 0.7,
-      wy - Math.cos(timeSec + i) * 6,
+      wy - Math.cos(timeSec * 0.9 + i) * 5,
       width,
       wy,
     );
@@ -772,38 +887,110 @@ export function renderCityScene(args: RenderCitySceneArgs): HitBuilding[] {
     ctx.translate(-pivotX, -pivotY);
   }
 
-  // 2. Island seawall, asphalt deck & streets
+  // 2. Organic coastal island: turquoise shallows, surf foam, sandy shore, green meadows & harbor quay
+  const shallowFill =
+    timeOfDay === "night"
+      ? "rgba(30, 82, 118, 0.4)"
+      : timeOfDay === "golden"
+        ? "rgba(56, 152, 176, 0.36)"
+        : "rgba(56, 194, 214, 0.42)";
+  drawCoastPolygon(ctx, proj, 1.11, -0.8 * zoom, shallowFill, null);
+
+  const surfPulse = 1.028 + Math.sin(timeSec * 2.0) * 0.008;
+  drawCoastPolygon(
+    ctx,
+    proj,
+    surfPulse,
+    -0.3 * zoom,
+    "rgba(255, 255, 255, 0.04)",
+    timeOfDay === "night" ? "rgba(186, 230, 253, 0.25)" : "rgba(241, 248, 255, 0.55)",
+    Math.max(1.2, 2.0 * zoom),
+  );
+
+  // Sandy beach shelf & rocky cliff skirt
+  drawCoastPolygon(
+    ctx,
+    proj,
+    1.015,
+    -1.2 * zoom,
+    timeOfDay === "night" ? "#3b4240" : "#9c947d",
+    null,
+    1,
+    true,
+  );
+  drawCoastPolygon(
+    ctx,
+    proj,
+    1.012,
+    0.0,
+    timeOfDay === "night" ? "#4f4c3d" : timeOfDay === "golden" ? "#c9b389" : "#dfd1a9",
+    null,
+    1,
+    true,
+  );
+  // Green coastal meadow hills
+  drawCoastPolygon(
+    ctx,
+    proj,
+    0.965,
+    0.1,
+    timeOfDay === "night" ? "#203b2a" : timeOfDay === "golden" ? "#55793e" : "#568f45",
+    null,
+    1,
+    true,
+  );
+
+  // Southern dressed-stone harbor seawall & graded urban plateau
   drawIsoPrism(
     ctx,
     proj,
-    -2.5,
-    -2.5,
-    145,
-    109,
-    -5.5 * zoom,
-    5.5 * zoom,
-    { roof: "#1e293b", left: "#334155", right: "#1e293b", accent: "#475569" },
-    "rgba(56, 189, 248, 0.35)",
-    1.4,
+    4,
+    102.5,
+    132,
+    3.5,
+    -2.5 * zoom,
+    2.6 * zoom,
+    { roof: "#8c949e", left: "#717882", right: "#575e66", accent: "#cbd5e1" },
+    "rgba(51, 65, 85, 0.45)",
+    0.9,
   );
-  drawGroundQuad(ctx, proj, 0, 0, 140, 104, 0.05, "#0f172a", "rgba(148, 163, 184, 0.25)", 1);
 
+  const plateauFill = analytical
+    ? timeOfDay === "night"
+      ? "#334155"
+      : "#cbd5e1"
+    : timeOfDay === "night"
+      ? "#244430"
+      : timeOfDay === "golden"
+        ? "#618647"
+        : "#629a4f";
+  drawGroundQuad(ctx, proj, -1, -1, 142, 106, 0.12, plateauFill, "rgba(100, 116, 139, 0.28)", 0.8);
+
+  // 3. Asphalt avenues, lane markings & crosswalks
   if (streetLines && (streetLines.xLines.length > 0 || streetLines.zLines.length > 0)) {
+    const asphaltCol = timeOfDay === "night" ? "#2a3038" : "#495059";
+    for (const xl of streetLines.xLines) {
+      drawGroundQuad(ctx, proj, xl - 1.1, 0.6, 2.2, 102.8, 0.14, asphaltCol, null);
+    }
+    for (const zl of streetLines.zLines) {
+      drawGroundQuad(ctx, proj, 0.6, zl - 1.1, 138.8, 2.2, 0.14, asphaltCol, null);
+    }
+
     ctx.save();
-    ctx.strokeStyle = "rgba(250, 204, 21, 0.28)";
+    ctx.strokeStyle = "rgba(245, 204, 86, 0.72)";
     ctx.lineWidth = Math.max(0.8, 1.1 * zoom);
     ctx.setLineDash([4 * zoom, 4 * zoom]);
     for (const xl of streetLines.xLines) {
-      const a = proj.project(xl, 1.2, 0.15);
-      const b = proj.project(xl, 102.8, 0.15);
+      const a = proj.project(xl, 1.2, 0.16);
+      const b = proj.project(xl, 102.8, 0.16);
       ctx.beginPath();
       ctx.moveTo(a.x, a.y);
       ctx.lineTo(b.x, b.y);
       ctx.stroke();
     }
     for (const zl of streetLines.zLines) {
-      const a = proj.project(1.2, zl, 0.15);
-      const b = proj.project(138.8, zl, 0.15);
+      const a = proj.project(1.2, zl, 0.16);
+      const b = proj.project(138.8, zl, 0.16);
       ctx.beginPath();
       ctx.moveTo(a.x, a.y);
       ctx.lineTo(b.x, b.y);
@@ -811,91 +998,167 @@ export function renderCityScene(args: RenderCitySceneArgs): HitBuilding[] {
     }
     ctx.setLineDash([]);
 
-    if (zoom >= 0.72) {
-      const phase = Math.floor(timeSec * 0.5) % 2 === 0;
+    if (zoom >= 0.65) {
       for (let xi = 0; xi < streetLines.xLines.length; xi++) {
         for (let zi = 0; zi < streetLines.zLines.length; zi++) {
           const ix = streetLines.xLines[xi];
           const iz = streetLines.zLines[zi];
-          ctx.strokeStyle = "rgba(226, 232, 240, 0.36)";
+          drawGroundQuad(ctx, proj, ix - 1.15, iz - 1.15, 2.3, 2.3, 0.15, asphaltCol, null);
+          ctx.strokeStyle = "rgba(241, 245, 249, 0.65)";
           ctx.lineWidth = Math.max(0.8, 1.2 * zoom);
           for (const d of [-0.6, 0, 0.6]) {
-            const c0 = proj.project(ix + d, iz - 1.25, 0.18);
-            const c1 = proj.project(ix + d, iz - 0.85, 0.18);
+            const c0 = proj.project(ix + d, iz - 1.55, 0.18);
+            const c1 = proj.project(ix + d, iz - 1.15, 0.18);
             ctx.beginPath();
             ctx.moveTo(c0.x, c0.y);
             ctx.lineTo(c1.x, c1.y);
             ctx.stroke();
           }
-          const sig = proj.project(ix + 1.2, iz + 1.2, 2.2 * zoom);
-          ctx.beginPath();
-          ctx.arc(sig.x, sig.y, Math.max(1.2, 1.8 * zoom), 0, Math.PI * 2);
-          ctx.fillStyle = (phase ? (xi + zi) % 2 === 0 : (xi + zi) % 2 === 1)
-            ? "#4ade80"
-            : "#ef4444";
-          ctx.fill();
+          if (timeOfDay !== "day") {
+            const lamp = proj.project(ix + 1.35, iz + 1.35, 1.5 * zoom);
+            ctx.beginPath();
+            ctx.arc(lamp.x, lamp.y, Math.max(1.8, 3.2 * zoom), 0, Math.PI * 2);
+            ctx.fillStyle = "rgba(253, 224, 71, 0.45)";
+            ctx.fill();
+          }
         }
       }
     }
     ctx.restore();
   }
 
-  // 3. Waterfront supply docks & moored barges
+  const atlas = spriteAtlas.ensureLoaded();
+  const placements = getCachedNaturePlacements(districts, files, plazas, streetLines);
+
+  // 4. Waterfront supply docks, moored cargo ships & outer bay sailboats
   const directDeps = deps.filter((d) => d.is_direct).slice(0, 8);
   directDeps.forEach((dep, idx) => {
     const dockX = 10 + idx * 16;
-    const dockZ = 107;
+    const dockZ = 106;
     drawIsoPrism(
       ctx,
       proj,
       dockX,
       dockZ,
-      11,
-      5.5,
-      -2 * zoom,
-      4 * zoom,
-      { roof: "#92400e", left: "#78350f", right: "#451a03", accent: "#fbbf24" },
-      "rgba(251, 191, 36, 0.45)",
-      0.9,
+      10,
+      5.2,
+      -1.2 * zoom,
+      2.2 * zoom,
+      { roof: "#9b7653", left: "#7c5b3e", right: "#5c422c", accent: "#d4b483" },
+      "rgba(71, 51, 33, 0.55)",
+      0.8,
     );
-    const bobY = Math.sin(timeSec * 1.6 + idx * 1.1) * 0.7 * zoom;
     drawIsoPrism(
       ctx,
       proj,
-      dockX + 2.2,
-      dockZ + 6.4,
-      6.5,
-      2.6,
-      (-1.2 + bobY) * zoom,
-      2.6 * zoom,
-      { roof: "#38bdf8", left: "#0284c7", right: "#075985", accent: "#fde047" },
-      "rgba(226, 232, 240, 0.4)",
+      dockX + 0.8,
+      dockZ + 0.8,
+      2.8,
+      1.8,
+      1.0 * zoom,
+      1.6 * zoom,
+      { roof: "#b36247", left: "#cbd5e1", right: "#94a3b8", accent: "#f8fafc" },
+      "rgba(51, 65, 85, 0.4)",
       0.7,
     );
+
+    const bobY = Math.sin(timeSec * 1.6 + idx * 1.1) * 0.45 * zoom;
+    if (atlas.ready && atlas.nature) {
+      const shipSp = proj.project(dockX + 5.2, dockZ + 8.4, bobY);
+      const sScale = Math.max(0.35, 0.72 * zoom);
+      const rect = spriteAtlas.getNatureSpriteRect(4 + (proj.compassStep % 2), 1);
+      ctx.drawImage(
+        atlas.nature,
+        rect.sx,
+        rect.sy,
+        rect.sw,
+        rect.sh,
+        shipSp.x - NATURE_ANCHOR_X * sScale,
+        shipSp.y - NATURE_ANCHOR_Y * sScale,
+        NATURE_CELL_W * sScale,
+        NATURE_CELL_H * sScale,
+      );
+    } else {
+      drawIsoPrism(
+        ctx,
+        proj,
+        dockX + 2.2,
+        dockZ + 6.4,
+        6.5,
+        2.6,
+        (-1.0 + bobY) * zoom,
+        2.2 * zoom,
+        { roof: "#d97706", left: "#334155", right: "#1e293b", accent: "#f1f5f9" },
+        "rgba(226, 232, 240, 0.4)",
+        0.7,
+      );
+    }
     if (zoom >= 0.7) {
-      const lbl = proj.project(dockX + 5.5, dockZ + 3, 5 * zoom);
-      ctx.fillStyle = "rgba(226, 232, 240, 0.85)";
-      ctx.font = `${Math.max(8, Math.round(9 * zoom))}px ui-monospace, monospace`;
+      const lbl = proj.project(dockX + 5.2, dockZ + 3.2, 4.2 * zoom);
+      ctx.fillStyle = "rgba(15, 23, 42, 0.78)";
+      const txt = dep.package_name.slice(0, 14);
+      ctx.font = `600 ${Math.max(8, Math.round(9 * zoom))}px ui-monospace, monospace`;
       ctx.textAlign = "center";
-      ctx.fillText(dep.package_name.slice(0, 14), lbl.x, lbl.y);
+      const tw = ctx.measureText(txt).width + 6;
+      ctx.fillRect(lbl.x - tw * 0.5, lbl.y - 8, tw, 11);
+      ctx.fillStyle = "#f1f5f9";
+      ctx.fillText(txt, lbl.x, lbl.y);
     }
   });
 
-  // 4. Sidewalks, zoned districts, plazas & demolished ghost lots
+  if (atlas.ready && atlas.nature) {
+    const natureImg = atlas.nature;
+    placements.sailboats.forEach((sb, idx) => {
+      const bob = Math.sin(timeSec * 1.8 + idx * 1.5) * 0.35 * zoom;
+      const p = proj.project(sb.x + WORLD_CENTER_X, sb.z + WORLD_CENTER_Z, bob);
+      const sc = Math.max(0.28, 0.48 * sb.scale * zoom);
+      const rect = spriteAtlas.getNatureSpriteRect(6 + (idx % 2), 1);
+      ctx.drawImage(
+        natureImg,
+        rect.sx,
+        rect.sy,
+        rect.sw,
+        rect.sh,
+        p.x - NATURE_ANCHOR_X * sc,
+        p.y - NATURE_ANCHOR_Y * sc,
+        NATURE_CELL_W * sc,
+        NATURE_CELL_H * sc,
+      );
+    });
+  }
+
+  // 5. Concrete sidewalks, natural zoned districts, plazas & demolished ghost lots
   for (const dist of districts) {
     const zStyle = ZONE_PALETTES[dist.zone_type] ?? ZONE_PALETTES.downtown_core;
     drawGroundQuad(
       ctx,
       proj,
-      dist.bounds_x - 0.35,
-      dist.bounds_z - 0.35,
-      dist.bounds_w + 0.7,
-      dist.bounds_d + 0.7,
+      dist.bounds_x - 0.4,
+      dist.bounds_z - 0.4,
+      dist.bounds_w + 0.8,
+      dist.bounds_d + 0.8,
       0.2,
-      "#334155",
-      "rgba(148, 163, 184, 0.28)",
-      0.8,
+      timeOfDay === "night" ? "#64748b" : "#cfd5dd",
+      "rgba(100, 116, 139, 0.32)",
+      0.7,
     );
+
+    const distFill = analytical
+      ? timeOfDay === "night"
+        ? "#475569"
+        : "#dbe0e6"
+      : dist.zone_type === "downtown_core"
+        ? timeOfDay === "night"
+          ? "#555f6b"
+          : "#c8ced6"
+        : dist.zone_type === "industrial_quarter" || dist.zone_type === "supply_docks"
+          ? timeOfDay === "night"
+            ? "#4b4b48"
+            : "#b4afa5"
+          : timeOfDay === "night"
+            ? "#244732"
+            : zStyle.ground;
+    const distStroke = analytical ? zStyle.border : "rgba(100, 116, 139, 0.25)";
     drawGroundQuad(
       ctx,
       proj,
@@ -903,24 +1166,17 @@ export function renderCityScene(args: RenderCitySceneArgs): HitBuilding[] {
       dist.bounds_z,
       dist.bounds_w,
       dist.bounds_d,
-      0.32,
-      zStyle.fill,
-      zStyle.border,
-      1.1,
+      0.3,
+      distFill,
+      distStroke,
+      analytical ? 1.2 : 0.7,
     );
   }
 
   for (const pz of plazas) {
     const fill =
-      pz.kind === "loading_bay" ? "#3f2e21" : pz.kind === "courtyard" ? "#1b4332" : "#273549";
-    drawGroundQuad(ctx, proj, pz.x, pz.z, pz.w, pz.d, 0.38, fill, "rgba(148, 163, 184, 0.35)", 0.7);
-    if (zoom >= 0.75 && pz.kind !== "loading_bay") {
-      const tp = proj.project(pz.x + pz.w * 0.5, pz.z + pz.d * 0.5, 3.5 * zoom);
-      ctx.beginPath();
-      ctx.arc(tp.x, tp.y, Math.max(2, 3.2 * zoom), 0, Math.PI * 2);
-      ctx.fillStyle = "#22c55e";
-      ctx.fill();
-    }
+      pz.kind === "loading_bay" ? "#8c8478" : pz.kind === "courtyard" ? "#5b934c" : "#d0d5dc";
+    drawGroundQuad(ctx, proj, pz.x, pz.z, pz.w, pz.d, 0.34, fill, "rgba(100, 116, 139, 0.35)", 0.7);
   }
 
   for (const lot of removedLots) {
@@ -944,10 +1200,10 @@ export function renderCityScene(args: RenderCitySceneArgs): HitBuilding[] {
 
   const fileByPath = new Map(files.map((f) => [f.file_path, f]));
 
-  // 5. Traffic pulses or simulation vehicles
+  // 6. Traffic pulses or baked 3D vehicle sprites
   if (showTraffic && imports.length > 0 && vehicles.length === 0) {
     ctx.save();
-    const maxEdges = Math.min(80, imports.length);
+    const maxEdges = Math.min(60, imports.length);
     for (let i = 0; i < maxEdges; i++) {
       const edge = imports[i];
       const src = fileByPath.get(edge.source_file);
@@ -963,13 +1219,6 @@ export function renderCityScene(args: RenderCitySceneArgs): HitBuilding[] {
         dst.layout_z + dst.layout_d * 0.5,
         2,
       );
-      ctx.beginPath();
-      ctx.moveTo(pA.x, pA.y);
-      ctx.lineTo(pB.x, pB.y);
-      ctx.strokeStyle = "rgba(56, 189, 248, 0.14)";
-      ctx.lineWidth = 1;
-      ctx.stroke();
-
       const t = (timeSec * 0.45 + i * 0.17) % 1;
       ctx.beginPath();
       ctx.arc(
@@ -979,7 +1228,7 @@ export function renderCityScene(args: RenderCitySceneArgs): HitBuilding[] {
         0,
         Math.PI * 2,
       );
-      ctx.fillStyle = "rgba(125, 211, 252, 0.78)";
+      ctx.fillStyle = "rgba(255, 255, 255, 0.72)";
       ctx.fill();
     }
     ctx.restore();
@@ -989,34 +1238,112 @@ export function renderCityScene(args: RenderCitySceneArgs): HitBuilding[] {
     ctx.save();
     const flash = timeSec % 0.4 >= 0.2;
     for (const v of vehicles) {
-      const p = proj.project(v.x, v.z, 1.5);
-      const size = Math.max(2.2, (v.type === "cargo_ship" ? 4.8 : 2.8) * zoom);
-      ctx.beginPath();
-      if (v.type === "cargo_ship") {
-        ctx.rect(p.x - size * 1.4, p.y - size * 0.7, size * 2.8, size * 1.4);
+      const p = proj.project(v.x, v.z, 0.35);
+      if (atlas.ready && atlas.nature && v.type === "request_car" && zoom >= 0.6 && !v.jammed) {
+        const carCol = hashFilePath(v.id) % 4;
+        const sc = Math.max(0.18, 0.26 * zoom);
+        const rect = spriteAtlas.getNatureSpriteRect(carCol, 1);
+        ctx.drawImage(
+          atlas.nature,
+          rect.sx,
+          rect.sy,
+          rect.sw,
+          rect.sh,
+          p.x - NATURE_ANCHOR_X * sc,
+          p.y - NATURE_ANCHOR_Y * sc,
+          NATURE_CELL_W * sc,
+          NATURE_CELL_H * sc,
+        );
       } else {
-        ctx.arc(p.x, p.y, size, 0, Math.PI * 2);
+        const size = Math.max(2.2, (v.type === "cargo_ship" ? 4.8 : 2.6) * zoom);
+        ctx.beginPath();
+        if (v.type === "cargo_ship") {
+          ctx.rect(p.x - size * 1.4, p.y - size * 0.7, size * 2.8, size * 1.4);
+        } else {
+          ctx.arc(p.x, p.y, size, 0, Math.PI * 2);
+        }
+        ctx.fillStyle = vehicleColor(v.type, v.jammed, flash);
+        ctx.fill();
       }
-      ctx.fillStyle = vehicleColor(v.type, v.jammed, flash);
-      ctx.fill();
     }
     ctx.restore();
   }
 
-  // 6. Depth-sorted buildings & hitboxes
+  // 7. Depth-sorted buildings, trees & coastal boulders
   const impactedHop = buildImpactedHopMap(blastRadius);
-  const sortedFiles = [...files].sort((a, b) => {
-    const da =
-      (a.layout_x + a.layout_w * 0.5 - WORLD_CENTER_X) * proj.viewX +
-      (a.layout_z + a.layout_d * 0.5 - WORLD_CENTER_Z) * proj.viewZ;
-    const db =
-      (b.layout_x + b.layout_w * 0.5 - WORLD_CENTER_X) * proj.viewX +
-      (b.layout_z + b.layout_d * 0.5 - WORLD_CENTER_Z) * proj.viewZ;
-    return da - db;
-  });
+  const drawables: DepthDrawable[] = [];
+
+  for (const file of files) {
+    const depth =
+      (file.layout_x + file.layout_w * 0.5 - WORLD_CENTER_X) * proj.viewX +
+      (file.layout_z + file.layout_d * 0.5 - WORLD_CENTER_Z) * proj.viewZ;
+    drawables.push({ depth, kind: "building", file });
+  }
+  for (const tree of placements.trees) {
+    const depth = tree.x * proj.viewX + tree.z * proj.viewZ;
+    drawables.push({ depth, kind: "tree", tree });
+  }
+  for (const rock of placements.rocks) {
+    const depth = rock.x * proj.viewX + rock.z * proj.viewZ;
+    drawables.push({ depth, kind: "rock", rock });
+  }
+  drawables.sort((a, b) => a.depth - b.depth);
 
   const hits: HitBuilding[] = [];
-  for (const file of sortedFiles) {
+  for (const item of drawables) {
+    if (item.kind === "rock") {
+      if (atlas.ready && atlas.nature) {
+        const p = proj.project(
+          item.rock.x + WORLD_CENTER_X,
+          item.rock.z + WORLD_CENTER_Z,
+          item.rock.y,
+        );
+        const sc = Math.max(0.2, 0.34 * zoom);
+        const rect = spriteAtlas.getNatureSpriteRect(7, 0);
+        ctx.drawImage(
+          atlas.nature,
+          rect.sx,
+          rect.sy,
+          rect.sw,
+          rect.sh,
+          p.x - NATURE_ANCHOR_X * sc,
+          p.y - NATURE_ANCHOR_Y * sc,
+          NATURE_CELL_W * sc,
+          NATURE_CELL_H * sc,
+        );
+      }
+      continue;
+    }
+
+    if (item.kind === "tree") {
+      const tr = item.tree;
+      const p = proj.project(tr.x + WORLD_CENTER_X, tr.z + WORLD_CENTER_Z, Math.max(0.2, tr.y));
+      if (atlas.ready && atlas.nature) {
+        const h = hashFilePath(`tr:${tr.x.toFixed(1)}:${tr.z.toFixed(1)}`);
+        const col = tr.isPine ? 4 + (h % 3) : h % 4;
+        const sc = Math.max(0.22, 0.38 * tr.scale * zoom);
+        const rect = spriteAtlas.getNatureSpriteRect(col, 0);
+        ctx.drawImage(
+          atlas.nature,
+          rect.sx,
+          rect.sy,
+          rect.sw,
+          rect.sh,
+          p.x - NATURE_ANCHOR_X * sc,
+          p.y - NATURE_ANCHOR_Y * sc,
+          NATURE_CELL_W * sc,
+          NATURE_CELL_H * sc,
+        );
+      } else {
+        ctx.beginPath();
+        ctx.arc(p.x, p.y - 3 * zoom, Math.max(2.2, 3.6 * tr.scale * zoom), 0, Math.PI * 2);
+        ctx.fillStyle = tr.color;
+        ctx.fill();
+      }
+      continue;
+    }
+
+    const file = item.file;
     const pad = Math.min(0.42, Math.min(file.layout_w, file.layout_d) * 0.12);
     const rawW = Math.max(0.85, file.layout_w - pad * 2);
     const rawD = Math.max(0.85, file.layout_d - pad * 2);
@@ -1028,32 +1355,38 @@ export function renderCityScene(args: RenderCitySceneArgs): HitBuilding[] {
 
     const isSelected = selectedFile === file.file_path;
     const isHovered = hoveredFile === file.file_path;
+    const isAdded = addedFiles.has(file.file_path);
     const hop = impactedHop.get(file.file_path);
 
     let palette = buildingPalette(file, dataMap);
-    let stroke = "rgba(15, 23, 42, 0.72)";
-    if (addedFiles.has(file.file_path)) {
-      palette = { roof: "#6ee7b7", left: "#10b981", right: "#065f46", accent: "#d1fae5" };
-      stroke = "#34d399";
-    }
+    let stroke = isAdded ? "rgba(16, 185, 129, 0.85)" : "rgba(15, 23, 42, 0.65)";
+    let hasHighlightStroke = false;
+    let isHopHighlight = false;
 
     let alpha = 1.0;
     if (selectedFile && blastRadius) {
       if (isSelected) {
         stroke = "#fef08a";
+        hasHighlightStroke = true;
       } else if (hop === 1) {
         palette = { roof: "#fde047", left: "#f59e0b", right: "#b45309", accent: "#fef9c3" };
         stroke = "#fbbf24";
+        hasHighlightStroke = true;
+        isHopHighlight = true;
       } else if (hop !== undefined && hop >= 2) {
         palette = { roof: "#7dd3fc", left: "#0284c7", right: "#0369a1", accent: "#e0f2fe" };
         stroke = "#38bdf8";
+        hasHighlightStroke = true;
+        isHopHighlight = true;
       } else {
         alpha = 0.28;
       }
     } else if (isSelected) {
       stroke = "#fef08a";
+      hasHighlightStroke = true;
     } else if (isHovered) {
       stroke = "#ffffff";
+      hasHighlightStroke = true;
     }
 
     ctx.save();
@@ -1072,6 +1405,9 @@ export function renderCityScene(args: RenderCitySceneArgs): HitBuilding[] {
       timeSec,
       timeOfDay,
       stroke,
+      hasHighlightStroke,
+      isHopHighlight,
+      isAdded,
       fireFiles?.has(file.file_path) ?? false,
       blackoutFiles?.has(file.file_path) ?? false,
     );
@@ -1102,7 +1438,21 @@ export function renderCityScene(args: RenderCitySceneArgs): HitBuilding[] {
     hits.push({ file, minX: minX - 3, maxX: maxX + 3, minY: minY - 3, maxY: maxY + 3 });
   }
 
-  // 7. Co-change fault lines
+  // 8. Soft drifting daylight cloud shadows across the landscape
+  if (timeOfDay === "day") {
+    ctx.save();
+    ctx.fillStyle = "rgba(15, 23, 42, 0.055)";
+    for (let i = 0; i < 4; i++) {
+      const cx = ((timeSec * 14 + i * 380) % (width + 520)) - 260;
+      const cy = height * (0.18 + i * 0.21) + Math.sin(timeSec * 0.2 + i) * 24;
+      ctx.beginPath();
+      ctx.ellipse(cx, cy, 175 * zoom, 65 * zoom, -0.22, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  // 9. Co-change fault lines (only when selected or blast radius active)
   const faultSource = selectFaultLines(cochanges, selectedFile, blastRadius);
   if (faultSource.length > 0) {
     ctx.save();
@@ -1132,7 +1482,7 @@ export function renderCityScene(args: RenderCitySceneArgs): HitBuilding[] {
     ctx.restore();
   }
 
-  // 8. District plaques
+  // 10. District plaques
   if (zoom >= 0.6) {
     ctx.save();
     ctx.textAlign = "center";
@@ -1149,15 +1499,15 @@ export function renderCityScene(args: RenderCitySceneArgs): HitBuilding[] {
           ? `…/${dist.display_name.split("/").slice(-1)[0]}`
           : dist.display_name;
       const tw = ctx.measureText(label).width + 10;
-      ctx.fillStyle = "rgba(7, 11, 20, 0.72)";
+      ctx.fillStyle = "rgba(15, 23, 42, 0.76)";
       ctx.fillRect(center.x - tw * 0.5, center.y - 8, tw, 15);
-      ctx.fillStyle = ZONE_PALETTES[dist.zone_type]?.border ?? "#e2e8f0";
+      ctx.fillStyle = analytical ? (ZONE_PALETTES[dist.zone_type]?.border ?? "#e2e8f0") : "#f1f5f9";
       ctx.fillText(label, center.x, center.y + 3);
     }
     ctx.restore();
   }
 
-  // 9. Floating stat popups
+  // 11. Floating stat popups
   if (floatingPopups.length > 0) {
     ctx.save();
     ctx.font = "700 12px Inter, sans-serif";
