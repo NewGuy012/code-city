@@ -414,6 +414,10 @@ export default function CityCanvas3D({
         activeCamera.updateProjectionMatrix();
       }
       controls.update();
+      if (camState.roll !== 0) {
+        activeCamera.rotateZ((camState.roll * Math.PI) / 180);
+      }
+      activeCamera.updateMatrixWorld();
       syncingFromStore = false;
     };
 
@@ -542,6 +546,11 @@ export default function CityCanvas3D({
       });
       if (activeCamera.position.y < 1.8) activeCamera.position.y = 1.8;
       controls.update();
+      const rollDeg = cameraStore.getState().roll;
+      if (rollDeg !== 0) {
+        activeCamera.rotateZ((rollDeg * Math.PI) / 180);
+        activeCamera.updateMatrixWorld();
+      }
       renderer.render(scene, activeCamera);
       raf = requestAnimationFrame(animate);
     };
@@ -845,6 +854,7 @@ export default function CityCanvas3D({
           x={hoveredHit.x}
           y={hoveredHit.y}
           containerWidth={containerRef.current?.clientWidth}
+          containerHeight={containerRef.current?.clientHeight}
         />
       )}
     </div>

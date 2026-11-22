@@ -193,6 +193,7 @@ export function CityCanvas2D({
             latestCam.zoom,
             latestCam.yaw,
             latestCam.pitch,
+            latestCam.roll,
           );
 
           const ctx = canvas.getContext("2d");
@@ -259,14 +260,28 @@ export function CityCanvas2D({
         ly,
         rect.width,
         rect.height,
-        cameraFromTarget(state.targetX, state.targetZ, state.zoom, state.yaw, state.pitch),
+        cameraFromTarget(
+          state.targetX,
+          state.targetZ,
+          state.zoom,
+          state.yaw,
+          state.pitch,
+          state.roll,
+        ),
       );
       const afterPt = screenToWorldGround(
         lx,
         ly,
         rect.width,
         rect.height,
-        cameraFromTarget(state.targetX, state.targetZ, nextZoom, state.yaw, state.pitch),
+        cameraFromTarget(
+          state.targetX,
+          state.targetZ,
+          nextZoom,
+          state.yaw,
+          state.pitch,
+          state.roll,
+        ),
       );
       cameraStore.setState({
         zoom: nextZoom,
@@ -351,6 +366,7 @@ export function CityCanvas2D({
           state.zoom,
           state.yaw,
           state.pitch,
+          state.roll,
         );
         const pStart = screenToWorldGround(w * 0.5, h * 0.52, w, h, baseCam);
         const pDragged = screenToWorldGround(w * 0.5 - dx, h * 0.52 - dy, w, h, baseCam);
@@ -415,6 +431,7 @@ export function CityCanvas2D({
           x={hoveredHit.x}
           y={hoveredHit.y}
           containerWidth={containerRef.current?.clientWidth}
+          containerHeight={containerRef.current?.clientHeight}
         />
       )}
     </div>

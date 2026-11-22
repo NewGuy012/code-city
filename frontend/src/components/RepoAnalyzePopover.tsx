@@ -55,7 +55,7 @@ export function RepoAnalyzePopover({
 
   return (
     <div
-      className={`sim-panel pointer-events-auto relative flex h-10 items-center gap-1.5 rounded-xl px-2 ${
+      className={`sim-panel pointer-events-auto relative flex h-10 min-w-0 max-w-full items-center gap-1.5 rounded-xl px-2 ${
         isOpen ? "z-40" : ""
       }`}
     >
@@ -82,7 +82,7 @@ export function RepoAnalyzePopover({
         {!isStaticMode && isOpen && (
           <div
             data-testid="repo-analyze-popover"
-            className="sim-popover absolute top-full left-0 z-40 mt-2 w-80 rounded-2xl p-3 text-xs"
+            className="sim-popover sim-scrollbar absolute top-full left-0 z-40 mt-2 max-h-[calc(var(--hud-vh,100vh)-5rem)] w-[min(20rem,calc(var(--hud-vw,100vw)-1.5rem))] overflow-y-auto rounded-2xl p-3 text-xs"
           >
             {repos.length > 0 && (
               <div className="mb-3">

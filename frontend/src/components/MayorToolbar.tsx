@@ -156,7 +156,7 @@ export function MayorToolbar({
     <>
       <aside
         data-testid="mayor-toolbar"
-        className={`sim-panel pointer-events-auto flex w-11 flex-col items-center gap-1 rounded-2xl p-1.5 text-xs ${
+        className={`sim-panel pointer-events-auto flex max-h-full min-w-11 w-fit flex-col flex-wrap content-start items-center gap-0.5 rounded-2xl p-1.5 text-xs ${
           isModePopoverOpen ? "z-40" : ""
         } ${className}`}
       >
@@ -189,7 +189,7 @@ export function MayorToolbar({
           {isModePopoverOpen && (
             <div
               data-testid="mayor-mode-popover"
-              className="sim-popover absolute top-0 left-full z-40 ml-2.5 w-60 rounded-2xl p-3 text-xs"
+              className="sim-popover sim-scrollbar absolute top-0 left-full z-40 ml-2.5 max-h-[calc(var(--hud-vh,100vh)-6rem)] w-[min(15rem,calc(var(--hud-vw,100vw)-4.5rem))] overflow-y-auto rounded-2xl p-3 text-xs"
             >
               <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-slate-400">
                 Execution Mode

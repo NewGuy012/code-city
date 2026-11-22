@@ -27,7 +27,7 @@ export function OnboardingTour({
   return (
     <div
       data-testid="onboarding-tour"
-      className={`sim-popover pointer-events-auto w-80 max-w-[calc(100vw-5.5rem)] rounded-2xl p-3.5 sm:w-96 ${className}`}
+      className={`sim-popover sim-scrollbar pointer-events-auto max-h-full w-80 max-w-[calc(var(--hud-vw,100vw)-5.5rem)] overflow-y-auto rounded-2xl p-3.5 sm:w-96 ${className}`}
     >
       <div className="flex items-start justify-between gap-2">
         <div className="flex items-center gap-2">

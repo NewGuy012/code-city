@@ -105,7 +105,7 @@ export function DataMapBar({
           data-testid="datamap-dropdown-btn"
           onClick={onTogglePopover}
           title="Switch city data map lens"
-          className="sim-panel flex h-10 items-center gap-2 rounded-xl px-3 text-xs font-medium text-white transition hover:bg-white/[0.06]"
+          className="sim-panel flex h-10 shrink-0 items-center gap-2 whitespace-nowrap rounded-xl px-3 text-xs font-medium text-white transition hover:bg-white/[0.06]"
         >
           <Layers className="h-3.5 w-3.5 text-slate-400" />
           <CurrentIcon className={`h-3.5 w-3.5 ${current.accent}`} />
@@ -118,7 +118,7 @@ export function DataMapBar({
         </button>
 
         {isPopoverOpen && (
-          <div className="sim-popover absolute top-full left-1/2 z-40 mt-2 grid w-72 -translate-x-1/2 grid-cols-2 gap-1.5 rounded-2xl p-2 text-xs">
+          <div className="sim-popover sim-scrollbar absolute top-full left-1/2 z-40 mt-2 grid max-h-[calc(var(--hud-vh,100vh)-5rem)] w-[min(18rem,calc(var(--hud-vw,100vw)-1.5rem))] -translate-x-1/2 grid-cols-2 gap-1.5 overflow-y-auto rounded-2xl p-2 text-xs">
             {DATA_MAPS.map((item) => {
               const Icon = item.icon;
               const active = dataMap === item.id;

@@ -138,7 +138,7 @@ export function TimeScrubber({
   return (
     <div
       data-testid="time-scrubber"
-      className="sim-popover pointer-events-auto flex w-[min(520px,calc(100vw-1.5rem))] flex-col gap-2 rounded-2xl px-3.5 py-2.5 text-xs"
+      className="sim-popover pointer-events-auto flex w-[min(520px,calc(var(--hud-vw,100vw)-1.5rem))] flex-col gap-2 rounded-2xl px-3.5 py-2.5 text-xs"
     >
       <div className="flex items-center gap-2">
         <div className="flex items-center gap-1">

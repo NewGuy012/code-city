@@ -19,8 +19,10 @@ import { RepoAnalyzePopover } from "./components/RepoAnalyzePopover";
 import { TimeScrubber } from "./components/TimeScrubber";
 import {
   type HudPopoverId,
+  getHudShellStyle,
   isTypingTarget,
   usePopoverOutsideDismiss,
+  useViewportHudMetrics,
 } from "./components/hudPopover";
 import {
   type CitySnapshotBundle,
@@ -99,6 +101,8 @@ export function App() {
   const effectiveBundle = overlayResult?.bundle ?? null;
 
   useUnifiedCameraHotkeys(viewMode);
+  const hudMetrics = useViewportHudMetrics();
+  const hudShellStyle = useMemo(() => getHudShellStyle(hudMetrics), [hudMetrics]);
 
   // Close SSE streams and DuckDB-Wasm worker on unmount
   useEffect(() => {
@@ -860,8 +864,8 @@ export function App() {
           </Suspense>
         )
       ) : (
-        <div className="flex h-full w-full items-center justify-center">
-          <div className="sim-panel flex max-w-md flex-col items-center gap-3 rounded-2xl p-8 text-center">
+        <div className="flex h-full w-full items-center justify-center p-4">
+          <div className="sim-panel flex max-h-full max-w-md flex-col items-center gap-3 overflow-y-auto rounded-2xl p-6 text-center sm:p-8">
             <Building2 className="h-10 w-10 text-amber-400" />
             <h2 className="text-lg font-bold">Welcome to CodeCity</h2>
             <p className="text-sm text-slate-300">
@@ -892,6 +896,11 @@ export function App() {
           type="button"
           data-testid="exit-zen-btn"
           onClick={() => setZenMode(false)}
+          style={
+            hudMetrics.scale < 1
+              ? { transform: `scale(${hudMetrics.scale})`, transformOrigin: "top right" }
+              : undefined
+          }
           className="sim-panel fixed top-3 right-3 z-30 flex items-center gap-1.5 rounded-xl px-2.5 py-1.5 text-[11px] font-medium text-slate-300 opacity-45 transition hover:text-white hover:opacity-100"
           title="Restore UI (H or Esc)"
         >
@@ -902,10 +911,14 @@ export function App() {
 
       {/* Zero-Overlap 3-Row Grid HUD Shell */}
       {!zenMode && (
-        <div className="pointer-events-none fixed inset-0 z-20 grid grid-rows-[auto_1fr_auto] gap-2.5 p-3">
-          {/* Row 1: Unified Single-Row Top Bar + Optional Transient Centered Chips */}
-          <header className="relative z-30 flex flex-col gap-2">
-            <div className="flex items-center justify-between gap-2">
+        <div
+          data-testid="hud-shell"
+          style={hudShellStyle}
+          className="pointer-events-none fixed top-0 left-0 z-20 grid h-full w-full grid-cols-[minmax(0,1fr)] grid-rows-[auto_1fr_auto] gap-2.5 p-3"
+        >
+          {/* Row 1: Unified Top Bar + Optional Transient Centered Chips */}
+          <header className="relative z-30 flex min-w-0 flex-col gap-2">
+            <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
               <RepoAnalyzePopover
                 repos={repos}
                 activeRepo={activeRepo}
@@ -1061,64 +1074,66 @@ export function App() {
           </header>
 
           {/* Row 2: 1fr Middle Zone — 44px Left Rail | Open Canvas | 320px Right Inspector */}
-          <div className="relative z-20 flex min-h-0 items-center justify-between gap-3">
-            {effectiveBundle ? (
-              <MayorToolbar
-                activeTool={activeTool}
-                onSelectTool={(t) => {
-                  setActiveTool(t);
-                  setPendingTransitStart(null);
-                }}
-                actions={sandboxActions}
-                isStaticMode={isStaticMode}
-                liveMode={liveMode}
-                liveBranchName={liveBranchName}
-                coopSyncEnabled={coopSyncEnabled}
-                repoLabel={activeRepo ? `${activeRepo.owner}/${activeRepo.repo}` : "codecity"}
-                baseBundle={bundle}
-                effectiveBundle={effectiveBundle}
-                pendingTransitStart={pendingTransitStart}
-                isModePopoverOpen={openPopover === "mayorMode"}
-                onToggleModePopover={() => togglePopover("mayorMode")}
-                onClosePopover={closePopover}
-                onUndo={() => void handleUndo()}
-                onRedo={() => void handleRedo()}
-                onReset={() => void handleResetSandbox()}
-                onToggleLiveMode={() => {
-                  if (!liveMode && activeRepo && !isStaticMode) {
-                    void client
-                      .startLiveMayorSession(activeRepo.owner, activeRepo.repo)
-                      .then((res) => {
-                        setLiveMode(true);
-                        setLiveBranchName(res.branch);
-                        setToastMsg(`Live Mayor Mode active on branch ${res.branch}`);
-                      })
-                      .catch((err) => {
-                        setToastMsg(err instanceof Error ? err.message : String(err));
-                      });
-                  } else {
-                    setLiveMode(false);
-                    setToastMsg("Switched back to safe Refactor Sandbox Mode");
-                  }
-                }}
-                onToggleCoopSync={() => setCoopSyncEnabled((v) => !v)}
-                className="relative z-30 self-center"
-              />
-            ) : (
-              <span />
-            )}
+          <div className="relative z-20 flex min-h-0 min-w-0 items-center justify-between gap-3">
+            <div className="flex h-full min-h-0 min-w-0 items-center gap-3">
+              {effectiveBundle ? (
+                <MayorToolbar
+                  activeTool={activeTool}
+                  onSelectTool={(t) => {
+                    setActiveTool(t);
+                    setPendingTransitStart(null);
+                  }}
+                  actions={sandboxActions}
+                  isStaticMode={isStaticMode}
+                  liveMode={liveMode}
+                  liveBranchName={liveBranchName}
+                  coopSyncEnabled={coopSyncEnabled}
+                  repoLabel={activeRepo ? `${activeRepo.owner}/${activeRepo.repo}` : "codecity"}
+                  baseBundle={bundle}
+                  effectiveBundle={effectiveBundle}
+                  pendingTransitStart={pendingTransitStart}
+                  isModePopoverOpen={openPopover === "mayorMode"}
+                  onToggleModePopover={() => togglePopover("mayorMode")}
+                  onClosePopover={closePopover}
+                  onUndo={() => void handleUndo()}
+                  onRedo={() => void handleRedo()}
+                  onReset={() => void handleResetSandbox()}
+                  onToggleLiveMode={() => {
+                    if (!liveMode && activeRepo && !isStaticMode) {
+                      void client
+                        .startLiveMayorSession(activeRepo.owner, activeRepo.repo)
+                        .then((res) => {
+                          setLiveMode(true);
+                          setLiveBranchName(res.branch);
+                          setToastMsg(`Live Mayor Mode active on branch ${res.branch}`);
+                        })
+                        .catch((err) => {
+                          setToastMsg(err instanceof Error ? err.message : String(err));
+                        });
+                    } else {
+                      setLiveMode(false);
+                      setToastMsg("Switched back to safe Refactor Sandbox Mode");
+                    }
+                  }}
+                  onToggleCoopSync={() => setCoopSyncEnabled((v) => !v)}
+                  className="relative z-30 self-center"
+                />
+              ) : (
+                <span />
+              )}
 
-            {tourActive && (
-              <OnboardingTour
-                stops={tourStops}
-                stepIndex={tourStep}
-                autoPlaying={tourAutoPlay}
-                onSelectStep={handleSelectTourStep}
-                onToggleAuto={() => setTourAutoPlay((a) => !a)}
-                onClose={() => setTourActive(false)}
-                className="absolute bottom-0 left-14 z-20"
-              />
-            )}
+              {tourActive && (
+                <OnboardingTour
+                  stops={tourStops}
+                  stepIndex={tourStep}
+                  autoPlaying={tourAutoPlay}
+                  onSelectStep={handleSelectTourStep}
+                  onToggleAuto={() => setTourAutoPlay((a) => !a)}
+                  onClose={() => setTourActive(false)}
+                  className="relative z-20 self-end"
+                />
+              )}
+            </div>
 
             <InspectorDrawer
               file={selectedFileMetric}
@@ -1156,7 +1171,7 @@ export function App() {
 
           {/* Row 3: Compact Bottom Dock */}
           {bundle && snapshots.length > 0 ? (
-            <footer className="relative z-30 flex items-end justify-between gap-3">
+            <footer className="relative z-30 flex min-w-0 flex-wrap items-end justify-between gap-2 sm:gap-3">
               <TimeScrubber
                 snapshots={snapshots}
                 snapshotIdx={snapshotIdx}
@@ -1170,7 +1185,7 @@ export function App() {
                 onTogglePlay={() => setIsPlayingTime((p) => !p)}
               />
 
-              <div className="flex flex-col items-end gap-2">
+              <div className="ml-auto flex max-w-full flex-col items-end gap-2">
                 {radarOpen && (
                   <Minimap2D
                     districts={effectiveBundle?.districts ?? bundle.districts}
@@ -1201,74 +1216,80 @@ export function App() {
         </div>
       )}
 
-      <HealthCardModal
-        open={healthModalOpen}
-        report={healthReport}
-        annotations={annotations}
-        isStaticMode={isStaticMode}
-        onFetchQuackSnippet={fetchQuackSnippetCb}
-        onFetchAnnotationChanges={fetchAnnotationChangesCb}
-        onTriggerExport={triggerExportCb}
-        onFocusFile={handleFocusFile}
-        onClose={closeHealthModal}
-      />
+      <div
+        id="codecity-modal-root"
+        className="pointer-events-none fixed top-0 left-0 z-50 h-full w-full"
+        style={hudShellStyle}
+      >
+        <HealthCardModal
+          open={healthModalOpen}
+          report={healthReport}
+          annotations={annotations}
+          isStaticMode={isStaticMode}
+          onFetchQuackSnippet={fetchQuackSnippetCb}
+          onFetchAnnotationChanges={fetchAnnotationChangesCb}
+          onTriggerExport={triggerExportCb}
+          onFocusFile={handleFocusFile}
+          onClose={closeHealthModal}
+        />
 
-      <AdvisorCouncilModal
-        open={advisorsOpen}
-        missions={missions}
-        claimedMissionIds={claimedMissions}
-        onClaimReward={(m) => {
-          setClaimedMissions((prev) => new Set([...prev, m.id]));
-          sim.addVelocity(m.rewardVelocity);
-          sim.spawnFloatingPopup(70, 52, `+${m.rewardVelocity} Velocity!`, "#fde047");
-          soundEngine.playMilestone();
-          setSimState(sim.getSnapshot());
-          setToastMsg(`Quest Completed: ${m.title} (+${m.rewardVelocity} Velocity)`);
-        }}
-        onFocusFile={handleFocusFile}
-        onClose={closeAdvisorsModal}
-      />
+        <AdvisorCouncilModal
+          open={advisorsOpen}
+          missions={missions}
+          claimedMissionIds={claimedMissions}
+          onClaimReward={(m) => {
+            setClaimedMissions((prev) => new Set([...prev, m.id]));
+            sim.addVelocity(m.rewardVelocity);
+            sim.spawnFloatingPopup(70, 52, `+${m.rewardVelocity} Velocity!`, "#fde047");
+            soundEngine.playMilestone();
+            setSimState(sim.getSnapshot());
+            setToastMsg(`Quest Completed: ${m.title} (+${m.rewardVelocity} Velocity)`);
+          }}
+          onFocusFile={handleFocusFile}
+          onClose={closeAdvisorsModal}
+        />
 
-      <DisastersMenu
-        open={disastersOpen}
-        bundle={effectiveBundle}
-        authors={repoAuthors}
-        onTriggerPowerOutage={(targetFile) => {
-          if (!effectiveBundle) return;
-          const impacted = computeImpactedFiles(targetFile, effectiveBundle.imports);
-          const protectedSet = new Set(
-            effectiveBundle.files
-              .filter((f) => overlayResult?.protectedDistricts.has(f.district_path))
-              .map((f) => f.file_path),
-          );
-          sim.triggerPowerOutage(targetFile, impacted, protectedSet);
-          soundEngine.playDisaster();
-          setSimState(sim.getSnapshot());
-          handleFocusFile(targetFile);
-        }}
-        onTriggerBusFactorVacation={(authorLabel, filesList) => {
-          sim.triggerBusFactorVacation(authorLabel, filesList);
-          soundEngine.playDisaster();
-          setSimState(sim.getSnapshot());
-        }}
-        onTriggerCrunchStorm={() => {
-          if (!effectiveBundle) return;
-          sim.triggerCrunchStorm(effectiveBundle);
-          soundEngine.playDisaster();
-          setSimState(sim.getSnapshot());
-        }}
-        onTriggerSupplyDockStorm={(depName) => {
-          if (!effectiveBundle) return;
-          sim.triggerSupplyDockStorm(depName, effectiveBundle);
-          soundEngine.playDisaster();
-          setSimState(sim.getSnapshot());
-        }}
-        onClearDisasters={() => {
-          sim.clearDisaster();
-          setSimState(sim.getSnapshot());
-        }}
-        onClose={closeDisastersModal}
-      />
+        <DisastersMenu
+          open={disastersOpen}
+          bundle={effectiveBundle}
+          authors={repoAuthors}
+          onTriggerPowerOutage={(targetFile) => {
+            if (!effectiveBundle) return;
+            const impacted = computeImpactedFiles(targetFile, effectiveBundle.imports);
+            const protectedSet = new Set(
+              effectiveBundle.files
+                .filter((f) => overlayResult?.protectedDistricts.has(f.district_path))
+                .map((f) => f.file_path),
+            );
+            sim.triggerPowerOutage(targetFile, impacted, protectedSet);
+            soundEngine.playDisaster();
+            setSimState(sim.getSnapshot());
+            handleFocusFile(targetFile);
+          }}
+          onTriggerBusFactorVacation={(authorLabel, filesList) => {
+            sim.triggerBusFactorVacation(authorLabel, filesList);
+            soundEngine.playDisaster();
+            setSimState(sim.getSnapshot());
+          }}
+          onTriggerCrunchStorm={() => {
+            if (!effectiveBundle) return;
+            sim.triggerCrunchStorm(effectiveBundle);
+            soundEngine.playDisaster();
+            setSimState(sim.getSnapshot());
+          }}
+          onTriggerSupplyDockStorm={(depName) => {
+            if (!effectiveBundle) return;
+            sim.triggerSupplyDockStorm(depName, effectiveBundle);
+            soundEngine.playDisaster();
+            setSimState(sim.getSnapshot());
+          }}
+          onClearDisasters={() => {
+            sim.clearDisaster();
+            setSimState(sim.getSnapshot());
+          }}
+          onClose={closeDisastersModal}
+        />
+      </div>
     </div>
   );
 }

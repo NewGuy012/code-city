@@ -14,6 +14,7 @@ export interface CameraBookmark {
   zoom: number;
   yaw: number;
   pitch: number;
+  roll?: number;
   projection: CameraProjection;
   createdAt: string;
 }
@@ -24,6 +25,7 @@ export interface UnifiedCameraState {
   zoom: number;
   yaw: number;
   pitch: number;
+  roll: number;
   projection: CameraProjection;
   timeOfDay: TimeOfDay;
   preset: CameraPresetId;
@@ -38,6 +40,7 @@ export interface FlyToOptions {
   zoom?: number;
   yaw?: number;
   pitch?: number;
+  roll?: number;
   durationMs?: number;
 }
 
@@ -45,10 +48,13 @@ export const WORLD_CENTER_X = 70;
 export const WORLD_CENTER_Z = 52;
 export const DEFAULT_YAW = Math.PI * 0.25; // 45 deg SE isometric camera
 export const DEFAULT_PITCH = 35; // maps to 2:1 isometric ratio in 2D
+export const DEFAULT_ROLL = 0;
 export const MIN_ZOOM = 0.35;
 export const MAX_ZOOM = 4.0;
 export const MIN_PITCH = 12;
 export const MAX_PITCH = 85;
+export const MIN_ROLL = -180;
+export const MAX_ROLL = 180;
 
 export function compassStepFromYaw(yaw: number): 0 | 1 | 2 | 3 {
   return (((Math.round((yaw - DEFAULT_YAW) / (Math.PI / 2)) % 4) + 4) % 4) as 0 | 1 | 2 | 3;
@@ -70,6 +76,19 @@ function shortestAngleDiff(from: number, to: number): number {
   return diff;
 }
 
+function normalizeRollDeg(deg: number): number {
+  if (deg >= MIN_ROLL && deg <= MAX_ROLL) return deg === 0 ? 0 : deg;
+  let r = ((((deg + 180) % 360) + 360) % 360) - 180;
+  if (r === -180 && deg > 0) r = 180;
+  return r === 0 ? 0 : r;
+}
+
+function shortestAngleDiffDeg(from: number, to: number): number {
+  let diff = (((to - from) % 360) + 360) % 360;
+  if (diff > 180) diff -= 360;
+  return diff;
+}
+
 type Listener = (state: UnifiedCameraState) => void;
 
 class CameraStore {
@@ -79,6 +98,7 @@ class CameraStore {
     zoom: 0.78,
     yaw: DEFAULT_YAW,
     pitch: DEFAULT_PITCH,
+    roll: DEFAULT_ROLL,
     projection: "perspective",
     timeOfDay: "day",
     preset: 2,
@@ -95,6 +115,7 @@ class CameraStore {
     zoom: number;
     yaw: number;
     pitch: number;
+    roll: number;
   } | null = null;
 
   getState(): UnifiedCameraState {
@@ -135,6 +156,7 @@ class CameraStore {
     next.zoom = clamp(next.zoom, MIN_ZOOM, MAX_ZOOM);
     next.yaw = normalizeAngle(next.yaw);
     next.pitch = clamp(next.pitch, MIN_PITCH, MAX_PITCH);
+    next.roll = normalizeRollDeg(next.roll);
     this.state = next;
     this.emit();
   }
@@ -150,14 +172,19 @@ class CameraStore {
 
   /** Pan in camera-aligned screen/ground axes: forward (+1 = up/away), right (+1 = right). */
   panRelative(rightAmount: number, forwardAmount: number): void {
-    const { yaw } = this.state;
+    const { yaw, roll } = this.state;
+    const rollRad = (roll * Math.PI) / 180;
+    const cosR = Math.cos(rollRad);
+    const sinR = Math.sin(rollRad);
+    const unrolledRight = rightAmount * cosR - forwardAmount * sinR;
+    const unrolledFwd = rightAmount * sinR + forwardAmount * cosR;
     const rightX = Math.cos(yaw);
     const rightZ = -Math.sin(yaw);
     const fwdX = -Math.sin(yaw);
     const fwdZ = -Math.cos(yaw);
     this.panWorld(
-      rightX * rightAmount + fwdX * forwardAmount,
-      rightZ * rightAmount + fwdZ * forwardAmount,
+      rightX * unrolledRight + fwdX * unrolledFwd,
+      rightZ * unrolledRight + fwdZ * unrolledFwd,
     );
   }
 
@@ -166,6 +193,15 @@ class CameraStore {
     const snappedBase = Math.round((refYaw - DEFAULT_YAW) / (Math.PI / 2));
     const targetYaw = DEFAULT_YAW + (snappedBase + stepDelta) * (Math.PI / 2);
     this.flyTo({ yaw: targetYaw, durationMs: 320 });
+  }
+
+  resetOrientation(durationMs = 340): void {
+    this.flyTo({
+      yaw: DEFAULT_YAW,
+      pitch: DEFAULT_PITCH,
+      roll: DEFAULT_ROLL,
+      durationMs,
+    });
   }
 
   getCompassLabel(): "N" | "E" | "S" | "W" {
@@ -180,9 +216,12 @@ class CameraStore {
     const endZoom = clamp(opts.zoom ?? base.zoom, MIN_ZOOM, MAX_ZOOM);
     const endYaw = normalizeAngle(opts.yaw ?? base.yaw);
     const endPitch = clamp(opts.pitch ?? base.pitch, MIN_PITCH, MAX_PITCH);
+    const endRoll = normalizeRollDeg(opts.roll ?? base.roll);
+    const stopOrbit = opts.yaw !== undefined;
     this.cancelTween();
 
     const yawDiff = shortestAngleDiff(start.yaw, endYaw);
+    const rollDiff = shortestAngleDiffDeg(start.roll, endRoll);
     const duration = Math.max(120, opts.durationMs ?? 520);
 
     if (typeof requestAnimationFrame !== "function" || typeof performance === "undefined") {
@@ -193,6 +232,8 @@ class CameraStore {
           zoom: endZoom,
           yaw: endYaw,
           pitch: endPitch,
+          roll: endRoll,
+          ...(stopOrbit ? { cinematicOrbit: false } : {}),
         },
         { cancelTween: false },
       );
@@ -205,6 +246,7 @@ class CameraStore {
       zoom: endZoom,
       yaw: endYaw,
       pitch: endPitch,
+      roll: endRoll,
     };
     const t0 = performance.now();
     const step = (now: number) => {
@@ -217,6 +259,8 @@ class CameraStore {
           zoom: start.zoom + (endZoom - start.zoom) * ease,
           yaw: start.yaw + yawDiff * ease,
           pitch: start.pitch + (endPitch - start.pitch) * ease,
+          roll: start.roll + rollDiff * ease,
+          ...(stopOrbit ? { cinematicOrbit: false } : {}),
         },
         { cancelTween: false },
       );
@@ -242,6 +286,7 @@ class CameraStore {
         zoom: options?.fitZoom ?? 0.68,
         yaw: DEFAULT_YAW,
         pitch: 46,
+        roll: DEFAULT_ROLL,
         durationMs: 560,
       });
     } else if (preset === 2) {
@@ -252,6 +297,7 @@ class CameraStore {
         zoom: 0.96,
         yaw: DEFAULT_YAW,
         pitch: DEFAULT_PITCH,
+        roll: DEFAULT_ROLL,
         durationMs: 520,
       });
     } else if (preset === 3) {
@@ -262,6 +308,7 @@ class CameraStore {
         zoom: 2.35,
         yaw: Math.PI * 0.14,
         pitch: 14,
+        roll: DEFAULT_ROLL,
         durationMs: 620,
       });
     } else if (preset === 4) {
@@ -273,6 +320,7 @@ class CameraStore {
       this.flyTo({
         zoom: Math.max(1.85, this.state.zoom),
         pitch: 22,
+        roll: DEFAULT_ROLL,
         durationMs: 420,
       });
     } else if (preset === 5) {
@@ -288,6 +336,7 @@ class CameraStore {
           targetZ: WORLD_CENTER_Z,
           zoom: 0.92,
           pitch: 28,
+          roll: DEFAULT_ROLL,
           durationMs: 550,
         });
       }
@@ -331,6 +380,8 @@ const MOVEMENT_KEYS = new Set([
   "e",
   "r",
   "f",
+  "z",
+  "c",
   "shift",
   "arrowup",
   "arrowdown",
@@ -354,7 +405,9 @@ export function useUnifiedCameraHotkeys(viewMode: "2d" | "3d"): void {
       }
 
       const cam = cameraStore.getState();
-      const boost = pressed.has("shift") ? 2.3 : 1.0;
+      const shiftHeld = pressed.has("shift");
+      const boost = shiftHeld ? 2.3 : 1.0;
+      const rotBoost = shiftHeld ? 2.0 : 1.0;
       const speed = (38 / Math.max(0.35, cam.zoom)) * boost * dt;
       let fwd = 0;
       let right = 0;
@@ -366,20 +419,35 @@ export function useUnifiedCameraHotkeys(viewMode: "2d" | "3d"): void {
         cameraStore.panRelative(right * speed, fwd * speed);
       }
 
-      if (viewMode === "3d") {
+      const cur = cameraStore.getState();
+      const orientPatch: Partial<UnifiedCameraState> = {};
+
+      if ((viewMode === "3d" && !shiftHeld) || (viewMode === "2d" && shiftHeld)) {
         let yawDelta = 0;
         if (pressed.has("q")) yawDelta -= 1.6 * dt;
         if (pressed.has("e")) yawDelta += 1.6 * dt;
         if (yawDelta !== 0) {
-          cameraStore.setState({ yaw: cam.yaw + yawDelta, cinematicOrbit: false });
+          orientPatch.yaw = cur.yaw + yawDelta;
+          orientPatch.cinematicOrbit = false;
         }
       }
 
       let pitchDelta = 0;
-      if (pressed.has("r")) pitchDelta += 36 * dt;
-      if (pressed.has("f")) pitchDelta -= 36 * dt;
+      if (pressed.has("r")) pitchDelta += 36 * rotBoost * dt;
+      if (pressed.has("f")) pitchDelta -= 36 * rotBoost * dt;
       if (pitchDelta !== 0) {
-        cameraStore.setState({ pitch: cam.pitch + pitchDelta });
+        orientPatch.pitch = cur.pitch + pitchDelta;
+      }
+
+      let rollDelta = 0;
+      if (pressed.has("z")) rollDelta -= 65 * rotBoost * dt;
+      if (pressed.has("c")) rollDelta += 65 * rotBoost * dt;
+      if (rollDelta !== 0) {
+        orientPatch.roll = cur.roll + rollDelta;
+      }
+
+      if (Object.keys(orientPatch).length > 0) {
+        cameraStore.setState(orientPatch);
       }
 
       raf = requestAnimationFrame(tick);
@@ -395,13 +463,42 @@ export function useUnifiedCameraHotkeys(viewMode: "2d" | "3d"): void {
     const onKeyDown = (e: KeyboardEvent) => {
       if (isTypingTarget(e.target) || e.metaKey || e.ctrlKey || e.altKey) return;
       const key = e.key.toLowerCase();
-
-      if (key === "q" && viewMode === "2d" && !e.repeat) {
-        cameraStore.rotateCompass(-1);
+      if (
+        e.target instanceof HTMLInputElement &&
+        e.target.type === "range" &&
+        key.startsWith("arrow")
+      ) {
         return;
       }
-      if (key === "e" && viewMode === "2d" && !e.repeat) {
-        cameraStore.rotateCompass(1);
+
+      if (e.shiftKey) pressed.add("shift");
+      else pressed.delete("shift");
+
+      const shouldSnapYaw = (viewMode === "2d" && !e.shiftKey) || (viewMode === "3d" && e.shiftKey);
+      if (key === "q" && shouldSnapYaw) {
+        if (!e.repeat) cameraStore.rotateCompass(-1);
+        return;
+      }
+      if (key === "e" && shouldSnapYaw) {
+        if (!e.repeat) cameraStore.rotateCompass(1);
+        return;
+      }
+      if (key === "n" && !e.repeat) {
+        cameraStore.flyTo({ yaw: DEFAULT_YAW, durationMs: 320 });
+        return;
+      }
+      if (key === "t" && !e.repeat) {
+        const curPitch = cameraStore.getState().pitch;
+        const nextPitch = curPitch >= 70 ? DEFAULT_PITCH : MAX_PITCH;
+        cameraStore.flyTo({ pitch: nextPitch, roll: DEFAULT_ROLL, durationMs: 360 });
+        return;
+      }
+      if (key === "x" && !e.repeat) {
+        if (e.shiftKey) {
+          cameraStore.resetOrientation();
+        } else {
+          cameraStore.flyTo({ roll: DEFAULT_ROLL, durationMs: 280 });
+        }
         return;
       }
       if (key === "=" || key === "+") {
@@ -435,6 +532,7 @@ export function useUnifiedCameraHotkeys(viewMode: "2d" | "3d"): void {
 
     const onKeyUp = (e: KeyboardEvent) => {
       pressed.delete(e.key.toLowerCase());
+      if (!e.shiftKey) pressed.delete("shift");
     };
     const onBlur = () => {
       pressed.clear();
@@ -476,6 +574,7 @@ export function saveRepoBookmark(repoKey: string, name: string): CameraBookmark[
     zoom: Number(cam.zoom.toFixed(3)),
     yaw: Number(cam.yaw.toFixed(3)),
     pitch: Number(cam.pitch.toFixed(1)),
+    roll: Number(cam.roll.toFixed(1)),
     projection: cam.projection,
     createdAt: new Date().toISOString(),
   };

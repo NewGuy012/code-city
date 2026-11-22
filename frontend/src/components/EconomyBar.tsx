@@ -70,7 +70,7 @@ export function EconomyBar({
   return (
     <div
       data-testid="economy-bar"
-      className={`sim-panel pointer-events-auto relative flex h-10 items-center gap-2 rounded-xl px-2.5 text-xs ${
+      className={`sim-panel pointer-events-auto relative flex h-10 max-w-full min-w-0 items-center gap-2 rounded-xl px-2.5 text-xs ${
         advisorsOpen || utilitiesOpen ? "z-40" : ""
       }`}
     >
@@ -191,7 +191,7 @@ export function EconomyBar({
         {advisorsOpen && (
           <div
             data-testid="advisors-popover"
-            className="sim-popover absolute top-full right-0 z-40 mt-2 w-80 rounded-2xl p-3 text-xs"
+            className="sim-popover sim-scrollbar absolute top-full right-0 z-40 mt-2 max-h-[calc(var(--hud-vh,100vh)-5rem)] w-[min(20rem,calc(var(--hud-vw,100vw)-1.5rem))] overflow-y-auto rounded-2xl p-3 text-xs"
           >
             <div className="mb-2 flex items-center justify-between gap-2">
               <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">
@@ -296,7 +296,7 @@ export function EconomyBar({
         {utilitiesOpen && (
           <div
             data-testid="utilities-popover"
-            className="sim-popover absolute top-full right-0 z-40 mt-2 w-64 rounded-2xl p-2 text-xs"
+            className="sim-popover sim-scrollbar absolute top-full right-0 z-40 mt-2 max-h-[calc(var(--hud-vh,100vh)-5rem)] w-[min(16rem,calc(var(--hud-vw,100vw)-1.5rem))] overflow-y-auto rounded-2xl p-2 text-xs"
           >
             <button
               type="button"

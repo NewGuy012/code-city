@@ -1,3 +1,4 @@
+import { useViewportHudMetrics } from "../components/hudPopover";
 import type { FileMetric } from "../types/city";
 import { cameraStore } from "./cameraStore";
 
@@ -6,16 +7,28 @@ interface BuildingTooltipProps {
   x: number;
   y: number;
   containerWidth?: number;
+  containerHeight?: number;
 }
 
-export function BuildingTooltip({ file, x, y, containerWidth = 1280 }: BuildingTooltipProps) {
+export function BuildingTooltip({
+  file,
+  x,
+  y,
+  containerWidth = 1280,
+  containerHeight = 800,
+}: BuildingTooltipProps) {
+  const { scale } = useViewportHudMetrics();
+  const estWidth = 280 * scale;
+  const estHeight = 104 * scale;
+
   return (
     <div
       data-testid="building-tooltip"
       className="sim-popover pointer-events-none absolute z-20 max-w-xs rounded-xl px-3 py-2 text-xs"
       style={{
-        left: Math.max(12, Math.min(containerWidth - 260, x + 14)),
-        top: Math.max(12, y - 68),
+        left: Math.max(8, Math.min(Math.max(8, containerWidth - estWidth - 8), x + 14 * scale)),
+        top: Math.max(8, Math.min(Math.max(8, containerHeight - estHeight - 8), y - 68 * scale)),
+        ...(scale < 1 ? { transform: `scale(${scale})`, transformOrigin: "top left" } : {}),
       }}
     >
       <div className="truncate font-mono font-semibold text-amber-300">{file.file_path}</div>

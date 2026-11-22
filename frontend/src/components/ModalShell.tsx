@@ -1,5 +1,6 @@
 import { X } from "lucide-react";
 import { type ReactNode, useEffect } from "react";
+import { createPortal } from "react-dom";
 
 interface ModalShellProps {
   open: boolean;
@@ -37,27 +38,35 @@ export function ModalShell({
 
   if (!open) return null;
 
-  return (
+  const modalNode = (
     <div
       data-testid={testId}
-      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/75 p-4 backdrop-blur-sm"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+      className="pointer-events-auto fixed inset-0 z-50 flex items-center justify-center bg-slate-950/75 p-4 backdrop-blur-sm"
     >
       <div
-        className={`sim-panel flex max-h-[88vh] w-full ${maxWidthClass} flex-col overflow-hidden rounded-3xl`}
+        className={`sim-panel flex max-h-[min(88%,calc(var(--hud-vh,100vh)-2rem))] w-full ${maxWidthClass} flex-col overflow-hidden rounded-3xl`}
       >
-        <div className="flex items-center justify-between border-b border-slate-700/70 px-6 py-4">
-          <div className="flex items-center gap-2.5">
-            {icon}
-            <div>
-              <h2 className="text-base font-bold text-white">{title}</h2>
-              {subtitle && <p className="text-xs text-slate-400">{subtitle}</p>}
+        <div className="flex items-center justify-between gap-3 border-b border-slate-700/70 px-6 py-4">
+          <div className="flex min-w-0 items-center gap-2.5">
+            <div className="shrink-0">{icon}</div>
+            <div className="min-w-0">
+              <h2 className="truncate text-base font-bold text-white">{title}</h2>
+              {subtitle && <p className="truncate text-xs text-slate-400">{subtitle}</p>}
             </div>
           </div>
           <button
             type="button"
+            data-testid={`${testId}-close`}
             title={closeTitle}
-            onClick={onClose}
-            className="rounded-xl p-1.5 text-slate-400 hover:bg-slate-800 hover:text-white"
+            aria-label={closeTitle}
+            onClick={(e) => {
+              e.stopPropagation();
+              onClose();
+            }}
+            className="shrink-0 cursor-pointer rounded-xl p-1.5 text-slate-400 transition hover:bg-slate-800 hover:text-white"
           >
             <X className="h-5 w-5" />
           </button>
@@ -73,4 +82,8 @@ export function ModalShell({
       </div>
     </div>
   );
+
+  const portalRoot =
+    typeof document !== "undefined" ? document.getElementById("codecity-modal-root") : null;
+  return portalRoot ? createPortal(modalNode, portalRoot) : modalNode;
 }

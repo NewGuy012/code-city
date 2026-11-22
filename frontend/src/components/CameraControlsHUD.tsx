@@ -21,9 +21,14 @@ import { useEffect, useState } from "react";
 import {
   type CameraBookmark,
   type CameraPresetId,
+  DEFAULT_PITCH,
+  DEFAULT_ROLL,
+  DEFAULT_YAW,
   MAX_PITCH,
+  MAX_ROLL,
   MAX_ZOOM,
   MIN_PITCH,
+  MIN_ROLL,
   MIN_ZOOM,
   type TimeOfDay,
   cameraStore,
@@ -82,17 +87,71 @@ export function CameraControlsHUD({
 
   const compassDeg = Math.round(((cam.yaw - Math.PI * 0.25) * 180) / Math.PI);
   const compassLabel = cameraStore.getCompassLabel();
+  const yawDeg = ((Math.round((cam.yaw * 180) / Math.PI) % 360) + 360) % 360 || 0;
+  const pitchDeg = Math.round(cam.pitch) || 0;
+  const rollDeg = Math.round(cam.roll) || 0;
+  const defaultYawDeg = Math.round((DEFAULT_YAW * 180) / Math.PI);
   const hasCustomView =
     cam.timeOfDay !== "day" ||
     cam.cinematicOrbit ||
     Boolean(cam.followVehicleId) ||
+    Math.abs(cam.roll) >= 0.5 ||
     !showTraffic ||
     bookmarks.length > 0;
+
+  const rotationAxes = [
+    {
+      id: "yaw",
+      label: "Yaw",
+      keys: "Q/E",
+      hint: "Yaw around Y-axis: Q / E (Shift+Q/E toggles 90° snap vs smooth · N for North)",
+      testId: "yaw-slider",
+      resetTestId: "yaw-reset-btn",
+      resetTitle: `Reset Yaw to ${defaultYawDeg}° North (N)`,
+      min: 0,
+      max: 359,
+      value: yawDeg,
+      isDefault: yawDeg === defaultYawDeg,
+      onChange: (val: number) =>
+        cameraStore.setState({ yaw: (val * Math.PI) / 180, cinematicOrbit: false }),
+      onReset: () => cameraStore.flyTo({ yaw: DEFAULT_YAW, durationMs: 280 }),
+    },
+    {
+      id: "pitch",
+      label: "Pitch",
+      keys: "R/F",
+      hint: "Pitch tilt around X-axis: R / F (T toggles Top-Down)",
+      testId: "pitch-slider",
+      resetTestId: "pitch-reset-btn",
+      resetTitle: `Reset Pitch to ${DEFAULT_PITCH}°`,
+      min: MIN_PITCH,
+      max: MAX_PITCH,
+      value: pitchDeg,
+      isDefault: pitchDeg === DEFAULT_PITCH,
+      onChange: (val: number) => cameraStore.setState({ pitch: val }),
+      onReset: () => cameraStore.flyTo({ pitch: DEFAULT_PITCH, durationMs: 280 }),
+    },
+    {
+      id: "roll",
+      label: "Roll",
+      keys: "Z/C",
+      hint: "Roll around view Z-axis: Z / C (X to level horizon)",
+      testId: "roll-slider",
+      resetTestId: "roll-reset-btn",
+      resetTitle: "Level Roll to 0° (X)",
+      min: MIN_ROLL,
+      max: MAX_ROLL,
+      value: rollDeg,
+      isDefault: rollDeg === DEFAULT_ROLL,
+      onChange: (val: number) => cameraStore.setState({ roll: val }),
+      onReset: () => cameraStore.flyTo({ roll: DEFAULT_ROLL, durationMs: 280 }),
+    },
+  ];
 
   return (
     <div
       data-testid="camera-controls-hud"
-      className={`sim-panel pointer-events-auto relative flex h-9 items-center gap-1 rounded-xl px-1.5 text-[11px] ${
+      className={`sim-panel pointer-events-auto relative flex h-9 max-w-full shrink-0 items-center gap-1 rounded-xl px-1.5 text-[11px] ${
         isViewPopoverOpen ? "z-40" : ""
       }`}
     >
@@ -159,8 +218,8 @@ export function CameraControlsHUD({
       <button
         type="button"
         data-testid="compass-rose-btn"
-        onClick={() => cameraStore.flyTo({ yaw: Math.PI * 0.25, durationMs: 360 })}
-        title="Compass Heading — Click to snap North (Q / E to rotate)"
+        onClick={() => cameraStore.flyTo({ yaw: DEFAULT_YAW, durationMs: 360 })}
+        title="Compass Heading — Click to snap North (N · Q / E to rotate)"
         className="flex h-6 items-center gap-1 rounded-lg bg-white/[0.06] px-1.5 font-mono font-bold text-slate-200 transition hover:bg-white/[0.12] hover:text-white"
       >
         <Compass
@@ -195,7 +254,7 @@ export function CameraControlsHUD({
         {isViewPopoverOpen && (
           <div
             data-testid="camera-view-popover"
-            className="sim-popover absolute right-0 bottom-11 z-40 w-72 space-y-3 rounded-2xl p-3 text-xs"
+            className="sim-popover sim-scrollbar absolute right-0 bottom-11 z-40 max-h-[calc(var(--hud-vh,100vh)-5rem)] w-[min(20rem,calc(var(--hud-vw,100vw)-1.5rem))] space-y-3 overflow-y-auto rounded-2xl p-3 text-xs"
           >
             {/* Camera Presets */}
             <div>
@@ -228,22 +287,28 @@ export function CameraControlsHUD({
               </div>
             </div>
 
-            {/* Rotation & Pitch */}
+            {/* Rotation Axes & Orientation */}
             <div className="space-y-2 border-t border-white/10 pt-2.5">
               <div className="flex items-center justify-between">
-                <span className="text-[11px] font-medium text-slate-300">Orientation</span>
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[11px] font-medium text-slate-300">Orientation</span>
+                  <span className="rounded bg-white/[0.06] px-1.5 py-0.5 font-mono text-[9px] text-slate-400">
+                    {compassLabel} · {yawDeg}°
+                  </span>
+                </div>
                 <div className="flex items-center gap-1">
                   <button
                     type="button"
                     data-testid="rotate-ccw-btn"
                     onClick={() => cameraStore.rotateCompass(-1)}
-                    title="Rotate Left 90° (Q)"
+                    title="Yaw Left 90° (Q in 2D / Shift+Q in 3D)"
                     className="rounded-lg bg-white/[0.06] p-1 text-slate-300 hover:bg-white/[0.12] hover:text-white"
                   >
                     <RotateCcw className="h-3.5 w-3.5" />
                   </button>
                   <button
                     type="button"
+                    data-testid="fit-island-btn"
                     onClick={() => cameraStore.applyPreset(1)}
                     title="Fit Island (0 / Home)"
                     className="rounded-lg bg-white/[0.06] p-1 text-slate-300 hover:bg-white/[0.12] hover:text-white"
@@ -254,30 +319,145 @@ export function CameraControlsHUD({
                     type="button"
                     data-testid="rotate-cw-btn"
                     onClick={() => cameraStore.rotateCompass(1)}
-                    title="Rotate Right 90° (E)"
+                    title="Yaw Right 90° (E in 2D / Shift+E in 3D)"
                     className="rounded-lg bg-white/[0.06] p-1 text-slate-300 hover:bg-white/[0.12] hover:text-white"
                   >
                     <RotateCw className="h-3.5 w-3.5" />
                   </button>
+                  <button
+                    type="button"
+                    data-testid="reset-orientation-btn"
+                    onClick={() => cameraStore.resetOrientation()}
+                    title="Reset Orientation — Yaw 45°, Pitch 35°, Roll 0° (Shift+X)"
+                    className="rounded-lg bg-white/[0.06] px-1.5 py-1 text-[10px] font-medium text-slate-300 hover:bg-white/[0.12] hover:text-white"
+                  >
+                    Reset
+                  </button>
                 </div>
               </div>
 
-              <label className="flex items-center justify-between gap-2 text-[11px] text-slate-300">
-                <span>Pitch</span>
-                <input
-                  type="range"
-                  data-testid="pitch-slider"
-                  min={MIN_PITCH}
-                  max={MAX_PITCH}
-                  step={1}
-                  value={Math.round(cam.pitch)}
-                  onChange={(e) => cameraStore.setState({ pitch: Number(e.target.value) })}
-                  className="h-1 flex-1 cursor-pointer accent-sky-400"
-                />
-                <span className="w-7 text-right font-mono text-slate-400">
-                  {Math.round(cam.pitch)}°
-                </span>
-              </label>
+              <div className="space-y-1.5">
+                {rotationAxes.map((axis) => (
+                  <div
+                    key={axis.id}
+                    className="flex items-center gap-1.5 text-[11px] text-slate-300"
+                  >
+                    <span className="w-9 shrink-0 font-medium">{axis.label}</span>
+                    <kbd
+                      title={axis.hint}
+                      className="w-8 shrink-0 rounded bg-white/[0.06] py-0.5 text-center font-mono text-[9px] text-slate-400"
+                    >
+                      {axis.keys}
+                    </kbd>
+                    <input
+                      type="range"
+                      data-testid={axis.testId}
+                      aria-label={`${axis.label} rotation`}
+                      min={axis.min}
+                      max={axis.max}
+                      step={1}
+                      value={axis.value}
+                      onChange={(e) => axis.onChange(Number(e.target.value))}
+                      className="h-1 min-w-0 flex-1 cursor-pointer accent-sky-400"
+                    />
+                    <button
+                      type="button"
+                      data-testid={axis.resetTestId}
+                      onClick={axis.onReset}
+                      title={axis.resetTitle}
+                      className={`w-10 shrink-0 text-right font-mono text-[11px] transition ${
+                        axis.isDefault
+                          ? "text-slate-400 hover:text-white"
+                          : "text-sky-300 hover:text-sky-200"
+                      }`}
+                    >
+                      {axis.value}°
+                    </button>
+                  </div>
+                ))}
+              </div>
+
+              {/* Compass Heading & Elevation / Roll Quick Options */}
+              <div className="grid grid-cols-4 gap-1 pt-0.5">
+                {(
+                  [
+                    { id: "N", yaw: DEFAULT_YAW, hint: "Snap North 45° (N)" },
+                    { id: "E", yaw: DEFAULT_YAW + Math.PI * 0.5, hint: "Snap East 135°" },
+                    { id: "S", yaw: DEFAULT_YAW + Math.PI, hint: "Snap South 225°" },
+                    { id: "W", yaw: DEFAULT_YAW + Math.PI * 1.5, hint: "Snap West 315°" },
+                  ] as const
+                ).map((c) => {
+                  const angleDiff = Math.abs(
+                    Math.atan2(Math.sin(cam.yaw - c.yaw), Math.cos(cam.yaw - c.yaw)),
+                  );
+                  const active = angleDiff < 0.05;
+                  return (
+                    <button
+                      key={c.id}
+                      type="button"
+                      data-testid={`yaw-snap-${c.id.toLowerCase()}`}
+                      onClick={() => cameraStore.flyTo({ yaw: c.yaw, durationMs: 320 })}
+                      title={c.hint}
+                      className={`rounded-lg py-1 font-mono text-[10px] font-semibold transition ${
+                        active
+                          ? "bg-sky-500/25 text-sky-300 ring-1 ring-sky-400/35"
+                          : "bg-white/[0.06] text-slate-300 hover:bg-white/[0.12] hover:text-white"
+                      }`}
+                    >
+                      {c.id}
+                    </button>
+                  );
+                })}
+              </div>
+
+              <div className="grid grid-cols-4 gap-1">
+                {[
+                  {
+                    id: "low",
+                    label: "Low 15°",
+                    active: Math.abs(cam.pitch - 15) <= 2,
+                    title: "Low horizon pitch (15°)",
+                    onClick: () => cameraStore.flyTo({ pitch: 15, durationMs: 320 }),
+                  },
+                  {
+                    id: "iso",
+                    label: "Iso 35°",
+                    active: Math.abs(cam.pitch - DEFAULT_PITCH) <= 2,
+                    title: "Classic isometric pitch (35°)",
+                    onClick: () => cameraStore.flyTo({ pitch: DEFAULT_PITCH, durationMs: 320 }),
+                  },
+                  {
+                    id: "top",
+                    label: "Top (T)",
+                    active: cam.pitch >= 82,
+                    title: "Top-down pitch (85° · T)",
+                    onClick: () =>
+                      cameraStore.flyTo({ pitch: MAX_PITCH, roll: DEFAULT_ROLL, durationMs: 320 }),
+                  },
+                  {
+                    id: "level",
+                    label: "Level (X)",
+                    active: Math.abs(cam.roll) < 0.5,
+                    title: "Level roll horizon (0° · X)",
+                    onClick: () => cameraStore.flyTo({ roll: DEFAULT_ROLL, durationMs: 280 }),
+                  },
+                ].map((opt) => (
+                  <button
+                    key={opt.id}
+                    type="button"
+                    data-testid={`orient-opt-${opt.id}`}
+                    onClick={opt.onClick}
+                    title={opt.title}
+                    className={`rounded-lg py-1 text-[10px] font-medium transition ${
+                      opt.active
+                        ? "bg-white/[0.14] text-white ring-1 ring-white/20"
+                        : "bg-white/[0.05] text-slate-400 hover:bg-white/[0.1] hover:text-slate-200"
+                    }`}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
             </div>
 
             {/* Atmosphere & Scene */}
@@ -396,6 +576,7 @@ export function CameraControlsHUD({
                             zoom: bm.zoom,
                             yaw: bm.yaw,
                             pitch: bm.pitch,
+                            roll: bm.roll ?? DEFAULT_ROLL,
                           });
                         }}
                         className="truncate text-left text-[11px] text-slate-200 hover:text-amber-300"

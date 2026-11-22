@@ -8,7 +8,7 @@ import urllib.request
 from pathlib import Path
 
 import uvicorn
-from playwright.sync_api import Page, sync_playwright
+from playwright.sync_api import Page, expect, sync_playwright
 
 from codecity.analyzer.pipeline import analyze_repository
 from codecity.api.app import create_app
@@ -63,6 +63,37 @@ def _assert_no_hud_overlap(page: Page) -> None:
         selectors,
     )
     assert overlaps == [], f"HUD overlap detected: {overlaps}"
+
+
+def _assert_hud_within_viewport(page: Page, selectors: list[str]) -> None:
+    """Assert every targeted HUD control/overlay lies completely inside viewport bounds."""
+    out_of_bounds = page.evaluate(
+        """(sels) => {
+          const vw = window.innerWidth;
+          const vh = window.innerHeight;
+          const issues = [];
+          for (const sel of sels) {
+            const el = document.querySelector(sel);
+            if (!el) {
+              issues.push(`${sel} missing`);
+              continue;
+            }
+            const r = el.getBoundingClientRect();
+            if (r.width <= 0 || r.height <= 0) {
+              issues.push(`${sel} zero-sized`);
+              continue;
+            }
+            if (r.left < -1 || r.top < -1 || r.right > vw + 1 || r.bottom > vh + 1) {
+              const box = `${r.left.toFixed(1)},${r.top.toFixed(1)},` +
+                `${r.right.toFixed(1)},${r.bottom.toFixed(1)}`;
+              issues.push(`${sel} out of bounds (${box}) vs ${vw}x${vh}`);
+            }
+          }
+          return issues;
+        }""",
+        selectors,
+    )
+    assert out_of_bounds == [], f"HUD cutoff detected: {out_of_bounds}"
 
 
 def test_live_studio_e2e_2d_datamaps_tour_notes_3d_timescrub_and_quack(tmp_path: Path) -> None:
@@ -208,13 +239,83 @@ def test_live_studio_e2e_2d_datamaps_tour_notes_3d_timescrub_and_quack(tmp_path:
             page.set_viewport_size({"width": 1024, "height": 700})
             page.wait_for_timeout(150)
             _assert_no_hud_overlap(page)
+
+            # Verify HUD auto-scales cleanly at zoomed 640x380 viewport without cutting off edges
+            page.set_viewport_size({"width": 640, "height": 380})
+            page.wait_for_timeout(150)
+            _assert_no_hud_overlap(page)
+            _assert_hud_within_viewport(
+                page,
+                [
+                    '[data-testid="repo-switcher-btn"]',
+                    '[data-testid="datamap-dropdown-btn"]',
+                    '[data-testid="utilities-menu-btn"]',
+                    '[data-testid="open-disasters-btn"]',
+                    '[data-testid="mayor-toolbar"]',
+                    '[data-testid="export-blueprint-btn"]',
+                    '[data-testid="time-scrubber"]',
+                    '[data-testid="camera-controls-hud"]',
+                    '[data-testid="camera-view-btn"]',
+                    '[data-testid="toggle-radar-btn"]',
+                ],
+            )
+            page.click('[data-testid="camera-view-btn"]')
+            page.wait_for_selector('[data-testid="camera-view-popover"]', timeout=5000)
+            _assert_hud_within_viewport(page, ['[data-testid="camera-view-popover"]'])
+            page.keyboard.press("Escape")
+
             page.set_viewport_size({"width": 1360, "height": 840})
 
             page.click('[data-testid="camera-view-btn"]')
             page.wait_for_selector('[data-testid="camera-view-popover"]', timeout=5000)
             page.click('[data-testid="rotate-cw-btn"]')
-            page.wait_for_timeout(450)
-            assert page.inner_text('[data-testid="compass-rose-btn"]').strip() == "E"
+            expect(page.locator('[data-testid="compass-rose-btn"]')).to_have_text("E", timeout=3000)
+
+            # Orientation Yaw, Pitch & Roll sliders + quick axis options + shortcuts
+            page.locator('[data-testid="yaw-slider"]').fill("225")
+            page.locator('[data-testid="yaw-slider"]').dispatch_event("change")
+            expect(page.locator('[data-testid="compass-rose-btn"]')).to_have_text("S", timeout=3000)
+
+            page.locator('[data-testid="roll-slider"]').fill("24")
+            page.locator('[data-testid="roll-slider"]').dispatch_event("change")
+            expect(page.locator('[data-testid="roll-reset-btn"]')).to_have_text("24°", timeout=3000)
+
+            page.click('[data-testid="orient-opt-top"]')
+            expect(page.locator('[data-testid="pitch-reset-btn"]')).to_have_text(
+                "85°", timeout=3000
+            )
+            expect(page.locator('[data-testid="roll-reset-btn"]')).to_have_text("0°", timeout=3000)
+
+            # Keyboard shortcuts for rotation axes:
+            # C rolls Z-axis, X levels, N snaps North, T toggles Top, Shift+X resets
+            page.keyboard.down("c")
+            page.wait_for_timeout(160)
+            page.keyboard.up("c")
+            assert page.inner_text('[data-testid="roll-reset-btn"]').strip() != "0°"
+
+            page.keyboard.press("x")
+            expect(page.locator('[data-testid="roll-reset-btn"]')).to_have_text("0°", timeout=3000)
+
+            page.keyboard.press("n")
+            expect(page.locator('[data-testid="compass-rose-btn"]')).to_have_text("N", timeout=3000)
+
+            page.keyboard.press("t")
+            expect(page.locator('[data-testid="pitch-reset-btn"]')).to_have_text(
+                "35°", timeout=3000
+            )
+
+            page.click('[data-testid="orient-opt-low"]')
+            expect(page.locator('[data-testid="pitch-reset-btn"]')).to_have_text(
+                "15°", timeout=3000
+            )
+
+            page.keyboard.press("Shift+X")
+            expect(page.locator('[data-testid="yaw-reset-btn"]')).to_have_text("45°", timeout=3000)
+            expect(page.locator('[data-testid="pitch-reset-btn"]')).to_have_text(
+                "35°", timeout=3000
+            )
+            expect(page.locator('[data-testid="roll-reset-btn"]')).to_have_text("0°", timeout=3000)
+
             page.click('[data-testid="time-of-day-golden"]')
             page.click('[data-testid="cam-preset-4"]')
             page.keyboard.press("Escape")
@@ -251,6 +352,8 @@ def test_live_studio_e2e_2d_datamaps_tour_notes_3d_timescrub_and_quack(tmp_path:
             assert "Mayor's Refactor Blueprint" in page.inner_text(
                 '[data-testid="blueprint-modal"]'
             )
+            page.click('[data-testid="blueprint-modal-close"]')
+            expect(page.locator('[data-testid="blueprint-modal"]')).to_have_count(0)
 
             assert page_errors == [], f"Unexpected browser page errors: {page_errors}"
             browser.close()
