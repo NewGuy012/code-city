@@ -14,28 +14,150 @@ export interface ShadePalette {
   accent: string;
 }
 
-export const ZONE_PALETTES: Record<ZoneType, { fill: string; border: string; label: string }> = {
-  harbor_gates: { fill: "#18334e", border: "#38bdf8", label: "Harbor & Gates" },
-  downtown_core: { fill: "#1e293b", border: "#fbbf24", label: "Downtown Core" },
-  vaults_reservoir: { fill: "#28263b", border: "#a78bfa", label: "Vaults & Reservoir" },
-  industrial_quarter: { fill: "#2b251c", border: "#f97316", label: "Industrial Quarter" },
-  gallery_storefront: { fill: "#1d2d44", border: "#f472b6", label: "Gallery District" },
-  civic_utilities: { fill: "#1a2f35", border: "#2dd4bf", label: "Civic & Utilities" },
-  greenbelt_parks: { fill: "#153625", border: "#4ade80", label: "Greenbelt Parks" },
-  supply_docks: { fill: "#172b3e", border: "#60a5fa", label: "Supply Docks" },
+export interface ZoneStyle {
+  fill: string;
+  border: string;
+  ground: string;
+  sidewalk: string;
+  plaza: string;
+  label: string;
+}
+
+export function hashFilePath(path: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < path.length; i++) {
+    h ^= path.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+
+export function buildingVariantIndex(filePath: string, variants = 3): number {
+  return hashFilePath(filePath) % Math.max(1, variants);
+}
+
+export function isAnalyticalDataMap(dataMap: DataMapMode): boolean {
+  return dataMap !== "living";
+}
+
+export const ZONE_PALETTES: Record<ZoneType, ZoneStyle> = {
+  harbor_gates: {
+    fill: "#dce3ea",
+    border: "#3b82f6",
+    ground: "#6d9a5b",
+    sidewalk: "#cbd3db",
+    plaza: "#d8d4ca",
+    label: "Harbor & Gates",
+  },
+  downtown_core: {
+    fill: "#d6dce4",
+    border: "#d97706",
+    ground: "#689557",
+    sidewalk: "#d2d7de",
+    plaza: "#c9cfd8",
+    label: "Downtown Core",
+  },
+  vaults_reservoir: {
+    fill: "#d9d6df",
+    border: "#7c3aed",
+    ground: "#6a9559",
+    sidewalk: "#ced3db",
+    plaza: "#d5d1c8",
+    label: "Vaults & Reservoir",
+  },
+  industrial_quarter: {
+    fill: "#c9c4ba",
+    border: "#ea580c",
+    ground: "#7c8860",
+    sidewalk: "#b8b3aa",
+    plaza: "#a29b90",
+    label: "Industrial Quarter",
+  },
+  gallery_storefront: {
+    fill: "#dee3e8",
+    border: "#db2777",
+    ground: "#72a05e",
+    sidewalk: "#d6dbe1",
+    plaza: "#e2dcd2",
+    label: "Gallery District",
+  },
+  civic_utilities: {
+    fill: "#d4ddd9",
+    border: "#0d9488",
+    ground: "#6c9b5c",
+    sidewalk: "#cbd3cf",
+    plaza: "#ccd4ce",
+    label: "Civic & Utilities",
+  },
+  greenbelt_parks: {
+    fill: "#5b9a4f",
+    border: "#16a34a",
+    ground: "#528f47",
+    sidewalk: "#bac4b1",
+    plaza: "#7db068",
+    label: "Greenbelt Parks",
+  },
+  supply_docks: {
+    fill: "#cbd2db",
+    border: "#2563eb",
+    ground: "#788d6e",
+    sidewalk: "#c3c8ce",
+    plaza: "#b7b0a4",
+    label: "Supply Docks",
+  },
 };
 
-const ARCHETYPE_PALETTES: Record<BuildingArchetype, ShadePalette> = {
-  grand_terminal: { roof: "#38bdf8", left: "#0284c7", right: "#075985", accent: "#fef08a" },
-  city_hall: { roof: "#fde68a", left: "#d97706", right: "#92400e", accent: "#fffbeb" },
-  archive_vault: { roof: "#cbd5e1", left: "#94a3b8", right: "#475569", accent: "#a78bfa" },
-  twin_silos: { roof: "#a5b4fc", left: "#6366f1", right: "#3730a3", accent: "#e0e7ff" },
-  factory: { roof: "#fdba74", left: "#ea580c", right: "#9a3412", accent: "#fed7aa" },
-  office_tower: { roof: "#93c5fd", left: "#3b82f6", right: "#1e40af", accent: "#dbeafe" },
-  glass_pavilion: { roof: "#67e8f9", left: "#06b6d4", right: "#155e75", accent: "#f472b6" },
-  watchtower: { roof: "#5eead4", left: "#0d9488", right: "#115e59", accent: "#99f6e4" },
-  civic_kiosk: { roof: "#94a3b8", left: "#64748b", right: "#334155", accent: "#e2e8f0" },
-  park_stadium: { roof: "#4ade80", left: "#16a34a", right: "#14532d", accent: "#bbf7d0" },
+const LIVING_ARCHETYPE_VARIANTS: Record<BuildingArchetype, ShadePalette[]> = {
+  grand_terminal: [
+    { roof: "#8bb4cf", left: "#95a3b3", right: "#637080", accent: "#fef08a" },
+    { roof: "#96bfd4", left: "#b6afa2", right: "#847c70", accent: "#fde68a" },
+    { roof: "#7fa8c4", left: "#8897a8", right: "#556474", accent: "#fef9c3" },
+  ],
+  city_hall: [
+    { roof: "#67a68e", left: "#e2d8c5", right: "#b3a58f", accent: "#f6d465" },
+    { roof: "#70ad94", left: "#dbd2c4", right: "#a99e8f", accent: "#fde047" },
+    { roof: "#5b9780", left: "#e6dccb", right: "#baa991", accent: "#f5c451" },
+  ],
+  archive_vault: [
+    { roof: "#76808d", left: "#d2cabd", right: "#9c9384", accent: "#e2e8f0" },
+    { roof: "#8d6b57", left: "#cfc5b4", right: "#9a8e7c", accent: "#f1f5f9" },
+    { roof: "#6a7582", left: "#c4c9cf", right: "#8b929b", accent: "#e2e8f0" },
+  ],
+  twin_silos: [
+    { roof: "#dde3ea", left: "#bfc8d2", right: "#8c97a4", accent: "#93c5fd" },
+    { roof: "#d4cec2", left: "#c8c0b3", right: "#958d80", accent: "#cbd5e1" },
+    { roof: "#cbd5e1", left: "#aeb8c4", right: "#798594", accent: "#bfdbfe" },
+  ],
+  factory: [
+    { roof: "#7b828b", left: "#a85c47", right: "#743b2b", accent: "#fb923c" },
+    { roof: "#717982", left: "#b57d52", right: "#7f5333", accent: "#fdba74" },
+    { roof: "#6d747d", left: "#8d6356", right: "#5f3f36", accent: "#f59e0b" },
+  ],
+  office_tower: [
+    { roof: "#94a3b8", left: "#587d9c", right: "#36546e", accent: "#cbd5e1" },
+    { roof: "#cbd5e1", left: "#a4aeb9", right: "#6f7b89", accent: "#e2e8f0" },
+    { roof: "#8d9aa8", left: "#4e677d", right: "#2f4356", accent: "#bae6fd" },
+  ],
+  glass_pavilion: [
+    { roof: "#5da05a", left: "#6da2ba", right: "#467085", accent: "#e2e8f0" },
+    { roof: "#66a961", left: "#79adc2", right: "#4f7c91", accent: "#f1f5f9" },
+    { roof: "#579855", left: "#6193aa", right: "#3d6578", accent: "#d1fae5" },
+  ],
+  watchtower: [
+    { roof: "#758290", left: "#9ea7b1", right: "#6a7480", accent: "#5eead4" },
+    { roof: "#6b7987", left: "#a9a399", right: "#756f66", accent: "#99f6e4" },
+    { roof: "#7c8896", left: "#919ba7", right: "#5f6975", accent: "#7dd3fc" },
+  ],
+  civic_kiosk: [
+    { roof: "#b36247", left: "#d2c1ab", right: "#9c8b75", accent: "#f8fafc" },
+    { roof: "#6c7988", left: "#c8bca8", right: "#928673", accent: "#f1f5f9" },
+    { roof: "#8c6954", left: "#c49678", right: "#8f654b", accent: "#fef3c7" },
+  ],
+  park_stadium: [
+    { roof: "#5da44c", left: "#559845", right: "#3b6e30", accent: "#e5dec9" },
+    { roof: "#64ac52", left: "#5b9e4b", right: "#407535", accent: "#dfd7c0" },
+    { roof: "#569c47", left: "#4f9040", right: "#37682d", accent: "#ece5d3" },
+  ],
 };
 
 const LANGUAGE_PALETTES: Record<string, ShadePalette> = {
@@ -49,7 +171,9 @@ const LANGUAGE_PALETTES: Record<string, ShadePalette> = {
 
 export function buildingPalette(file: FileMetric, dataMap: DataMapMode): ShadePalette {
   if (dataMap === "living") {
-    return ARCHETYPE_PALETTES[file.building_archetype] ?? ARCHETYPE_PALETTES.office_tower;
+    const variants =
+      LIVING_ARCHETYPE_VARIANTS[file.building_archetype] ?? LIVING_ARCHETYPE_VARIANTS.office_tower;
+    return variants[buildingVariantIndex(file.file_path, variants.length)];
   }
   if (dataMap === "languages") {
     return LANGUAGE_PALETTES[file.language] ?? LANGUAGE_PALETTES.other;
@@ -64,7 +188,7 @@ export function buildingPalette(file: FileMetric, dataMap: DataMapMode): ShadePa
     if (file.hotspot_score >= 1.5) {
       return { roof: "#fde68a", left: "#eab308", right: "#854d0e", accent: "#fefce8" };
     }
-    return { roof: "#64748b", left: "#475569", right: "#1e293b", accent: "#94a3b8" };
+    return { roof: "#cbd5e1", left: "#94a3b8", right: "#64748b", accent: "#e2e8f0" };
   }
   if (dataMap === "pollution") {
     const debt = file.lint_issue_count + (file.format_drift ? 2 : 0);
@@ -106,6 +230,12 @@ export function computeBuildingHeight(file: FileMetric): number {
   return Math.max(12, Math.min(86, slocFactor + compFactor + symbolFactor + roleBoost));
 }
 
+const COMMUTER_CAR_SWATCHES = ["#e2e8f0", "#cbd5e1", "#dc2626", "#2563eb", "#f59e0b", "#475569"];
+
+export function commuterCarColor(id: string): string {
+  return COMMUTER_CAR_SWATCHES[hashFilePath(id) % COMMUTER_CAR_SWATCHES.length];
+}
+
 export function vehicleColor(
   type: "request_car" | "cycle_car" | "sweeper" | "fire_truck" | "crew" | "cargo_ship",
   jammed = false,
@@ -113,11 +243,11 @@ export function vehicleColor(
 ): string {
   if (jammed) return "#ef4444";
   if (type === "fire_truck") return flashPhase ? "#fef08a" : "#f43f5e";
-  if (type === "sweeper") return "#4ade80";
+  if (type === "sweeper") return "#22c55e";
   if (type === "crew") return "#fb923c";
   if (type === "cycle_car") return "#e879f9";
-  if (type === "cargo_ship") return "#fbbf24";
-  return "#38bdf8";
+  if (type === "cargo_ship") return "#d97706";
+  return "#e2e8f0";
 }
 
 export function buildImpactedHopMap(blastRadius: BlastRadiusResult | null): Map<string, number> {
@@ -139,7 +269,7 @@ export function selectFaultLines(
   if (selectedFile) {
     return cochanges.filter((c) => c.file_a === selectedFile || c.file_b === selectedFile);
   }
-  return cochanges.slice(0, 8);
+  return [];
 }
 
 export function canvasCursorClass(activeTool: string, hasHover: boolean): string {

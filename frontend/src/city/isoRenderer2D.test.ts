@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { computeHudMetrics, getHudShellStyle } from "../components/hudPopover";
+import type { FileMetric } from "../types/city";
 import {
   DEFAULT_PITCH,
   DEFAULT_ROLL,
@@ -8,6 +9,13 @@ import {
   WORLD_CENTER_Z,
   cameraStore,
 } from "./cameraStore";
+import {
+  ZONE_PALETTES,
+  buildingPalette,
+  buildingVariantIndex,
+  isAnalyticalDataMap,
+  selectFaultLines,
+} from "./cityTheme";
 import { cameraFromTarget, screenToWorldGround, worldToIso, worldToScreen } from "./isoRenderer2D";
 
 describe("isoRenderer2D projection", () => {
@@ -111,5 +119,37 @@ describe("isoRenderer2D projection", () => {
     expect(zoomed.vh).toBeGreaterThanOrEqual(640);
     const style = getHudShellStyle(zoomed);
     expect(style.transform).toContain("scale(");
+  });
+
+  test("natural cityTheme variants, analytical datamap detection, and fault lines", () => {
+    expect(isAnalyticalDataMap("living")).toBe(false);
+    expect(isAnalyticalDataMap("hotspots")).toBe(true);
+    expect(isAnalyticalDataMap("pollution")).toBe(true);
+
+    const v0 = buildingVariantIndex("src/api/routes.ts", 3);
+    expect(v0).toBe(buildingVariantIndex("src/api/routes.ts", 3));
+    expect(v0).toBeGreaterThanOrEqual(0);
+    expect(v0).toBeLessThan(3);
+
+    const dummyFile = {
+      file_path: "src/core/engine.py",
+      building_archetype: "office_tower",
+      language: "python",
+      hotspot_score: 20,
+      lint_issue_count: 0,
+      format_drift: false,
+      distinct_authors_90d: 2,
+    } as FileMetric;
+
+    const livingPal = buildingPalette(dummyFile, "living");
+    const hotspotPal = buildingPalette(dummyFile, "hotspots");
+    expect(livingPal.left).not.toBe(hotspotPal.left);
+    expect(ZONE_PALETTES.greenbelt_parks.ground).toContain("#");
+
+    const cochanges = [
+      { snapshot_idx: 0, file_a: "a.py", file_b: "b.py", shared_commits: 4, coupling_ratio: 0.6 },
+    ];
+    expect(selectFaultLines(cochanges, null, null)).toEqual([]);
+    expect(selectFaultLines(cochanges, "a.py", null).length).toBe(1);
   });
 });

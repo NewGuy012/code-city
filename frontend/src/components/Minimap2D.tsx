@@ -44,22 +44,42 @@ export function Minimap2D({
     const sy = (wz: number) => ((wz - WORLD_Z0) / WORLD_D) * MAP_H;
 
     ctx.clearRect(0, 0, MAP_W, MAP_H);
-    ctx.fillStyle = "#040b17";
+    const oceanGrad = ctx.createLinearGradient(0, 0, 0, MAP_H);
+    oceanGrad.addColorStop(0, "#1d5d86");
+    oceanGrad.addColorStop(1, "#134263");
+    ctx.fillStyle = oceanGrad;
     ctx.fillRect(0, 0, MAP_W, MAP_H);
 
-    // Island outline
-    ctx.fillStyle = "#0f172a";
-    ctx.strokeStyle = "rgba(56, 189, 248, 0.35)";
-    ctx.lineWidth = 1;
-    ctx.fillRect(sx(0), sy(0), (140 / WORLD_W) * MAP_W, (104 / WORLD_D) * MAP_H);
-    ctx.strokeRect(sx(0), sy(0), (140 / WORLD_W) * MAP_W, (104 / WORLD_D) * MAP_H);
+    // Coastal shallow halo & organic island base
+    const ix = sx(0);
+    const iy = sy(0);
+    const iw = (140 / WORLD_W) * MAP_W;
+    const ih = (104 / WORLD_D) * MAP_H;
+    ctx.fillStyle = "rgba(56, 189, 248, 0.24)";
+    ctx.beginPath();
+    ctx.roundRect(ix - 5, iy - 5, iw + 10, ih + 10, 14);
+    ctx.fill();
+
+    ctx.fillStyle = "#c7bc97";
+    ctx.beginPath();
+    ctx.roundRect(ix - 2, iy - 2, iw + 4, ih + 4, 9);
+    ctx.fill();
+
+    ctx.fillStyle = "#4b7d46";
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.22)";
+    ctx.lineWidth = 0.8;
+    ctx.beginPath();
+    ctx.roundRect(ix, iy, iw, ih, 6);
+    ctx.fill();
+    ctx.stroke();
 
     // Districts
     for (const d of districts) {
-      const col = ZONE_PALETTES[d.zone_type]?.border ?? "#94a3b8";
-      ctx.fillStyle = `${col}26`;
-      ctx.strokeStyle = `${col}88`;
-      ctx.lineWidth = 0.8;
+      const zStyle = ZONE_PALETTES[d.zone_type];
+      const col = zStyle?.border ?? "#94a3b8";
+      ctx.fillStyle = zStyle ? `${zStyle.ground}cc` : `${col}33`;
+      ctx.strokeStyle = `${col}99`;
+      ctx.lineWidth = 0.7;
       const x = sx(d.bounds_x);
       const y = sy(d.bounds_z);
       const w = (d.bounds_w / WORLD_W) * MAP_W;
@@ -86,8 +106,8 @@ export function Minimap2D({
         : isBlackout
           ? "#ef4444"
           : f.building_archetype === "park_stadium"
-            ? "#4ade80"
-            : "#cbd5e1";
+            ? "#22c55e"
+            : "#e2e8f0";
       ctx.fillRect(bx - 1.2, by - 1.2, 2.4, 2.4);
     }
 
