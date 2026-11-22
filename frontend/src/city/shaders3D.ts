@@ -102,7 +102,7 @@ vec3 cityPerturbNormal( vec3 surfPos, vec3 surfNorm, float heightVal ) {
 
 const FRAG_FACADE_BODY = /* glsl */ `
 vec3 cityWNorm = normalize( vCityWorldNorm );
-float cityIsRoof = smoothstep( 0.42, 0.68, cityWNorm.y );
+float cityIsRoof = smoothstep( 0.18, 0.50, cityWNorm.y );
 float cityWinMask = 0.0;
 float cityRough = roughness;
 float cityMetal = metalness;
@@ -116,17 +116,16 @@ float cityGroundAo = ( uSliceKind < 0.5 || uSliceKind > 2.5 )
   : 1.0;
 
 if ( cityIsRoof > 0.5 ) {
-  float gravel = cityHash21( floor( vCityWorldPos.xz * 3.2 ) );
-  float seam = smoothstep( 0.92, 0.99, abs( sin( vCityWorldPos.x * 2.1 ) ) );
+  float seam = smoothstep( 0.88, 0.98, abs( sin( vCityWorldPos.x * 2.6 ) ) );
   float edgeDist = max( abs( vCityLocalPos.x ), abs( vCityLocalPos.z ) );
-  float parapetShadow = mix( 1.0, 0.82, smoothstep( 0.42, 0.5, edgeDist ) );
-  vec3 roofNatural = mix( cityBaseTint * 0.72, vec3( 0.42, 0.45, 0.49 ), 0.35 );
-  roofNatural *= ( 0.92 + 0.14 * gravel ) * ( 1.0 - 0.08 * seam ) * parapetShadow;
-  vec3 roofClay = cityBaseTint * ( 0.88 + 0.14 * gravel ) * parapetShadow;
+  float parapetShadow = mix( 1.0, 0.84, smoothstep( 0.42, 0.5, edgeDist ) );
+  vec3 roofNatural = mix( cityBaseTint * 0.76, vec3( 0.46, 0.49, 0.53 ), 0.34 );
+  roofNatural *= ( 1.0 - 0.06 * seam ) * parapetShadow;
+  vec3 roofClay = cityBaseTint * 0.94 * parapetShadow;
   diffuseColor.rgb = mix( roofNatural, roofClay, uDataMapMix );
-  cityRough = 0.84;
-  cityMetal = 0.05;
-  cityBump = gravel * 0.03;
+  cityRough = 0.72;
+  cityMetal = 0.08;
+  cityBump = 0.0;
 } else if ( uFacadeMode > 3.5 ) {
   float stoneVar = cityHash21( floor( vec2( vCityWorldPos.x + vCityWorldPos.z, vCityWorldPos.y * 1.4 ) * 2.0 ) );
   float course = smoothstep( 0.9, 0.98, fract( vCityLocalPos.y * vCityInstSize.y * 1.1 ) );
@@ -156,7 +155,7 @@ if ( cityIsRoof > 0.5 ) {
   vec2 horizT = vec2( -horizN.y, horizN.x );
   float span = mix( vCityInstSize.x, vCityInstSize.z, abs( horizN.x ) );
   float horizMeters = dot( vCityLocalPos.xz * vCityInstSize.xz, horizT );
-  float targetBay = clamp( min( vCityInstSize.x, vCityInstSize.z ) * 0.28, 0.72, 1.65 );
+  float targetBay = clamp( min( vCityInstSize.x, vCityInstSize.z ) * 0.24, 0.72, 1.32 );
   float bays = max( 2.0, floor( span / targetBay + 0.5 ) );
   float uBay = ( horizMeters / max( 0.2, span ) + 0.5 ) * bays;
 
@@ -194,20 +193,20 @@ if ( cityIsRoof > 0.5 ) {
     float ashlarRow = floor( vFloor * 3.0 );
     float ashlarCol = floor( uBay * 2.0 + mod( ashlarRow, 2.0 ) * 0.5 );
     float blkVar = cityHash21( vec2( ashlarCol, ashlarRow + instBucket ) );
-    float mortar = smoothstep( 0.92, 0.99, fract( vFloor * 3.0 ) );
-    wallCol = cityBaseTint * ( 0.90 + 0.14 * blkVar ) * ( 1.0 - 0.12 * mortar );
-    cityRough = 0.78;
+    float mortar = smoothstep( 0.93, 0.99, fract( vFloor * 3.0 ) );
+    wallCol = cityBaseTint * ( 0.95 + 0.08 * blkVar ) * ( 1.0 - 0.07 * mortar );
+    cityRough = 0.76;
     cityMetal = 0.04;
-    cityBump = -mortar * 0.03;
+    cityBump = -mortar * 0.02;
   } else {
     float brRow = floor( vFloor * 6.0 );
     float brCol = floor( uBay * 4.0 + mod( brRow, 2.0 ) * 0.5 );
     float brVar = cityHash21( vec2( brCol, brRow + instBucket ) );
-    float mortar = smoothstep( 0.86, 0.98, fract( vFloor * 6.0 ) );
-    wallCol = cityBaseTint * ( 0.84 + 0.24 * brVar ) * ( 1.0 - 0.16 * mortar );
-    cityRough = 0.82;
+    float mortar = smoothstep( 0.88, 0.98, fract( vFloor * 6.0 ) );
+    wallCol = cityBaseTint * ( 0.90 + 0.15 * brVar ) * ( 1.0 - 0.10 * mortar );
+    cityRough = 0.80;
     cityMetal = 0.03;
-    cityBump = -mortar * 0.04;
+    cityBump = -mortar * 0.03;
   }
 
   if ( cityWinMask > 0.5 ) {

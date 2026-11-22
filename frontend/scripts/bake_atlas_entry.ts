@@ -34,14 +34,50 @@ export const ARCHETYPES: BuildingArchetype[] = [
   "park_stadium",
 ];
 
-const CELL_W = 192;
-const CELL_H = 288;
-const ANCHOR_X = 96;
-const ANCHOR_Y = 249;
-const FOOTPRINT_PX = 117;
+interface TierSpec {
+  tier: 0 | 1 | 2;
+  cellW: number;
+  cellH: number;
+  anchorX: number;
+  anchorY: number;
+  footprintPx: number;
+  worldScale: number;
+}
 
-const NATURE_W = 96;
-const NATURE_H = 128;
+const TIER_SPECS: readonly TierSpec[] = [
+  {
+    tier: 0,
+    cellW: 256,
+    cellH: 384,
+    anchorX: 128,
+    anchorY: 332,
+    footprintPx: 156,
+    worldScale: 5.0,
+  },
+  {
+    tier: 1,
+    cellW: 384,
+    cellH: 576,
+    anchorX: 192,
+    anchorY: 498,
+    footprintPx: 234,
+    worldScale: 7.4,
+  },
+  {
+    tier: 2,
+    cellW: 448,
+    cellH: 672,
+    anchorX: 224,
+    anchorY: 581,
+    footprintPx: 273,
+    worldScale: 10.6,
+  },
+];
+
+const NATURE_W = 128;
+const NATURE_H = 160;
+const EMISSIVE_CELL_W = 160;
+const EMISSIVE_CELL_H = 240;
 
 const TIER_HEIGHT_RATIO: Record<BuildingArchetype, [number, number, number]> = {
   office_tower: [1.1, 1.7, 2.38],
@@ -122,8 +158,12 @@ function cleanEmissiveRowAlpha(
 }
 
 export function bakeAllAtlases(): {
-  buildings: string;
-  emissive: string;
+  buildings_t0: string;
+  buildings_t1: string;
+  buildings_t2: string;
+  emissive_t0: string;
+  emissive_t1: string;
+  emissive_t2: string;
   nature: string;
   manifest: Record<string, unknown>;
 } {
@@ -133,7 +173,7 @@ export function bakeAllAtlases(): {
     preserveDrawingBuffer: true,
   });
   renderer.setPixelRatio(1);
-  renderer.setSize(CELL_W, CELL_H);
+  renderer.setSize(TIER_SPECS[0].cellW, TIER_SPECS[0].cellH);
   renderer.shadowMap.enabled = false;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 1.05;
@@ -153,24 +193,26 @@ export function bakeAllAtlases(): {
   scene.add(hemi, sun, fill);
 
   const cam = new THREE.OrthographicCamera();
-  const worldScale = 5.0;
-  const diamondWorldW = Math.SQRT2 * worldScale;
-  const halfW = diamondWorldW * (CELL_W / FOOTPRINT_PX) * 0.5;
-  const halfH = halfW * (CELL_H / CELL_W);
-  positionIsoCam(cam, halfW, halfH, ANCHOR_Y / CELL_H);
+  const COLS = 16;
+  const ROWS = ARCHETYPES.length;
 
-  const COLS = 24;
-  const ROWS = ARCHETYPES.length * 2;
+  const tierTargets = TIER_SPECS.map((spec) => {
+    const bCanvas = document.createElement("canvas");
+    bCanvas.width = COLS * spec.cellW;
+    bCanvas.height = ROWS * spec.cellH;
+    const bCtx = bCanvas.getContext("2d")!;
+    bCtx.imageSmoothingEnabled = true;
+    bCtx.imageSmoothingQuality = "high";
 
-  const bCanvas = document.createElement("canvas");
-  bCanvas.width = COLS * CELL_W;
-  bCanvas.height = ROWS * CELL_H;
-  const bCtx = bCanvas.getContext("2d")!;
+    const eCanvas = document.createElement("canvas");
+    eCanvas.width = COLS * EMISSIVE_CELL_W;
+    eCanvas.height = ROWS * EMISSIVE_CELL_H;
+    const eCtx = eCanvas.getContext("2d")!;
+    eCtx.imageSmoothingEnabled = true;
+    eCtx.imageSmoothingQuality = "high";
 
-  const eCanvas = document.createElement("canvas");
-  eCanvas.width = COLS * CELL_W;
-  eCanvas.height = ROWS * CELL_H;
-  const eCtx = eCanvas.getContext("2d")!;
+    return { spec, bCanvas, bCtx, eCanvas, eCtx };
+  });
 
   const turfTex = getTurfTexture();
   const rootGroup = new THREE.Group();
@@ -230,23 +272,26 @@ export function bakeAllAtlases(): {
   const dummy = new THREE.Object3D();
   const dummyColor = new THREE.Color();
 
-  for (let ai = 0; ai < ARCHETYPES.length; ai++) {
-    const arch = ARCHETYPES[ai];
-    const variants = ARCHETYPE_VARIANT_KITS[arch];
+  for (const { spec, bCtx, eCtx } of tierTargets) {
+    renderer.setSize(spec.cellW, spec.cellH);
+    const diamondWorldW = Math.SQRT2 * spec.worldScale;
+    const halfW = diamondWorldW * (spec.cellW / spec.footprintPx) * 0.5;
+    const halfH = halfW * (spec.cellH / spec.cellW);
+    positionIsoCam(cam, halfW, halfH, spec.anchorY / spec.cellH);
 
-    for (let vi = 0; vi < 4; vi++) {
-      const isRect = vi === 3;
-      const variantIdx = vi % variants.length;
-      const kit = variants[variantIdx];
-      const pal = buildingPaletteForVariant(arch, variantIdx);
-      const row = ai * 2 + (vi % 2);
-      const colOffset = vi >= 2 ? 12 : 0;
+    for (let ai = 0; ai < ARCHETYPES.length; ai++) {
+      const arch = ARCHETYPES[ai];
+      const variants = ARCHETYPE_VARIANT_KITS[arch];
+      const hRatio = TIER_HEIGHT_RATIO[arch][spec.tier];
 
-      for (let ti = 0; ti < 3; ti++) {
-        const hRatio = TIER_HEIGHT_RATIO[arch][ti];
-        const localW = isRect ? 1.34 * worldScale : 1.0 * worldScale;
-        const localD = isRect ? 0.66 * worldScale : 1.0 * worldScale;
-        const totalH = hRatio * worldScale;
+      for (let vi = 0; vi < 4; vi++) {
+        const isRect = vi === 3;
+        const variantIdx = vi % variants.length;
+        const kit = variants[variantIdx];
+        const pal = buildingPaletteForVariant(arch, variantIdx);
+        const localW = isRect ? 1.34 * spec.worldScale : 1.0 * spec.worldScale;
+        const localD = isRect ? 0.66 * spec.worldScale : 1.0 * spec.worldScale;
+        const totalH = hRatio * spec.worldScale;
         const slices = computeSliceHeights(arch, totalH);
 
         for (let rot = 0; rot < 4; rot++) {
@@ -297,9 +342,9 @@ export function bakeAllAtlases(): {
             rootGroup.add(mesh);
           }
 
-          const col = colOffset + ti * 4 + rot;
-          const dx = col * CELL_W;
-          const dy = row * CELL_H;
+          const col = vi * 4 + rot;
+          const dx = col * spec.cellW;
+          const dy = ai * spec.cellH;
 
           // Beauty daylight pass
           scene.environment = envRT.texture;
@@ -311,7 +356,7 @@ export function bakeAllAtlases(): {
             if (m.isBeacon) m.mat.emissiveIntensity = 0.7;
           }
           renderer.render(scene, cam);
-          bCtx.drawImage(renderer.domElement, dx, dy, CELL_W, CELL_H);
+          bCtx.drawImage(renderer.domElement, dx, dy, spec.cellW, spec.cellH);
 
           // Emissive night pass
           scene.environment = null;
@@ -323,14 +368,24 @@ export function bakeAllAtlases(): {
             if (m.isBeacon) m.mat.emissiveIntensity = 1.8;
           }
           renderer.render(scene, cam);
-          eCtx.drawImage(renderer.domElement, dx, dy, CELL_W, CELL_H);
+          eCtx.drawImage(
+            renderer.domElement,
+            0,
+            0,
+            spec.cellW,
+            spec.cellH,
+            col * EMISSIVE_CELL_W,
+            ai * EMISSIVE_CELL_H,
+            EMISSIVE_CELL_W,
+            EMISSIVE_CELL_H,
+          );
         }
       }
     }
-  }
 
-  for (let r = 0; r < ROWS; r++) {
-    cleanEmissiveRowAlpha(eCtx, r * CELL_H, COLS * CELL_W, CELL_H);
+    for (let r = 0; r < ROWS; r++) {
+      cleanEmissiveRowAlpha(eCtx, r * EMISSIVE_CELL_H, COLS * EMISSIVE_CELL_W, EMISSIVE_CELL_H);
+    }
   }
 
   // Render Nature & Vehicle Sprites (8 cols x 2 rows at 96x128)
@@ -344,7 +399,8 @@ export function bakeAllAtlases(): {
   renderer.setSize(NATURE_W, NATURE_H);
   const natHalfW = 1.85;
   const natHalfH = natHalfW * (NATURE_H / NATURE_W);
-  positionIsoCam(cam, natHalfW, natHalfH, 108 / NATURE_H);
+  const natureAnchorY = 135;
+  positionIsoCam(cam, natHalfW, natHalfH, natureAnchorY / NATURE_H);
 
   const nCanvas = document.createElement("canvas");
   nCanvas.width = 8 * NATURE_W;
@@ -464,21 +520,23 @@ export function bakeAllAtlases(): {
   renderer.dispose();
 
   return {
-    buildings: bCanvas.toDataURL("image/webp", 0.8),
-    emissive: eCanvas.toDataURL("image/webp", 0.78),
-    nature: nCanvas.toDataURL("image/webp", 0.85),
+    buildings_t0: tierTargets[0].bCanvas.toDataURL("image/webp", 0.91),
+    buildings_t1: tierTargets[1].bCanvas.toDataURL("image/webp", 0.91),
+    buildings_t2: tierTargets[2].bCanvas.toDataURL("image/webp", 0.91),
+    emissive_t0: tierTargets[0].eCanvas.toDataURL("image/webp", 0.86),
+    emissive_t1: tierTargets[1].eCanvas.toDataURL("image/webp", 0.86),
+    emissive_t2: tierTargets[2].eCanvas.toDataURL("image/webp", 0.86),
+    nature: nCanvas.toDataURL("image/webp", 0.9),
     manifest: {
-      cellW: CELL_W,
-      cellH: CELL_H,
-      anchorX: ANCHOR_X,
-      anchorY: ANCHOR_Y,
-      footprintPx: FOOTPRINT_PX,
       cols: COLS,
       rows: ROWS,
+      tiers: TIER_SPECS,
+      emissiveCellW: EMISSIVE_CELL_W,
+      emissiveCellH: EMISSIVE_CELL_H,
       natureW: NATURE_W,
       natureH: NATURE_H,
-      natureAnchorX: 48,
-      natureAnchorY: 108,
+      natureAnchorX: Math.round(NATURE_W * 0.5),
+      natureAnchorY,
       archetypes: ARCHETYPES,
     },
   };

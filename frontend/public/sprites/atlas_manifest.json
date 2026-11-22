@@ -1,15 +1,41 @@
 {
-  "cellW": 192,
-  "cellH": 288,
-  "anchorX": 96,
-  "anchorY": 249,
-  "footprintPx": 117,
-  "cols": 24,
-  "rows": 20,
-  "natureW": 96,
-  "natureH": 128,
-  "natureAnchorX": 48,
-  "natureAnchorY": 108,
+  "cols": 16,
+  "rows": 10,
+  "tiers": [
+    {
+      "tier": 0,
+      "cellW": 256,
+      "cellH": 384,
+      "anchorX": 128,
+      "anchorY": 332,
+      "footprintPx": 156,
+      "worldScale": 5
+    },
+    {
+      "tier": 1,
+      "cellW": 384,
+      "cellH": 576,
+      "anchorX": 192,
+      "anchorY": 498,
+      "footprintPx": 234,
+      "worldScale": 7.4
+    },
+    {
+      "tier": 2,
+      "cellW": 448,
+      "cellH": 672,
+      "anchorX": 224,
+      "anchorY": 581,
+      "footprintPx": 273,
+      "worldScale": 10.6
+    }
+  ],
+  "emissiveCellW": 160,
+  "emissiveCellH": 240,
+  "natureW": 128,
+  "natureH": 160,
+  "natureAnchorX": 64,
+  "natureAnchorY": 135,
   "archetypes": [
     "grand_terminal",
     "city_hall",

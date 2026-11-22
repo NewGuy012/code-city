@@ -23,7 +23,7 @@ import {
   islandSignedDist,
 } from "./islandLayout";
 import { cameraFromTarget, screenToWorldGround, worldToIso, worldToScreen } from "./isoRenderer2D";
-import { ATLAS_CELL_H, ATLAS_CELL_W, spriteAtlas } from "./spriteAtlas2D";
+import { ATLAS_TIERS, spriteAtlas } from "./spriteAtlas2D";
 
 describe("isoRenderer2D projection", () => {
   test("worldToScreen and screenToWorldGround invert cleanly", () => {
@@ -201,12 +201,20 @@ describe("isoRenderer2D projection", () => {
     const sample = { file_path: "src/app/tower.tsx", building_archetype: "office_tower" as const };
     const squareSpec = spriteAtlas.getSpriteSpecForFile(sample, 4, 4, 42, 0);
     const wideSpec = spriteAtlas.getSpriteSpecForFile(sample, 8, 4, 42, 0);
-    expect(squareSpec.sw).toBe(ATLAS_CELL_W);
-    expect(squareSpec.sh).toBe(ATLAS_CELL_H);
-    expect(wideSpec.sw).toBe(ATLAS_CELL_W);
-    expect(wideSpec.sh).toBe(ATLAS_CELL_H);
+    const t0Spec = spriteAtlas.getSpriteSpecForFile(sample, 4, 4, 18, 0);
+    const t2Spec = spriteAtlas.getSpriteSpecForFile(sample, 4, 4, 68, 0);
+    expect(t0Spec.tier).toBe(0);
+    expect(t0Spec.sw).toBe(ATLAS_TIERS[0].cellW);
+    expect(squareSpec.tier).toBe(1);
+    expect(squareSpec.sw).toBe(ATLAS_TIERS[1].cellW);
+    expect(squareSpec.sh).toBe(ATLAS_TIERS[1].cellH);
+    expect(wideSpec.sw).toBe(ATLAS_TIERS[1].cellW);
+    expect(wideSpec.sh).toBe(ATLAS_TIERS[1].cellH);
+    expect(t2Spec.tier).toBe(2);
+    expect(t2Spec.sw).toBe(ATLAS_TIERS[2].cellW);
+    expect(t2Spec.sh).toBe(ATLAS_TIERS[2].cellH);
     // Wide lot uses slot 3 (col >= 12) while tall/wide flipped lots rotate by 90 deg
-    expect(wideSpec.sx).toBeGreaterThanOrEqual(12 * ATLAS_CELL_W);
+    expect(wideSpec.sx).toBeGreaterThanOrEqual(12 * ATLAS_TIERS[1].cellW);
     const tallSpec = spriteAtlas.getSpriteSpecForFile(sample, 4, 8, 42, 0);
     expect(Math.abs(tallSpec.rotOffset - wideSpec.rotOffset) % 2).toBe(1);
 

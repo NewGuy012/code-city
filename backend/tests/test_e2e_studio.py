@@ -126,8 +126,12 @@ def test_live_studio_e2e_2d_datamaps_tour_notes_3d_timescrub_and_quack(tmp_path:
 
     try:
         for asset in (
-            "/sprites/buildings_atlas.webp",
-            "/sprites/buildings_emissive.webp",
+            "/sprites/buildings_t0.webp",
+            "/sprites/buildings_t1.webp",
+            "/sprites/buildings_t2.webp",
+            "/sprites/buildings_emissive_t0.webp",
+            "/sprites/buildings_emissive_t1.webp",
+            "/sprites/buildings_emissive_t2.webp",
             "/sprites/nature_atlas.webp",
             "/sprites/atlas_manifest.json",
         ):

@@ -65,8 +65,12 @@ def main() -> None:
         browser.close()
 
     for key, fname in [
-        ("buildings", "buildings_atlas.webp"),
-        ("emissive", "buildings_emissive.webp"),
+        ("buildings_t0", "buildings_t0.webp"),
+        ("buildings_t1", "buildings_t1.webp"),
+        ("buildings_t2", "buildings_t2.webp"),
+        ("emissive_t0", "buildings_emissive_t0.webp"),
+        ("emissive_t1", "buildings_emissive_t1.webp"),
+        ("emissive_t2", "buildings_emissive_t2.webp"),
         ("nature", "nature_atlas.webp"),
     ]:
         b64 = data[key].split(",", 1)[1]
@@ -78,9 +82,14 @@ def main() -> None:
     manifest_path.write_text(json.dumps(data["manifest"], indent=2), encoding="utf-8")
     print(f"Wrote {manifest_path.name} into {out_dir}")
 
-    # Remove superseded PNG atlases if present
-    for old_png in ("buildings_atlas.png", "buildings_emissive.png"):
-        p = out_dir / old_png
+    # Remove superseded single-sheet atlases if present
+    for old_file in (
+        "buildings_atlas.png",
+        "buildings_emissive.png",
+        "buildings_atlas.webp",
+        "buildings_emissive.webp",
+    ):
+        p = out_dir / old_file
         if p.exists():
             os.unlink(p)
 

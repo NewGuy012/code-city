@@ -28,11 +28,6 @@ import {
   vehicleColor,
 } from "./cityTheme";
 import {
-  ATLAS_ANCHOR_X,
-  ATLAS_ANCHOR_Y,
-  ATLAS_CELL_H,
-  ATLAS_CELL_W,
-  ATLAS_FOOTPRINT_PX,
   NATURE_ANCHOR_X,
   NATURE_ANCHOR_Y,
   NATURE_CELL_H,
@@ -187,6 +182,31 @@ function getCachedNaturePlacements(
   const result = computeNatureAndStreetPlacements(districts, files, plazas, streetLines);
   cachedNatureInput = { districts, files, plazas, streetLines, result };
   return result;
+}
+
+/** Draw a baked 128x160 nature/vehicle sprite preserving historical 96px-cell world scale. */
+function drawNatureSprite(
+  ctx: CanvasRenderingContext2D,
+  natureImg: HTMLImageElement,
+  col: number,
+  row: 0 | 1,
+  screenX: number,
+  screenY: number,
+  scale96: number,
+): void {
+  const sc = scale96 * (96 / NATURE_CELL_W);
+  const rect = spriteAtlas.getNatureSpriteRect(col, row);
+  ctx.drawImage(
+    natureImg,
+    rect.sx,
+    rect.sy,
+    rect.sw,
+    rect.sh,
+    screenX - NATURE_ANCHOR_X * sc,
+    screenY - NATURE_ANCHOR_Y * sc,
+    NATURE_CELL_W * sc,
+    NATURE_CELL_H * sc,
+  );
 }
 
 function getTiltFactors(pitchDeg = DEFAULT_PITCH): { isoYScale: number; heightScale: number } {
@@ -631,15 +651,17 @@ function drawBuildingDetails(
   const isCardinalYaw = yawDeltaFromCardinal < 0.06;
 
   const atlas = spriteAtlas.ensureLoaded();
+  const spec = spriteAtlas.getSpriteSpecForFile(file, bw, bd, height, proj.compassStep);
+  const tierImg = atlas.buildings[spec.tier];
   const canUseSprite =
     atlas.ready &&
-    atlas.buildings !== null &&
+    tierImg !== null &&
     isCardinalYaw &&
     proj.pitch <= 58 &&
     !isBlackout &&
     Math.max(bw / Math.max(0.4, bd), bd / Math.max(0.4, bw)) <= 3.3;
 
-  if (canUseSprite && atlas.buildings) {
+  if (canUseSprite && tierImg) {
     if (arch !== "park_stadium") {
       drawCastShadow(ctx, proj, bx, bz, bw, bd, height, timeOfDay);
     }
@@ -670,16 +692,15 @@ function drawBuildingDetails(
       padWidth,
     );
 
-    const spec = spriteAtlas.getSpriteSpecForFile(file, bw, bd, height, proj.compassStep);
     const baseScreen = proj.project(bx + bw * 0.5, bz + bd * 0.5, 0.36);
     const tierMid = height < 26 ? 19 : height < 50 ? 38 : 66;
     const heightNudge = Math.max(0.84, Math.min(1.18, 1 + (height - tierMid) * 0.0045));
-    const scaleX = Math.max(0.24, ((bw + bd) * ISO_X * zoom) / ATLAS_FOOTPRINT_PX);
-    const scaleY = Math.max(0.22, scaleX * heightNudge * (0.72 + 0.28 * proj.heightScale));
-    const dw = ATLAS_CELL_W * scaleX;
-    const dh = ATLAS_CELL_H * scaleY;
-    const dx = baseScreen.x - ATLAS_ANCHOR_X * scaleX;
-    const dy = baseScreen.y - ATLAS_ANCHOR_Y * scaleY;
+    const scaleX = Math.max(0.18, ((bw + bd) * ISO_X * zoom) / spec.footprintPx);
+    const scaleY = Math.max(0.16, scaleX * heightNudge * (0.72 + 0.28 * proj.heightScale));
+    const dw = spec.sw * scaleX;
+    const dh = spec.sh * scaleY;
+    const dx = baseScreen.x - spec.anchorX * scaleX;
+    const dy = baseScreen.y - spec.anchorY * scaleY;
 
     const analytical = isAnalyticalDataMap(dataMap);
     let tintHex: string | null = null;
@@ -695,9 +716,10 @@ function drawBuildingDetails(
       tintAlpha = 0.14;
     }
 
+    ctx.imageSmoothingEnabled = true;
     spriteAtlas.drawTintedSprite(
       ctx,
-      atlas.buildings,
+      tierImg,
       spec.sx,
       spec.sy,
       spec.sw,
@@ -710,10 +732,11 @@ function drawBuildingDetails(
       tintAlpha,
     );
 
-    if (atlas.emissive && timeOfDay !== "day") {
+    const emissiveImg = atlas.emissive[spec.tier];
+    if (emissiveImg && timeOfDay !== "day") {
       ctx.save();
       ctx.globalAlpha *= timeOfDay === "night" ? 0.94 : 0.46;
-      ctx.drawImage(atlas.emissive, spec.sx, spec.sy, spec.sw, spec.sh, dx, dy, dw, dh);
+      ctx.drawImage(emissiveImg, spec.esx, spec.esy, spec.esw, spec.esh, dx, dy, dw, dh);
       ctx.restore();
     }
 
@@ -1066,17 +1089,14 @@ export function renderCityScene(args: RenderCitySceneArgs): HitBuilding[] {
     if (atlas.ready && atlas.nature) {
       const shipSp = proj.project(dockX + 5.2, dockZ + 8.4, bobY);
       const sScale = Math.max(0.35, 0.72 * zoom);
-      const rect = spriteAtlas.getNatureSpriteRect(4 + (proj.compassStep % 2), 1);
-      ctx.drawImage(
+      drawNatureSprite(
+        ctx,
         atlas.nature,
-        rect.sx,
-        rect.sy,
-        rect.sw,
-        rect.sh,
-        shipSp.x - NATURE_ANCHOR_X * sScale,
-        shipSp.y - NATURE_ANCHOR_Y * sScale,
-        NATURE_CELL_W * sScale,
-        NATURE_CELL_H * sScale,
+        4 + (proj.compassStep % 2),
+        1,
+        shipSp.x,
+        shipSp.y,
+        sScale,
       );
     } else {
       drawIsoPrism(
@@ -1112,18 +1132,7 @@ export function renderCityScene(args: RenderCitySceneArgs): HitBuilding[] {
       const bob = Math.sin(timeSec * 1.8 + idx * 1.5) * 0.35 * zoom;
       const p = proj.project(sb.x + WORLD_CENTER_X, sb.z + WORLD_CENTER_Z, bob);
       const sc = Math.max(0.28, 0.48 * sb.scale * zoom);
-      const rect = spriteAtlas.getNatureSpriteRect(6 + (idx % 2), 1);
-      ctx.drawImage(
-        natureImg,
-        rect.sx,
-        rect.sy,
-        rect.sw,
-        rect.sh,
-        p.x - NATURE_ANCHOR_X * sc,
-        p.y - NATURE_ANCHOR_Y * sc,
-        NATURE_CELL_W * sc,
-        NATURE_CELL_H * sc,
-      );
+      drawNatureSprite(ctx, natureImg, 6 + (idx % 2), 1, p.x, p.y, sc);
     });
   }
 
@@ -1242,18 +1251,7 @@ export function renderCityScene(args: RenderCitySceneArgs): HitBuilding[] {
       if (atlas.ready && atlas.nature && v.type === "request_car" && zoom >= 0.6 && !v.jammed) {
         const carCol = hashFilePath(v.id) % 4;
         const sc = Math.max(0.18, 0.26 * zoom);
-        const rect = spriteAtlas.getNatureSpriteRect(carCol, 1);
-        ctx.drawImage(
-          atlas.nature,
-          rect.sx,
-          rect.sy,
-          rect.sw,
-          rect.sh,
-          p.x - NATURE_ANCHOR_X * sc,
-          p.y - NATURE_ANCHOR_Y * sc,
-          NATURE_CELL_W * sc,
-          NATURE_CELL_H * sc,
-        );
+        drawNatureSprite(ctx, atlas.nature, carCol, 1, p.x, p.y, sc);
       } else {
         const size = Math.max(2.2, (v.type === "cargo_ship" ? 4.8 : 2.6) * zoom);
         ctx.beginPath();
@@ -1298,19 +1296,7 @@ export function renderCityScene(args: RenderCitySceneArgs): HitBuilding[] {
           item.rock.z + WORLD_CENTER_Z,
           item.rock.y,
         );
-        const sc = Math.max(0.2, 0.34 * zoom);
-        const rect = spriteAtlas.getNatureSpriteRect(7, 0);
-        ctx.drawImage(
-          atlas.nature,
-          rect.sx,
-          rect.sy,
-          rect.sw,
-          rect.sh,
-          p.x - NATURE_ANCHOR_X * sc,
-          p.y - NATURE_ANCHOR_Y * sc,
-          NATURE_CELL_W * sc,
-          NATURE_CELL_H * sc,
-        );
+        drawNatureSprite(ctx, atlas.nature, 7, 0, p.x, p.y, Math.max(0.2, 0.34 * zoom));
       }
       continue;
     }
@@ -1321,18 +1307,14 @@ export function renderCityScene(args: RenderCitySceneArgs): HitBuilding[] {
       if (atlas.ready && atlas.nature) {
         const h = hashFilePath(`tr:${tr.x.toFixed(1)}:${tr.z.toFixed(1)}`);
         const col = tr.isPine ? 4 + (h % 3) : h % 4;
-        const sc = Math.max(0.22, 0.38 * tr.scale * zoom);
-        const rect = spriteAtlas.getNatureSpriteRect(col, 0);
-        ctx.drawImage(
+        drawNatureSprite(
+          ctx,
           atlas.nature,
-          rect.sx,
-          rect.sy,
-          rect.sw,
-          rect.sh,
-          p.x - NATURE_ANCHOR_X * sc,
-          p.y - NATURE_ANCHOR_Y * sc,
-          NATURE_CELL_W * sc,
-          NATURE_CELL_H * sc,
+          col,
+          0,
+          p.x,
+          p.y,
+          Math.max(0.22, 0.38 * tr.scale * zoom),
         );
       } else {
         ctx.beginPath();

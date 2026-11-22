@@ -14,33 +14,61 @@ const ARCHETYPE_ROW: Record<BuildingArchetype, number> = {
   park_stadium: 9,
 };
 
-export const ATLAS_CELL_W = 192;
-export const ATLAS_CELL_H = 288;
-export const ATLAS_ANCHOR_X = 96;
-export const ATLAS_ANCHOR_Y = 249;
-export const ATLAS_FOOTPRINT_PX = 117;
+export interface AtlasTierMetrics {
+  readonly tier: 0 | 1 | 2;
+  readonly cellW: number;
+  readonly cellH: number;
+  readonly anchorX: number;
+  readonly anchorY: number;
+  readonly footprintPx: number;
+}
 
-export const NATURE_CELL_W = 96;
-export const NATURE_CELL_H = 128;
-export const NATURE_ANCHOR_X = 48;
-export const NATURE_ANCHOR_Y = 108;
+export const ATLAS_TIERS: readonly [AtlasTierMetrics, AtlasTierMetrics, AtlasTierMetrics] = [
+  { tier: 0, cellW: 256, cellH: 384, anchorX: 128, anchorY: 332, footprintPx: 156 },
+  { tier: 1, cellW: 384, cellH: 576, anchorX: 192, anchorY: 498, footprintPx: 234 },
+  { tier: 2, cellW: 448, cellH: 672, anchorX: 224, anchorY: 581, footprintPx: 273 },
+];
+
+export const NATURE_CELL_W = 128;
+export const NATURE_CELL_H = 160;
+export const NATURE_ANCHOR_X = 64;
+export const NATURE_ANCHOR_Y = 135;
+
+export const EMISSIVE_CELL_W = 160;
+export const EMISSIVE_CELL_H = 240;
 
 export interface LoadedSpriteAtlas {
   ready: boolean;
-  buildings: HTMLImageElement | null;
-  emissive: HTMLImageElement | null;
+  buildings: [HTMLImageElement | null, HTMLImageElement | null, HTMLImageElement | null];
+  emissive: [HTMLImageElement | null, HTMLImageElement | null, HTMLImageElement | null];
   nature: HTMLImageElement | null;
+}
+
+export interface BuildingSpriteSpec {
+  tier: 0 | 1 | 2;
+  sx: number;
+  sy: number;
+  sw: number;
+  sh: number;
+  esx: number;
+  esy: number;
+  esw: number;
+  esh: number;
+  anchorX: number;
+  anchorY: number;
+  footprintPx: number;
+  rotOffset: number;
 }
 
 class SpriteAtlasManager {
   private state: LoadedSpriteAtlas = {
     ready: false,
-    buildings: null,
-    emissive: null,
+    buildings: [null, null, null],
+    emissive: [null, null, null],
     nature: null,
   };
   private started = false;
-  private tintCanvas: HTMLCanvasElement | null = null;
+  private tintCache = new Map<string, HTMLCanvasElement>();
 
   ensureLoaded(): LoadedSpriteAtlas {
     if (this.started || typeof Image === "undefined") {
@@ -48,29 +76,23 @@ class SpriteAtlasManager {
     }
     this.started = true;
 
-    let loadedCount = 0;
-    const onLoadOne = () => {
-      loadedCount += 1;
-      if (loadedCount >= 3) this.state.ready = true;
-    };
     const loadImg = (src: string, assign: (img: HTMLImageElement) => void) => {
       const img = new Image();
       img.onload = () => {
         assign(img);
-        onLoadOne();
-      };
-      img.onerror = () => {
-        onLoadOne();
+        this.state.ready = true;
       };
       img.src = src;
     };
 
-    loadImg("./sprites/buildings_atlas.webp", (img) => {
-      this.state.buildings = img;
-    });
-    loadImg("./sprites/buildings_emissive.webp", (img) => {
-      this.state.emissive = img;
-    });
+    for (const t of [0, 1, 2] as const) {
+      loadImg(`./sprites/buildings_t${t}.webp`, (img) => {
+        this.state.buildings[t] = img;
+      });
+      loadImg(`./sprites/buildings_emissive_t${t}.webp`, (img) => {
+        this.state.emissive[t] = img;
+      });
+    }
     loadImg("./sprites/nature_atlas.webp", (img) => {
       this.state.nature = img;
     });
@@ -83,17 +105,24 @@ class SpriteAtlasManager {
     heightVal: number,
     compassStep: 0 | 1 | 2 | 3,
     variantSlot: 0 | 1 | 2 | 3 = 0,
-  ): { sx: number; sy: number; sw: number; sh: number } {
-    const baseRow = ARCHETYPE_ROW[archetype] ?? 5;
-    const row = baseRow * 2 + (variantSlot % 2);
-    const colOffset = variantSlot >= 2 ? 12 : 0;
-    const tier = heightVal < 26 ? 0 : heightVal < 50 ? 1 : 2;
-    const col = colOffset + tier * 4 + compassStep;
+  ): Omit<BuildingSpriteSpec, "rotOffset"> {
+    const tier: 0 | 1 | 2 = heightVal < 26 ? 0 : heightVal < 50 ? 1 : 2;
+    const tm = ATLAS_TIERS[tier];
+    const row = ARCHETYPE_ROW[archetype] ?? 5;
+    const col = variantSlot * 4 + compassStep;
     return {
-      sx: col * ATLAS_CELL_W,
-      sy: row * ATLAS_CELL_H,
-      sw: ATLAS_CELL_W,
-      sh: ATLAS_CELL_H,
+      tier,
+      sx: col * tm.cellW,
+      sy: row * tm.cellH,
+      sw: tm.cellW,
+      sh: tm.cellH,
+      esx: col * EMISSIVE_CELL_W,
+      esy: row * EMISSIVE_CELL_H,
+      esw: EMISSIVE_CELL_W,
+      esh: EMISSIVE_CELL_H,
+      anchorX: tm.anchorX,
+      anchorY: tm.anchorY,
+      footprintPx: tm.footprintPx,
     };
   }
 
@@ -104,7 +133,7 @@ class SpriteAtlasManager {
     bd: number,
     heightVal: number,
     compassStep: 0 | 1 | 2 | 3,
-  ): { sx: number; sy: number; sw: number; sh: number; rotOffset: number } {
+  ): BuildingSpriteSpec {
     const h = hashFilePath(file.file_path);
     const aspect = bw / Math.max(0.4, bd);
     let variantSlot: 0 | 1 | 2 | 3;
@@ -140,7 +169,7 @@ class SpriteAtlasManager {
     };
   }
 
-  /** Draw sprite optionally tinted for DataMap highlights or Time-of-Day atmosphere. */
+  /** Draw sprite optionally tinted with cached offscreen tiles for 60fps Night/Golden/DataMap modes. */
   drawTintedSprite(
     ctx: CanvasRenderingContext2D,
     srcImg: HTMLImageElement,
@@ -159,27 +188,36 @@ class SpriteAtlasManager {
       ctx.drawImage(srcImg, sx, sy, sw, sh, dx, dy, dw, dh);
       return;
     }
-    if (!this.tintCanvas) {
-      this.tintCanvas = document.createElement("canvas");
-      this.tintCanvas.width = ATLAS_CELL_W;
-      this.tintCanvas.height = ATLAS_CELL_H;
-    }
-    const tCtx = this.tintCanvas.getContext("2d");
-    if (!tCtx) {
-      ctx.drawImage(srcImg, sx, sy, sw, sh, dx, dy, dw, dh);
-      return;
-    }
-    tCtx.clearRect(0, 0, ATLAS_CELL_W, ATLAS_CELL_H);
-    tCtx.globalCompositeOperation = "source-over";
-    tCtx.drawImage(srcImg, sx, sy, sw, sh, 0, 0, ATLAS_CELL_W, ATLAS_CELL_H);
-    tCtx.globalCompositeOperation = "source-atop";
-    tCtx.fillStyle = tintHex;
-    tCtx.globalAlpha = tintAlpha;
-    tCtx.fillRect(0, 0, ATLAS_CELL_W, ATLAS_CELL_H);
-    tCtx.globalAlpha = 1.0;
-    tCtx.globalCompositeOperation = "source-over";
+    const cacheKey = `${sw}:${sx}:${sy}:${tintHex}:${Math.round(tintAlpha * 100)}`;
+    let tile = this.tintCache.get(cacheKey);
+    if (!tile) {
+      const cw = Math.min(sw, 384);
+      const ch = Math.min(sh, 576);
+      tile = document.createElement("canvas");
+      tile.width = cw;
+      tile.height = ch;
+      const tCtx = tile.getContext("2d");
+      if (!tCtx) {
+        ctx.drawImage(srcImg, sx, sy, sw, sh, dx, dy, dw, dh);
+        return;
+      }
+      tCtx.globalCompositeOperation = "source-over";
+      tCtx.drawImage(srcImg, sx, sy, sw, sh, 0, 0, cw, ch);
+      tCtx.globalCompositeOperation = "source-atop";
+      tCtx.fillStyle = tintHex;
+      tCtx.globalAlpha = tintAlpha;
+      tCtx.fillRect(0, 0, cw, ch);
+      tCtx.globalAlpha = 1.0;
+      tCtx.globalCompositeOperation = "source-over";
 
-    ctx.drawImage(this.tintCanvas, 0, 0, ATLAS_CELL_W, ATLAS_CELL_H, dx, dy, dw, dh);
+      if (this.tintCache.size >= 140) {
+        const oldest = this.tintCache.keys().next().value;
+        if (oldest !== undefined) this.tintCache.delete(oldest);
+      }
+      this.tintCache.set(cacheKey, tile);
+    }
+
+    ctx.drawImage(tile, 0, 0, tile.width, tile.height, dx, dy, dw, dh);
   }
 }
 
