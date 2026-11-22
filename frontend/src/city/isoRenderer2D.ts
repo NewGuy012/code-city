@@ -645,20 +645,12 @@ function drawBuildingDetails(
   const arch = file.building_archetype;
   const zoom = proj.zoom;
 
-  const snappedYaw = DEFAULT_YAW + proj.compassStep * (Math.PI / 2);
-  let yawDeltaFromCardinal = Math.abs(proj.yaw - snappedYaw) % (Math.PI * 2);
-  if (yawDeltaFromCardinal > Math.PI) yawDeltaFromCardinal = Math.PI * 2 - yawDeltaFromCardinal;
-  const isCardinalYaw = yawDeltaFromCardinal < 0.06;
-
   const atlas = spriteAtlas.ensureLoaded();
   const spec = spriteAtlas.getSpriteSpecForFile(file, bw, bd, height, proj.compassStep);
   const tierImg = atlas.buildings[spec.tier];
   const canUseSprite =
     atlas.ready &&
     tierImg !== null &&
-    isCardinalYaw &&
-    proj.pitch <= 58 &&
-    !isBlackout &&
     Math.max(bw / Math.max(0.4, bd), bd / Math.max(0.4, bw)) <= 3.3;
 
   if (canUseSprite && tierImg) {
@@ -695,8 +687,14 @@ function drawBuildingDetails(
     const baseScreen = proj.project(bx + bw * 0.5, bz + bd * 0.5, 0.36);
     const tierMid = height < 26 ? 19 : height < 50 ? 38 : 66;
     const heightNudge = Math.max(0.84, Math.min(1.18, 1 + (height - tierMid) * 0.0045));
-    const scaleX = Math.max(0.18, ((bw + bd) * ISO_X * zoom) / spec.footprintPx);
-    const scaleY = Math.max(0.16, scaleX * heightNudge * (0.72 + 0.28 * proj.heightScale));
+    const theta = proj.yaw - DEFAULT_YAW;
+    const cT = Math.cos(theta);
+    const sT = Math.sin(theta);
+    const projSpanX = (Math.abs(cT - sT) * bw + Math.abs(sT + cT) * bd) * ISO_X * zoom;
+    const cardSpanX = (bw + bd) * ISO_X * zoom;
+    const effSpanX = Math.max(cardSpanX * 0.72, cardSpanX * 0.35 + projSpanX * 0.65);
+    const scaleX = Math.max(0.18, effSpanX / spec.footprintPx);
+    const scaleY = Math.max(0.14, scaleX * heightNudge * (0.38 + 0.62 * proj.heightScale));
     const dw = spec.sw * scaleX;
     const dh = spec.sh * scaleY;
     const dx = baseScreen.x - spec.anchorX * scaleX;
@@ -705,7 +703,10 @@ function drawBuildingDetails(
     const analytical = isAnalyticalDataMap(dataMap);
     let tintHex: string | null = null;
     let tintAlpha = 0.56;
-    if (analytical || isHopHighlight) {
+    if (isBlackout) {
+      tintHex = "#0f172a";
+      tintAlpha = 0.82;
+    } else if (analytical || isHopHighlight) {
       tintHex = palette.left;
       tintAlpha = 0.56;
     } else if (timeOfDay === "night") {
@@ -733,7 +734,7 @@ function drawBuildingDetails(
     );
 
     const emissiveImg = atlas.emissive[spec.tier];
-    if (emissiveImg && timeOfDay !== "day") {
+    if (emissiveImg && timeOfDay !== "day" && !isBlackout) {
       ctx.save();
       ctx.globalAlpha *= timeOfDay === "night" ? 0.94 : 0.46;
       ctx.drawImage(emissiveImg, spec.esx, spec.esy, spec.esw, spec.esh, dx, dy, dw, dh);
@@ -741,7 +742,7 @@ function drawBuildingDetails(
     }
 
     const roof = proj.project(bx + bw * 0.5, bz + bd * 0.5, (height * 0.72 + 6) * zoom);
-    drawConditionSignals(ctx, file, bx, bz, zoom, timeSec, roof, isBurning, false);
+    drawConditionSignals(ctx, file, bx, bz, zoom, timeSec, roof, isBurning, isBlackout);
     return;
   }
 
