@@ -120,16 +120,11 @@ def export_static_site(
     """Package React studio + DuckDB-Wasm + Parquet data into a zero-backend static bundle."""
     out = output_dir.resolve()
     protected = {Path("/"), Path.home().resolve(), Path.cwd().resolve(), lake.data_dir.resolve()}
-    if out in protected:
+    if any(p == out or p.is_relative_to(out) for p in protected):
         raise ValueError(f"Refusing to overwrite protected directory: {out}")
 
     dist_dir = _ensure_frontend_dist(frontend_dist)
-    if out.exists():
-        shutil.rmtree(out)
-    shutil.copytree(dist_dir, out)
-
     data_dir = out / "data"
-    data_dir.mkdir(parents=True, exist_ok=True)
 
     con_ctx = (
         nullcontext(con)
@@ -139,12 +134,16 @@ def export_static_site(
         else lake.session(read_only=True)
     )
     with con_ctx as db_con:
-        lake.export_repo_parquet(db_con, owner, repo, data_dir)
         matched = lake.get_repo(db_con, owner, repo)
-    if matched is None:
-        grade, title, source = "A", "Sunlit Civic Metropolis", f"{owner}/{repo}"
-    else:
-        grade, title, source = matched.latest_grade, matched.latest_title, matched.repo_url_or_path
+        if matched is None:
+            raise KeyError(f"Repository not found: {owner}/{repo}")
+        if out.exists():
+            shutil.rmtree(out)
+        shutil.copytree(dist_dir, out)
+        data_dir.mkdir(parents=True, exist_ok=True)
+        lake.export_repo_parquet(db_con, owner, repo, data_dir)
+
+    grade, title, source = matched.latest_grade, matched.latest_title, matched.repo_url_or_path
 
     manifest = {
         "mode": "static",

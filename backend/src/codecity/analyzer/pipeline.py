@@ -121,8 +121,7 @@ def analyze_repository(
                 except Exception:
                     pass
 
-            client = qsrv.connect_client(alias="remote")
-            try:
+            with qsrv.client_session(alias="remote") as client:
                 lake.write_snapshot_bundle(
                     client,
                     resolved_owner,
@@ -136,8 +135,6 @@ def analyze_repository(
                     plugin_res.diagnostics,
                     catalog_prefix=f"remote.{lake.catalog_name}",
                 )
-            finally:
-                client.close()
             return kf.snapshot_idx, len(file_metrics)
 
         max_workers = max(1, min(workers, total_kf))

@@ -16,14 +16,14 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 import duckdb
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from codecity.analyzer.git_history import resolve_git_repo
 from codecity.analyzer.pipeline import analyze_repository
@@ -44,10 +44,12 @@ from codecity.storage.lakehouse import (
     LakehouseManager,
     infer_owner_repo,
     sanitize_identifier,
+    validate_action_id,
 )
 from codecity.storage.quack_server import QuackServerManager
 
 _LOCAL_ORIGIN_RE = re.compile(r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$")
+_MUTATING_METHODS = frozenset({"POST", "PUT", "DELETE", "PATCH"})
 _HOP_BY_HOP_REQ_HEADERS = frozenset(
     {"host", "content-length", "connection", "transfer-encoding", "keep-alive", "cookie"}
 )
@@ -58,14 +60,14 @@ _MAX_JOBS_RETAINED = 64
 
 
 class AnnotationCreateRequest(BaseModel):
-    file_path: str
-    author: str = "mayor"
-    tag: str = "note"
-    body: str
+    file_path: str = Field(min_length=1, max_length=512)
+    author: str = Field(default="mayor", max_length=80)
+    tag: str = Field(default="note", max_length=40)
+    body: str = Field(min_length=1, max_length=4000)
 
 
 class FixDiffRequest(BaseModel):
-    file_path: str
+    file_path: str = Field(min_length=1, max_length=512)
 
 
 class ExportRequest(BaseModel):
@@ -73,23 +75,23 @@ class ExportRequest(BaseModel):
 
 
 class MayorExecuteRequest(BaseModel):
-    tool: str
-    target_path: str
-    secondary_path: str | None = None
-    district_path: str = ""
+    tool: str = Field(min_length=1, max_length=40)
+    target_path: str = Field(min_length=1, max_length=512)
+    secondary_path: str | None = Field(default=None, max_length=512)
+    district_path: str = Field(default="", max_length=512)
     confirm: bool = False
 
 
 class SandboxActionCreateRequest(BaseModel):
-    action_id: str | None = None
-    session_id: str = "default"
-    author: str = "mayor"
-    tool: str
-    target_path: str
-    secondary_path: str | None = None
-    district_path: str
-    summary: str
-    velocity_cost: int = 0
+    action_id: str | None = Field(default=None, max_length=64)
+    session_id: str = Field(default="default", max_length=64)
+    author: str = Field(default="mayor", max_length=80)
+    tool: str = Field(min_length=1, max_length=40)
+    target_path: str = Field(min_length=1, max_length=512)
+    secondary_path: str | None = Field(default=None, max_length=512)
+    district_path: str = Field(default="", max_length=512)
+    summary: str = Field(min_length=1, max_length=500)
+    velocity_cost: int = Field(default=0, ge=0, le=10000)
 
 
 class SandboxToggleRequest(BaseModel):
@@ -156,11 +158,8 @@ def create_app(
     @contextmanager
     def write_con() -> Iterator[tuple[duckdb.DuckDBPyConnection, str | None]]:
         if quack_mgr is not None:
-            client = quack_mgr.connect_client(alias="remote")
-            try:
+            with quack_mgr.client_session(alias="remote") as client:
                 yield client, f"remote.{lake.catalog_name}"
-            finally:
-                client.close()
         else:
             with db_lock, lake.session() as con:
                 yield con, None
@@ -186,22 +185,26 @@ def create_app(
     )
 
     @app.middleware("http")
-    async def _security_headers(request: Request, call_next: Any) -> Response:
+    async def _security_and_csrf_guard(request: Request, call_next: Any) -> Response:
+        if request.method in _MUTATING_METHODS and request.url.path.startswith(("/api/", "/quack")):
+            origin = request.headers.get("origin", "")
+            sec_site = request.headers.get("sec-fetch-site", "").lower()
+            if sec_site == "cross-site" or (origin and not _LOCAL_ORIGIN_RE.match(origin)):
+                return JSONResponse(status_code=403, content={"detail": "Cross-origin rejected"})
         resp: Response = await call_next(request)
         resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+        resp.headers.setdefault("Referrer-Policy", "no-referrer")
         if request.url.path.startswith(("/api/", "/quack")):
             resp.headers.setdefault("X-Frame-Options", "DENY")
         return resp
 
-    @app.exception_handler(duckdb.Error)
-    def _handle_duckdb_error(_: Request, __: duckdb.Error) -> JSONResponse:
+    @app.exception_handler(duckdb.CatalogException)
+    def _handle_duckdb_missing(_: Request, __: duckdb.CatalogException) -> JSONResponse:
         return JSONResponse(status_code=404, content={"detail": "Repository or table not found"})
 
-    def _cors_headers_for(request: Request) -> dict[str, str]:
-        origin = request.headers.get("origin", "")
-        if _LOCAL_ORIGIN_RE.match(origin):
-            return {"Access-Control-Allow-Origin": origin, "Vary": "Origin"}
-        return {}
+    @app.exception_handler(duckdb.Error)
+    def _handle_duckdb_error(_: Request, __: duckdb.Error) -> JSONResponse:
+        return JSONResponse(status_code=500, content={"detail": "Database operation failed"})
 
     def _run_job(job: AnalyzeJob, req: AnalyzeRequest, repo_lock: threading.Lock) -> None:
         def on_prog(evt: dict[str, Any]) -> None:
@@ -235,10 +238,15 @@ def create_app(
                     }
                 )
         except Exception as exc:  # pragma: no cover - surfaced via job state
+            safe_err = (
+                str(exc).replace(str(lake.data_dir), "<catalog>")[:240]
+                if isinstance(exc, (ValueError, FileNotFoundError))
+                else f"Analysis failed ({type(exc).__name__})"
+            )
             with job.lock:
                 job.status = "failed"
-                job.error = str(exc)
-                job.events.append({"stage": "error", "message": str(exc), "percent": 100.0})
+                job.error = safe_err
+                job.events.append({"stage": "error", "message": safe_err, "percent": 100.0})
 
     def _resolve_repo_path(owner: str, repo: str) -> Path:
         with locked_read_con() as con:
@@ -424,12 +432,15 @@ def create_app(
 
     @app.post("/api/repos/{owner}/{repo}/annotations")
     def api_add_annotation(owner: str, repo: str, body: AnnotationCreateRequest) -> dict[str, Any]:
+        cleaned_body = body.body.strip()
+        if not cleaned_body:
+            raise HTTPException(status_code=400, detail="Annotation body cannot be empty")
         note = Annotation(
             annotation_id=f"note-{uuid.uuid4().hex[:10]}",
             file_path=body.file_path,
             author=body.author.strip() or "mayor",
             tag=body.tag.strip() or "note",
-            body=body.body.strip(),
+            body=cleaned_body,
             created_at=datetime.now(UTC).replace(tzinfo=None),
         )
         with write_con() as (con, pfx):
@@ -451,8 +462,16 @@ def create_app(
     def api_add_sandbox_action(
         owner: str, repo: str, body: SandboxActionCreateRequest
     ) -> dict[str, Any]:
+        try:
+            action_id = (
+                validate_action_id(body.action_id)
+                if body.action_id is not None
+                else f"sbx-{uuid.uuid4().hex[:10]}"
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         act = SandboxAction(
-            action_id=body.action_id or f"sbx-{uuid.uuid4().hex[:10]}",
+            action_id=action_id,
             session_id=body.session_id,
             author=body.author.strip() or "mayor",
             tool=body.tool,
@@ -517,13 +536,13 @@ def create_app(
             )
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="Repository not found") from exc
+        o_q = quote(owner, safe="")
+        r_q = quote(repo, safe="")
         return {
             "output_dir": str(res.output_dir),
-            "badge_url": f"/api/repos/{owner}/{repo}/badge.svg",
+            "badge_url": f"/api/repos/{o_q}/{r_q}/badge.svg",
             "postcard_url": (
-                f"/api/repos/{owner}/{repo}/exports/city-postcard.png"
-                if res.postcard_path
-                else None
+                f"/api/repos/{o_q}/{r_q}/exports/city-postcard.png" if res.postcard_path else None
             ),
         }
 
@@ -537,16 +556,8 @@ def create_app(
     @app.api_route("/quack", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
     @app.api_route("/quack/{subpath:path}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
     async def quack_cors_proxy(request: Request, subpath: str = "") -> Response:
-        cors_hdrs = _cors_headers_for(request)
         if request.method == "OPTIONS":
-            return Response(
-                status_code=204,
-                headers={
-                    **cors_hdrs,
-                    "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-                    "Access-Control-Allow-Headers": "*",
-                },
-            )
+            return Response(status_code=204)
         if quack_mgr is None or quack_mgr.endpoint is None:
             raise HTTPException(status_code=503, detail="Quack server is not active")
 
@@ -580,7 +591,6 @@ def create_app(
             raise HTTPException(status_code=502, detail="Quack upstream unavailable") from exc
 
         resp_headers = {k: v for k, v in raw_headers if k.lower() not in _HOP_BY_HOP_RESP_HEADERS}
-        resp_headers.update(cors_hdrs)
         return Response(content=payload, status_code=status, headers=resp_headers)
 
     dist_dir = frontend_dist or default_frontend_dist()

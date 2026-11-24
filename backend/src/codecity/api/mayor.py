@@ -137,6 +137,24 @@ def _tool_result(
     }
 
 
+def _write_and_commit(
+    repo_path: Path,
+    *,
+    tool: str,
+    rel_path: str,
+    content: str,
+    commit_msg: str,
+    user_msg: str,
+    only_if_missing: bool = False,
+) -> dict[str, Any]:
+    dest = safe_repo_target(repo_path, rel_path)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if not (only_if_missing and dest.exists()):
+        dest.write_text(content, encoding="utf-8")
+    committed, sha, diff = _commit_if_dirty(repo_path, [rel_path], commit_msg)
+    return _tool_result(tool, rel_path, committed, sha, diff, user_msg)
+
+
 def execute_live_mayor_tool(
     repo_path: Path,
     *,
@@ -175,41 +193,30 @@ def execute_live_mayor_tool(
                 if parent_dir == "."
                 else f"{parent_dir}/{stem}.mayor.test.ts"
             )
-            test_file = safe_repo_target(repo_path, rel_test)
-            test_file.parent.mkdir(parents=True, exist_ok=True)
-            if not test_file.exists():
-                test_file.write_text(
-                    'import { describe, expect, test } from "bun:test";\n\n'
-                    f"describe({json.dumps(rel_target)}, () => {{\n"
-                    '  test("scaffolded proving park test", () => {\n'
-                    "    expect(true).toBe(true);\n"
-                    "  });\n"
-                    "});\n",
-                    encoding="utf-8",
-                )
+            content = (
+                'import { describe, expect, test } from "bun:test";\n\n'
+                f"describe({json.dumps(rel_target)}, () => {{\n"
+                '  test("scaffolded proving park test", () => {\n'
+                "    expect(true).toBe(true);\n"
+                "  });\n"
+                "});\n"
+            )
         else:
             rel_test = f"tests/test_{stem}_mayor.py"
-            test_file = safe_repo_target(repo_path, rel_test)
-            test_file.parent.mkdir(parents=True, exist_ok=True)
-            if not test_file.exists():
-                test_file.write_text(
-                    f'"""Proving Park starter tests for {rel_target!r}."""\n\n'
-                    f"def test_{stem}_proving_park_smoke() -> None:\n"
-                    "    assert True\n",
-                    encoding="utf-8",
-                )
-        committed, sha, diff = _commit_if_dirty(
+            content = (
+                '"""Proving Park starter tests."""\n\n'
+                f"TARGET = {json.dumps(rel_target)}\n\n"
+                f"def test_{stem}_proving_park_smoke() -> None:\n"
+                "    assert TARGET\n"
+            )
+        return _write_and_commit(
             repo_path,
-            [rel_test],
-            f"test(mayor): plant Proving Park {rel_test}",
-        )
-        return _tool_result(
-            tool,
-            rel_test,
-            committed,
-            sha,
-            diff,
-            f"Scaffolded starter test `{rel_test}` on {MAYOR_BRANCH}",
+            tool=tool,
+            rel_path=rel_test,
+            content=content,
+            commit_msg=f"test(mayor): plant Proving Park {rel_test}",
+            user_msg=f"Scaffolded starter test `{rel_test}` on {MAYOR_BRANCH}",
+            only_if_missing=True,
         )
 
     if tool == "co_maintainer":
@@ -217,33 +224,25 @@ def execute_live_mayor_tool(
             raise ValueError("Target path cannot contain whitespace for CODEOWNERS entry")
         owners_rel = ".github/CODEOWNERS"
         owners_file = safe_repo_target(repo_path, owners_rel)
-        owners_file.parent.mkdir(parents=True, exist_ok=True)
         existing = owners_file.read_text(encoding="utf-8") if owners_file.exists() else ""
         entry = f"/{rel_target} @core-maintainers @co-maintainer"
-        if entry not in existing.splitlines():
-            owners_file.write_text(
-                (existing.rstrip() + "\n" + entry + "\n").lstrip("\n"),
-                encoding="utf-8",
-            )
-        committed, sha, diff = _commit_if_dirty(
-            repo_path,
-            [owners_rel],
-            f"chore(mayor): assign co-maintainer for {rel_target}",
+        content = (
+            existing
+            if entry in existing.splitlines()
+            else (existing.rstrip() + "\n" + entry + "\n").lstrip("\n")
         )
-        return _tool_result(
-            tool,
-            owners_rel,
-            committed,
-            sha,
-            diff,
-            f"Updated {owners_rel} for {rel_target} on {MAYOR_BRANCH}",
+        return _write_and_commit(
+            repo_path,
+            tool=tool,
+            rel_path=owners_rel,
+            content=content,
+            commit_msg=f"chore(mayor): assign co-maintainer for {rel_target}",
+            user_msg=f"Updated {owners_rel} for {rel_target} on {MAYOR_BRANCH}",
         )
 
     if tool in {"splitter", "transit_hub"}:
         slug = re.sub(r"[^a-zA-Z0-9_]+", "_", rel_target).strip("_")
         spec_rel = f".github/codecity-blueprints/{tool}_{slug}.md"
-        spec_file = safe_repo_target(repo_path, spec_rel)
-        spec_file.parent.mkdir(parents=True, exist_ok=True)
         checklist = (
             "- [ ] Extract cohesive domain submodules (`_core`, `_service`, `_adapter`)\n"
             "- [ ] Preserve re-exports for zero-breakage callers\n"
@@ -258,19 +257,13 @@ def execute_live_mayor_tool(
             + "\n## Recommended Refactor Checklist\n"
             + checklist
         )
-        spec_file.write_text(body, encoding="utf-8")
-        committed, sha, diff = _commit_if_dirty(
+        return _write_and_commit(
             repo_path,
-            [spec_rel],
-            f"docs(mayor): emit {tool} refactor blueprint for {rel_target}",
-        )
-        return _tool_result(
-            tool,
-            spec_rel,
-            committed,
-            sha,
-            diff,
-            f"Generated refactor spec `{spec_rel}` on {MAYOR_BRANCH}",
+            tool=tool,
+            rel_path=spec_rel,
+            content=body,
+            commit_msg=f"docs(mayor): emit {tool} refactor blueprint for {rel_target}",
+            user_msg=f"Generated refactor spec `{spec_rel}` on {MAYOR_BRANCH}",
         )
 
     if tool == "bulldozer":

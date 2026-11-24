@@ -104,6 +104,15 @@ class QuackServerManager:
         return client
 
     @contextmanager
+    def client_session(self, *, alias: str = "remote") -> Iterator[duckdb.DuckDBPyConnection]:
+        """Context-managed remote DuckDB connection attached to this Quack server."""
+        client = self.connect_client(alias=alias)
+        try:
+            yield client
+        finally:
+            client.close()
+
+    @contextmanager
     def host_cursor(self) -> Iterator[duckdb.DuckDBPyConnection]:
         """Yield a cursor on the host DuckDB connection holding the DuckLake catalog."""
         self.start()

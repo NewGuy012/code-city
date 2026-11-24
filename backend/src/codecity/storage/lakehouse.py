@@ -32,6 +32,14 @@ DEFAULT_CATALOG_NAME = "lake"
 DATA_INLINING_LIMIT = 1000
 _ACTION_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
 
+
+def validate_action_id(action_id: str) -> str:
+    """Ensure sandbox `action_id` contains only safe identifier characters."""
+    if not _ACTION_ID_RE.fullmatch(action_id):
+        raise ValueError(f"Invalid sandbox action_id: {action_id}")
+    return action_id
+
+
 _ColumnSpec = tuple[str, str]
 
 _TABLE_SCHEMAS: dict[str, list[_ColumnSpec]] = {
@@ -529,8 +537,7 @@ class LakehouseManager:
         *,
         catalog_prefix: str | None = None,
     ) -> None:
-        if not _ACTION_ID_RE.fullmatch(action_id):
-            raise ValueError(f"Invalid sandbox action_id: {action_id}")
+        validate_action_id(action_id)
         pfx = self.schema_prefix(owner, repo, catalog_prefix=catalog_prefix)
         active_sql = "true" if active else "false"
         con.execute(
