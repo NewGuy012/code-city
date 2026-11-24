@@ -9,6 +9,7 @@ from codecity.analyzer.plugins.base import (
     DepCollector,
     PluginResult,
     edges_to_imports,
+    iter_repo_files,
     parse_toml_lockfile,
     safe_read_text,
     structural_diagnostics_to_lint,
@@ -20,9 +21,7 @@ from codecity.models import ExternalDep, FixDiffResult
 def _parse_cargo_deps(worktree_root: Path, snapshot_idx: int) -> list[ExternalDep]:
     deps = DepCollector(snapshot_idx, "rust")
 
-    for cargo_toml in sorted(worktree_root.glob("**/Cargo.toml")):
-        if "target" in cargo_toml.parts:
-            continue
+    for cargo_toml in iter_repo_files(worktree_root, names=frozenset({"Cargo.toml"})):
         raw = safe_read_text(worktree_root, cargo_toml)
         if not raw:
             continue

@@ -10,8 +10,11 @@ from codecity.analyzer.plugins.base import (
     DepCollector,
     PluginResult,
     edges_to_imports,
+    iter_repo_files,
     parse_toml_lockfile,
+    resolve_rel_path,
     ruff_cmd,
+    run_batched_tool,
     run_tool,
     safe_read_text,
     safe_repo_target,
@@ -62,7 +65,9 @@ def _parse_python_deps(worktree_root: Path, snapshot_idx: int) -> list[ExternalD
         except Exception:
             pass
 
-    for req_file in sorted(worktree_root.glob("requirements*.txt")):
+    for req_file in iter_repo_files(
+        worktree_root, prefixes=("requirements",), suffixes=(".txt",), max_depth=0
+    ):
         raw_req = safe_read_text(worktree_root, req_file)
         if not raw_req:
             continue
@@ -136,21 +141,19 @@ class PythonPlugin:
         ruff = ruff_cmd()
         diagnostics: list[LintDiagnostic] = []
         edge_set: set[tuple[str, str]] = set()
-        wt_root = worktree_root.resolve()
 
         try:
-            proc = run_tool(
-                [*ruff, "check", "--no-cache", "--output-format=json", "--", *py_paths],
+            procs = run_batched_tool(
+                [*ruff, "check", "--no-cache", "--output-format=json", "--"],
+                py_paths,
                 worktree_root,
                 timeout=30,
             )
-            if proc.stdout.strip().startswith("["):
+            for proc in procs:
+                if not proc.stdout.strip().startswith("["):
+                    continue
                 for item in json.loads(proc.stdout):
-                    raw_fname = str(item.get("filename", ""))
-                    try:
-                        rel_path = Path(raw_fname).resolve().relative_to(wt_root).as_posix()
-                    except ValueError:
-                        rel_path = raw_fname
+                    rel_path = resolve_rel_path(worktree_root, str(item.get("filename", "")))
                     if rel_path not in ast_files:
                         continue
                     loc = item.get("location") or {}
@@ -173,8 +176,9 @@ class PythonPlugin:
             pass
 
         try:
+            graph_targets = py_paths if len(py_paths) <= 400 else ["."]
             gproc = run_tool(
-                [*ruff, "analyze", "graph", "--direction", "dependencies", "--", *py_paths],
+                [*ruff, "analyze", "graph", "--direction", "dependencies", "--", *graph_targets],
                 worktree_root,
                 timeout=20,
             )

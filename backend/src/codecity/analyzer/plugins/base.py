@@ -2,16 +2,21 @@
 
 from __future__ import annotations
 
-import functools
+import json
+import os
+import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import tomllib
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
-from codecity.analyzer.treesitter_core import AstFileInfo
+from codecity.analyzer.treesitter_core import SKIP_DIRS, AstFileInfo
 from codecity.models import ExternalDep, FileImport, FixDiffResult, LintDiagnostic
 
 TS_EXTS = (".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs")
@@ -46,19 +51,91 @@ class LanguagePlugin(Protocol):
 
 
 def safe_repo_target(repo_root: Path, rel_path: str) -> Path:
-    """Validate that `rel_path` stays inside `repo_root` and outside `.git`."""
+    """Validate that `rel_path` stays inside `repo_root`, has no symlinks, and avoids `.git`."""
     if not rel_path or any(ch in rel_path for ch in ("\x00", "\n", "\r")):
         raise ValueError("Invalid target path")
     rel = Path(rel_path)
     if rel.is_absolute():
         raise ValueError(f"Absolute target path is not allowed: {rel_path}")
     root = repo_root.resolve()
+    cur = root
+    for part in rel.parts:
+        if part in ("", "."):
+            continue
+        cur = cur.parent if part == ".." else cur / part
+        if cur.is_symlink():
+            raise ValueError(f"Refusing symlink target path: {rel_path}")
     cand = (root / rel).resolve()
     if cand == root or not cand.is_relative_to(root):
         raise ValueError(f"Unsafe target path outside repo root: {rel_path}")
     if ".git" in cand.relative_to(root).parts:
         raise ValueError(f"Refusing path inside .git: {rel_path}")
     return cand
+
+
+def resolve_rel_path(root: Path, raw_path: str, *, base_dir: Path | None = None) -> str:
+    """Resolve `raw_path` relative to `root` when possible, returning a POSIX path."""
+    p = Path(raw_path)
+    if not p.is_absolute():
+        p = (base_dir or root) / p
+    try:
+        return p.resolve().relative_to(root.resolve()).as_posix()
+    except ValueError:
+        return raw_path
+
+
+def iter_repo_files(
+    root: Path,
+    *,
+    names: frozenset[str] = frozenset(),
+    prefixes: tuple[str, ...] = (),
+    suffixes: tuple[str, ...] = (),
+    max_depth: int | None = None,
+) -> list[Path]:
+    """Walk `root` without following symlinks, pruning build/vendor/git dirs."""
+    root_res = root.resolve()
+    matches: list[Path] = []
+    for dirpath, dirnames, filenames in os.walk(root_res, followlinks=False):
+        rel_parts = Path(dirpath).relative_to(root_res).parts
+        if max_depth is not None and len(rel_parts) >= max_depth:
+            dirnames[:] = []
+        else:
+            dirnames[:] = sorted(
+                d for d in dirnames if d not in SKIP_DIRS and not d.startswith(".git")
+            )
+        base = Path(dirpath)
+        for fname in sorted(filenames):
+            if names and fname not in names:
+                continue
+            if prefixes and not fname.startswith(prefixes):
+                continue
+            if suffixes and not fname.endswith(suffixes):
+                continue
+            cand = base / fname
+            if not cand.is_symlink():
+                matches.append(cand)
+    return matches
+
+
+def extract_bun_fmt_config(raw: str) -> str | None:
+    """Serialize only `[fmt]` from `bunfig.toml` so untrusted `preload`/scripts never run."""
+    try:
+        fmt = tomllib.loads(raw).get("fmt")
+    except Exception:
+        return None
+    if not isinstance(fmt, dict) or not fmt:
+        return None
+    lines = ["[fmt]"]
+    for k, v in fmt.items():
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", str(k)):
+            continue
+        if isinstance(v, bool):
+            lines.append(f"{k} = {'true' if v else 'false'}")
+        elif isinstance(v, int):
+            lines.append(f"{k} = {v}")
+        elif isinstance(v, str):
+            lines.append(f"{k} = {json.dumps(v)}")
+    return "\n".join(lines) + "\n" if len(lines) > 1 else None
 
 
 def safe_read_text(root: Path, path: Path) -> str | None:
@@ -93,6 +170,21 @@ def run_tool(
     )
 
 
+def run_batched_tool(
+    cmd_prefix: list[str],
+    targets: list[str],
+    cwd: Path,
+    *,
+    chunk_size: int = 150,
+    timeout: int = 30,
+) -> list[subprocess.CompletedProcess[str]]:
+    """Run a CLI tool across bounded target batches to avoid ARG_MAX limits."""
+    return [
+        run_tool([*cmd_prefix, *targets[i : i + chunk_size]], cwd, timeout=timeout)
+        for i in range(0, len(targets), chunk_size)
+    ]
+
+
 def ruff_cmd() -> list[str]:
     """Locate the `ruff` executable inside or outside the active Python environment."""
     venv_ruff = Path(sys.executable).parent / "ruff"
@@ -111,15 +203,6 @@ def find_bun() -> str | None:
     return str(home_bun) if home_bun.exists() else None
 
 
-@functools.lru_cache(maxsize=4)
-def bun_supports_native_lint(bun_bin: str) -> bool:
-    try:
-        proc = run_tool([bun_bin, "lint", "--no-script", "--help"], Path.cwd(), timeout=5)
-        return proc.returncode == 0 and 'Script not found "lint"' not in (proc.stdout + proc.stderr)
-    except Exception:
-        return False
-
-
 def find_local_oxlint() -> str | None:
     """Locate `oxlint` in workspace `frontend/node_modules` or PATH."""
     candidates = [
@@ -130,6 +213,23 @@ def find_local_oxlint() -> str | None:
         if cand.exists():
             return str(cand)
     return shutil.which("oxlint")
+
+
+@contextmanager
+def safe_oxlint_prefix(bun_bin: str, oxlint_bin: str) -> Iterator[list[str]]:
+    """Build an oxlint invocation isolated from target-repo bunfig preload and JS/TS configs."""
+    with tempfile.TemporaryDirectory(prefix="codecity_ox_") as td:
+        cfg = Path(td) / "oxlintrc.json"
+        cfg.write_text("{}", encoding="utf-8")
+        yield [
+            bun_bin,
+            f"--config={os.devnull}",
+            "run",
+            oxlint_bin,
+            "-c",
+            str(cfg),
+            "--disable-nested-config",
+        ]
 
 
 def parse_toml_lockfile(worktree_root: Path, filename: str, deps: DepCollector) -> None:

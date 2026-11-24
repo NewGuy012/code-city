@@ -5,6 +5,7 @@ from __future__ import annotations
 import ipaddress
 import os
 import re
+import socket
 import subprocess
 from collections import defaultdict
 from dataclasses import dataclass
@@ -25,7 +26,17 @@ _SAFE_GIT_FLAGS = (
     "-c",
     "core.fsmonitor=false",
     "-c",
+    "core.symlinks=false",
+    "-c",
+    "core.quotePath=false",
+    "-c",
     "protocol.file.allow=never",
+    "-c",
+    "protocol.ext.allow=never",
+    "-c",
+    "http.followRedirects=false",
+    "-c",
+    "credential.helper=",
 )
 
 
@@ -157,32 +168,58 @@ class GitHistoryAnalysis:
 
 def _validate_remote_url(url: str) -> None:
     if url.startswith(("http://", "https://", "ssh://")):
-        host = (urlparse(url).hostname or "").strip().lower()
-        if not host or host == "localhost" or host.endswith(".localhost"):
-            raise ValueError(f"Refusing non-public remote host: {url}")
-        try:
-            ip = ipaddress.ip_address(host)
-        except ValueError:
-            ip = None
-        if ip is not None and not ip.is_global:
+        raw_host = urlparse(url).hostname or ""
+    elif url.startswith("git@"):
+        after_at = url.split("@", 1)[1]
+        raw_host = after_at.split(":", 1)[0].split("/", 1)[0].strip("[]")
+    else:
+        return
+
+    host = raw_host.strip().lower().rstrip(".")
+    if not host or host == "localhost" or host.endswith(".localhost"):
+        raise ValueError(f"Refusing non-public remote host: {url}")
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        ip = None
+    if ip is not None:
+        if not ip.is_global:
             raise ValueError(f"Refusing non-public remote IP: {url}")
+        return
+
+    try:
+        infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+    except OSError:
+        return
+    for info in infos:
+        addr = info[4][0].split("%", 1)[0]
+        try:
+            resolved_ip = ipaddress.ip_address(addr)
+        except ValueError:
+            continue
+        if not resolved_ip.is_global:
+            raise ValueError(f"Refusing non-public resolved remote IP: {url}")
 
 
 def run_git(
-    repo_path: Path,
+    repo_path: Path | None,
     args: list[str],
     *,
     check: bool = True,
     extra_env: dict[str, str] | None = None,
     timeout: int = 60,
 ) -> subprocess.CompletedProcess[str]:
-    """Run a git subcommand inside `repo_path` with hooks/prompts disabled."""
+    """Run a git subcommand with hooks/symlinks/redirects disabled."""
     env = os.environ.copy()
     env.setdefault("GIT_TERMINAL_PROMPT", "0")
     if extra_env:
         env.update(extra_env)
+    cmd = ["git", *_SAFE_GIT_FLAGS]
+    if repo_path is not None:
+        cmd.extend(["-C", str(repo_path)])
+    cmd.extend(args)
     return subprocess.run(
-        ["git", *_SAFE_GIT_FLAGS, "-C", str(repo_path), *args],
+        cmd,
         env=env,
         capture_output=True,
         text=True,
@@ -223,23 +260,9 @@ def resolve_git_repo(source: str, clones_dir: Path) -> Path:
         if (dest / ".git").exists():
             run_git(dest, ["fetch", "--tags", "--quiet"], check=False, timeout=120)
             return dest
-        env = os.environ.copy()
-        env.setdefault("GIT_TERMINAL_PROMPT", "0")
-        subprocess.run(
-            [
-                "git",
-                *_SAFE_GIT_FLAGS,
-                "clone",
-                "--quiet",
-                "--no-recurse-submodules",
-                "--",
-                cleaned,
-                str(dest),
-            ],
-            env=env,
-            check=True,
-            capture_output=True,
-            text=True,
+        run_git(
+            None,
+            ["clone", "--quiet", "--no-recurse-submodules", "--", cleaned, str(dest)],
             timeout=120,
         )
         return dest
@@ -337,6 +360,8 @@ def select_keyframes(
         return []
     if n <= max_keyframes:
         chosen_indices = list(range(n))
+    elif max_keyframes == 1:
+        chosen_indices = [n - 1]
     else:
         chosen_set: set[int] = {0, n - 1}
         tagged_indices = [i for i, (_, _, tag) in enumerate(commits_chronological) if tag]

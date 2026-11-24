@@ -5,6 +5,7 @@ from __future__ import annotations
 import functools
 import os
 import re
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -89,9 +90,24 @@ _LANG_LOADERS = {
 }
 
 
+_THREAD_PARSERS = threading.local()
+
+
 @functools.lru_cache(maxsize=8)
 def _get_language(lang_key: str) -> Language:
     return Language(_LANG_LOADERS[lang_key]())
+
+
+def _get_parser(lang_key: str) -> Parser:
+    cache: dict[str, Parser] | None = getattr(_THREAD_PARSERS, "parsers", None)
+    if cache is None:
+        cache = {}
+        _THREAD_PARSERS.parsers = cache
+    parser = cache.get(lang_key)
+    if parser is None:
+        parser = Parser(_get_language(lang_key))
+        cache[lang_key] = parser
+    return parser
 
 
 EXT_TO_LANG: dict[str, tuple[str, str | None]] = {
@@ -208,6 +224,30 @@ _BRANCH_NODE_TYPES = frozenset(
 
 _COMMENT_NODE_TYPES = frozenset({"comment", "line_comment", "block_comment"})
 
+_LOOP_NODE_TYPES = frozenset(
+    {
+        "for_statement",
+        "for_in_statement",
+        "for_expression",
+        "while_statement",
+        "while_expression",
+        "loop_expression",
+    }
+)
+
+_TYPED_NODE_TYPES = frozenset(
+    {
+        "type_annotation",
+        "type",
+        "type_identifier",
+        "primitive_type",
+        "generic_type",
+        "field_declaration",
+    }
+)
+
+_JSX_NODE_TYPES = frozenset({"jsx_element", "jsx_self_closing_element", "jsx_fragment"})
+
 _ROUTE_RE = re.compile(
     r"@(app|router|bp|api)\.(get|post|put|delete|patch|route)\b|"
     r"\.(get|post|put|delete|patch|use|route|HandleFunc|Handle)\(|"
@@ -299,8 +339,10 @@ def _compute_function_complexity(func_node: Node, source_bytes: bytes) -> int:
             continue
         if ntype in _BRANCH_NODE_TYPES:
             if ntype == "binary_expression":
-                txt = _node_text(node, source_bytes)
-                if "&&" in txt or "||" in txt:
+                if any(
+                    not c.is_named and _node_text(c, source_bytes) in {"&&", "||"}
+                    for c in node.children
+                ):
                     complexity += 1
             else:
                 complexity += 1
@@ -383,7 +425,10 @@ def analyze_file_ast(rel_path: str, text: str) -> AstFileInfo:
     """Parse one source file with Tree-sitter (or line fallback) and return structural metrics."""
     language, grammar_key = detect_language(rel_path)
     sloc, comment_lines = _count_sloc_and_comments(text, language)
-    code_surface = _STRING_LITERAL_RE.sub('""', text)
+    code_surface = _STRING_LITERAL_RE.sub(
+        lambda m: "\n" * m.group(0).count("\n"),
+        text,
+    )
 
     if grammar_key is None:
         return AstFileInfo(
@@ -409,7 +454,7 @@ def analyze_file_ast(rel_path: str, text: str) -> AstFileInfo:
         )
 
     source_bytes = text.encode("utf-8", errors="replace")
-    root = Parser(_get_language(grammar_key)).parse(source_bytes).root_node
+    root = _get_parser(grammar_key).parse(source_bytes).root_node
 
     func_count = 0
     type_def_count = 0
@@ -464,30 +509,16 @@ def analyze_file_ast(rel_path: str, text: str) -> AstFileInfo:
         if ntype in _TYPE_NODE_TYPES:
             type_def_count += 1
 
-        if ntype in {
-            "for_statement",
-            "for_in_statement",
-            "for_expression",
-            "while_statement",
-            "while_expression",
-            "loop_expression",
-        }:
+        if ntype in _LOOP_NODE_TYPES:
             loop_count += 1
 
-        if ntype in {
-            "type_annotation",
-            "type",
-            "type_identifier",
-            "primitive_type",
-            "generic_type",
-            "field_declaration",
-        }:
+        if ntype in _TYPED_NODE_TYPES:
             typed_nodes += 1
 
         if ntype in _COMMENT_NODE_TYPES:
             docstring_nodes += 1
 
-        if ntype in {"jsx_element", "jsx_self_closing_element", "jsx_fragment"}:
+        if ntype in _JSX_NODE_TYPES:
             jsx_nodes += 1
 
         if ntype in {"except_clause", "catch_clause"}:
@@ -520,12 +551,13 @@ def analyze_file_ast(rel_path: str, text: str) -> AstFileInfo:
 
     is_test = _is_test_path(rel_path) or ast_test_symbol
     if grammar_key == "rust" and not is_test:
-        for idx, line_txt in enumerate(text.splitlines(), start=1):
-            if ".unwrap()" in line_txt or "panic!(" in line_txt:
+        for idx, line_txt in enumerate(code_surface.splitlines(), start=1):
+            code_part = line_txt.split("//", 1)[0]
+            if ".unwrap()" in code_part or "panic!(" in code_part:
                 structural_diags.append(
                     StructuralDiagnostic(
                         line=idx,
-                        col=max(1, line_txt.find(".unwrap()") + 1),
+                        col=max(1, code_part.find(".unwrap()") + 1),
                         rule_code="RS001",
                         category="safety",
                         message="Unchecked `.unwrap()` / `panic!` in non-test Rust code.",
