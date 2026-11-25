@@ -4,9 +4,12 @@ import type { BuildingArchetype, FileMetric } from "../types/city";
 import {
   DEFAULT_PITCH,
   DEFAULT_YAW,
+  MAX_PITCH,
+  MIN_PITCH,
   WORLD_CENTER_X,
   WORLD_CENTER_Z,
   cameraStore,
+  computeMousePitch,
   computeMouseYaw,
 } from "./cameraStore";
 import {
@@ -97,7 +100,7 @@ describe("isoRenderer2D projection", () => {
     expect(Math.abs(afterYaw90Right.targetZ - afterDefaultFwd.targetZ)).toBeLessThan(1e-6);
   });
 
-  test("computeMouseYaw and canvasCursorClass support Alt+drag yaw rotation", () => {
+  test("computeMouseYaw, computeMousePitch, and canvasCursorClass support mouse rotation", () => {
     const rightDragYaw = computeMouseYaw(DEFAULT_YAW, 160, 640);
     expect(Math.abs(rightDragYaw - (DEFAULT_YAW - Math.PI / 2))).toBeLessThan(1e-6);
 
@@ -106,6 +109,10 @@ describe("isoRenderer2D projection", () => {
 
     // Respects minimum 320px viewport clamp
     expect(computeMouseYaw(1.0, 80, 100)).toBeCloseTo(1.0 - Math.PI / 2, 6);
+
+    expect(computeMousePitch(DEFAULT_PITCH, 80, 640)).toBeCloseTo(DEFAULT_PITCH + 45, 6);
+    expect(computeMousePitch(DEFAULT_PITCH, 400, 640)).toBe(MAX_PITCH);
+    expect(computeMousePitch(DEFAULT_PITCH, -400, 640)).toBe(MIN_PITCH);
 
     expect(canvasCursorClass("inspect", false, true)).toBe("cursor-ew-resize");
     expect(canvasCursorClass("sweeper", true, true)).toBe("cursor-ew-resize");

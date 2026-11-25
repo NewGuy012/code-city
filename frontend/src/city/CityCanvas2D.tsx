@@ -11,7 +11,15 @@ import type {
   FileMetric,
 } from "../types/city";
 import { BuildingTooltip } from "./BuildingTooltip";
-import { MAX_ZOOM, MIN_ZOOM, cameraStore, computeMouseYaw, useAltKeyHeld } from "./cameraStore";
+import {
+  MAX_ZOOM,
+  MIN_ZOOM,
+  type UnifiedCameraState,
+  cameraStore,
+  computeMousePitch,
+  computeMouseYaw,
+  useAltKeyHeld,
+} from "./cameraStore";
 import { canvasCursorClass } from "./cityTheme";
 import {
   type GhostLot,
@@ -73,23 +81,25 @@ export const CityCanvas2D = memo(function CityCanvas2D({
 
   const dragRef = useRef<{
     active: boolean;
-    mode: "pan" | "paint" | "yaw";
+    mode: "pan" | "paint" | "yaw" | "orbit";
     moved: boolean;
     startX: number;
     startY: number;
     origTargetX: number;
     origTargetZ: number;
     origYaw: number;
+    origPitch: number;
     paintedFiles: Set<string>;
   }>({
     active: false,
-    mode: "pan",
+    mode: "orbit",
     moved: false,
     startX: 0,
     startY: 0,
     origTargetX: 70,
     origTargetZ: 52,
     origYaw: Math.PI * 0.25,
+    origPitch: 35,
     paintedFiles: new Set(),
   });
 
@@ -425,10 +435,22 @@ export const CityCanvas2D = memo(function CityCanvas2D({
   }, []);
 
   function handlePointerDown(e: React.PointerEvent<HTMLCanvasElement>) {
+    if (e.button !== 0 && e.button !== 1 && e.button !== 2) return;
     const state = cameraStore.getState();
-    const isYawRotate = e.altKey && e.button === 0;
-    const isSweeperPaint = !isYawRotate && activeTool === "sweeper" && e.button === 0;
-    const mode = isYawRotate ? "yaw" : isSweeperPaint ? "paint" : "pan";
+    const isPanGesture =
+      e.button === 2 ||
+      e.button === 1 ||
+      (e.button === 0 && (e.shiftKey || e.ctrlKey || e.metaKey) && !e.altKey);
+    const isYawRotate = !isPanGesture && e.altKey && e.button === 0;
+    const isSweeperPaint =
+      !isPanGesture && !isYawRotate && activeTool === "sweeper" && e.button === 0;
+    const mode: "pan" | "paint" | "yaw" | "orbit" = isPanGesture
+      ? "pan"
+      : isYawRotate
+        ? "yaw"
+        : isSweeperPaint
+          ? "paint"
+          : "orbit";
     if (isYawRotate) {
       e.preventDefault();
       setYawDragging(true);
@@ -446,6 +468,7 @@ export const CityCanvas2D = memo(function CityCanvas2D({
       origTargetX: state.targetX,
       origTargetZ: state.targetZ,
       origYaw: state.yaw,
+      origPitch: state.pitch,
       paintedFiles: new Set(),
     };
     if (isSweeperPaint && onToolAction) {
@@ -469,21 +492,6 @@ export const CityCanvas2D = memo(function CityCanvas2D({
     }
 
     if (dragRef.current.active) {
-      if (dragRef.current.mode === "yaw") {
-        const dx = e.clientX - dragRef.current.startX;
-        const dy = e.clientY - dragRef.current.startY;
-        if (Math.abs(dx) > 4 || Math.abs(dy) > 4) {
-          dragRef.current.moved = true;
-        }
-        const h = canvas?.clientHeight || window.innerHeight || 720;
-        cameraStore.setState({
-          yaw: computeMouseYaw(dragRef.current.origYaw, dx, h),
-          cinematicOrbit: false,
-        });
-        setHoveredHit(null);
-        return;
-      }
-
       if (dragRef.current.mode === "paint" && onToolAction) {
         dragRef.current.moved = true;
         const hit = findHitAt(e.clientX, e.clientY);
@@ -496,9 +504,25 @@ export const CityCanvas2D = memo(function CityCanvas2D({
 
       const dx = e.clientX - dragRef.current.startX;
       const dy = e.clientY - dragRef.current.startY;
-      if (Math.abs(dx) > 4 || Math.abs(dy) > 4) {
-        dragRef.current.moved = true;
+      if (!dragRef.current.moved && Math.abs(dx) <= 4 && Math.abs(dy) <= 4) {
+        return;
       }
+      dragRef.current.moved = true;
+
+      if (dragRef.current.mode === "yaw" || dragRef.current.mode === "orbit") {
+        const h = canvas?.clientHeight || window.innerHeight || 720;
+        const patch: Partial<UnifiedCameraState> = {
+          yaw: computeMouseYaw(dragRef.current.origYaw, dx, h),
+          cinematicOrbit: false,
+        };
+        if (dragRef.current.mode === "orbit") {
+          patch.pitch = computeMousePitch(dragRef.current.origPitch, dy, h);
+        }
+        cameraStore.setState(patch);
+        setHoveredHit(null);
+        return;
+      }
+
       if (canvas) {
         const w = canvas.clientWidth;
         const h = canvas.clientHeight;
@@ -554,7 +578,7 @@ export const CityCanvas2D = memo(function CityCanvas2D({
 
   function finishDrag(e: React.PointerEvent<HTMLCanvasElement>) {
     dragRef.current.active = false;
-    dragRef.current.mode = "pan";
+    dragRef.current.mode = "orbit";
     setYawDragging(false);
     if (e.currentTarget.hasPointerCapture(e.pointerId)) {
       e.currentTarget.releasePointerCapture(e.pointerId);
@@ -565,7 +589,7 @@ export const CityCanvas2D = memo(function CityCanvas2D({
     const wasMoved = dragRef.current.moved;
     const wasMode = dragRef.current.mode;
     finishDrag(e);
-    if (!wasMoved && wasMode === "pan") {
+    if (!wasMoved && e.button === 0 && (wasMode === "orbit" || wasMode === "pan")) {
       const hit = findHitAt(e.clientX, e.clientY);
       if (hit && activeTool !== "inspect" && onToolAction) {
         onToolAction(hit.file);
@@ -580,11 +604,12 @@ export const CityCanvas2D = memo(function CityCanvas2D({
       <canvas
         ref={canvasRef}
         data-testid="city-canvas-2d"
-        className={`block h-full w-full ${canvasCursorClass(activeTool, Boolean(hoveredHit), altHeld || yawDragging)}`}
+        className={`block h-full w-full touch-none select-none ${canvasCursorClass(activeTool, Boolean(hoveredHit), altHeld || yawDragging)}`}
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
         onPointerCancel={finishDrag}
+        onContextMenu={(e) => e.preventDefault()}
         onPointerLeave={() => {
           hoverPendingRef.current = null;
           setHoveredHit(null);

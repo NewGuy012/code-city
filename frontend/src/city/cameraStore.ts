@@ -58,6 +58,14 @@ export function computeMouseYaw(origYaw: number, deltaX: number, viewportHeight:
   return origYaw - (deltaX * Math.PI * 2) / Math.max(320, viewportHeight);
 }
 
+export function computeMousePitch(
+  origPitch: number,
+  deltaY: number,
+  viewportHeight: number,
+): number {
+  return clamp(origPitch + (deltaY * 360) / Math.max(320, viewportHeight), MIN_PITCH, MAX_PITCH);
+}
+
 function clamp(v: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, v));
 }

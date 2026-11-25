@@ -116,31 +116,42 @@ def _assert_zero_idle_raf(page: Page, mode_label: str) -> None:
     assert idle_raf == 0, f"Expected 0 idle RAF calls in {mode_label}, got {idle_raf}"
 
 
-def _assert_alt_yaw_drag(
+def _assert_drag_rotation(
     page: Page,
     x0: int,
     y0: int,
     x1: int,
     y1: int,
     reset_key: str,
+    *,
+    alt: bool = False,
 ) -> None:
-    """Drag with Alt held to rotate yaw without altering pitch, then reset."""
-    page.keyboard.down("Alt")
+    """Drag to rotate (yaw+pitch on left-drag, yaw-only with Alt held), then reset."""
+    if alt:
+        page.keyboard.down("Alt")
     try:
         page.mouse.move(x0, y0)
         page.mouse.down()
         page.mouse.move(x1, y1, steps=6)
         page.mouse.up()
     finally:
-        page.keyboard.up("Alt")
+        if alt:
+            page.keyboard.up("Alt")
 
     page.click('[data-testid="camera-view-btn"]')
     page.wait_for_selector('[data-testid="camera-view-popover"]', timeout=5000)
     expect(page.locator('[data-testid="yaw-reset-btn"]')).not_to_have_text("45°", timeout=3000)
-    expect(page.locator('[data-testid="pitch-reset-btn"]')).to_have_text("35°", timeout=3000)
+    if alt:
+        expect(page.locator('[data-testid="pitch-reset-btn"]')).to_have_text("35°", timeout=3000)
+    else:
+        expect(page.locator('[data-testid="pitch-reset-btn"]')).not_to_have_text(
+            "35°", timeout=3000
+        )
     page.keyboard.press(reset_key)
     expect(page.locator('[data-testid="yaw-reset-btn"]')).to_have_text("45°", timeout=3000)
     expect(page.locator('[data-testid="pitch-reset-btn"]')).to_have_text("35°", timeout=3000)
+    page.keyboard.press("Escape")
+    page.wait_for_timeout(120)
 
 
 _EXPLORE_HUD_SELECTORS = [
@@ -391,14 +402,16 @@ def test_live_studio_e2e_2d_datamaps_tour_notes_3d_timescrub_and_quack(tmp_path:
                     "35°", timeout=3000
                 )
 
-                # Alt + Left-drag rotates yaw in 2D and 3D without changing pitch
+                # Left-drag rotates yaw+pitch and Alt + Left-drag rotates yaw only in both 2D and 3D
                 page.keyboard.press("Escape")
-                _assert_alt_yaw_drag(page, 680, 420, 840, 460, "x")
+                page.wait_for_timeout(120)
+                _assert_drag_rotation(page, 680, 420, 840, 500, "x", alt=False)
+                _assert_drag_rotation(page, 680, 420, 840, 460, "x", alt=True)
 
-                page.keyboard.press("Escape")
                 page.click('[data-testid="toggle-2d-3d"]')
                 page.wait_for_selector('[data-testid="city-canvas-3d"]', timeout=10000)
-                _assert_alt_yaw_drag(page, 680, 420, 520, 500, "Shift+X")
+                _assert_drag_rotation(page, 680, 420, 520, 500, "Shift+X", alt=False)
+                _assert_drag_rotation(page, 680, 420, 520, 500, "Shift+X", alt=True)
 
                 page.click('[data-testid="toggle-2d-3d"]')
                 page.wait_for_selector('[data-testid="city-canvas-2d"]', timeout=5000)
