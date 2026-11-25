@@ -8,7 +8,7 @@ import { deriveStreetLinesAndPlazas } from "./city/streetGrid";
 import { AdvisorCouncilModal } from "./components/AdvisorCouncilModal";
 import { CameraControlsHUD } from "./components/CameraControlsHUD";
 import { DataMapBar } from "./components/DataMapBar";
-import { type AuthorSummary, DisastersMenu } from "./components/DisastersMenu";
+import { DisastersMenu } from "./components/DisastersMenu";
 import { EconomyBar } from "./components/EconomyBar";
 import { HealthCardModal } from "./components/HealthCardModal";
 import { InspectorDrawer } from "./components/InspectorDrawer";
@@ -37,7 +37,10 @@ import {
   type MayorToolId,
   type SandboxActionRecord,
   TOOL_COSTS,
+  appendSandboxAction,
   applySandboxOverlay,
+  redoSandboxAction,
+  undoSandboxAction,
   validateToolOnFile,
 } from "./game/sandboxOverlay";
 import {
@@ -49,6 +52,7 @@ import {
 import { soundEngine } from "./game/soundEngine";
 import type {
   Annotation,
+  AuthorSummary,
   BlastRadiusResult,
   DataMapMode,
   FileMetric,
@@ -104,6 +108,8 @@ export function App() {
 
   const [activeTool, setActiveTool] = useState<MayorToolId>("inspect");
   const [sandboxActions, setSandboxActions] = useState<SandboxActionRecord[]>([]);
+  const sandboxActionsRef = useRef(sandboxActions);
+  sandboxActionsRef.current = sandboxActions;
   const [pendingTransitStart, setPendingTransitStart] = useState<string | null>(null);
   const [toastMsg, setToastMsg] = useState<string | null>(null);
   const [liveMode, setLiveMode] = useState(false);
@@ -359,10 +365,9 @@ export function App() {
       setErrorMsg(null);
       try {
         await client.loadParquetTables(baseUrl, `${owner}/${repo}:${baseUrl}`, force);
-        const [snaps, notes, sbx] = await Promise.all([
+        const [snaps, notes] = await Promise.all([
           client.querySnapshots(),
           client.queryAnnotations(),
-          client.querySandboxActions(),
         ]);
         if (seq !== loadSeqRef.current) return;
         const latest = snaps[snaps.length - 1]?.snapshot_idx ?? 0;
@@ -371,7 +376,7 @@ export function App() {
         setSnapshots(snaps);
         setSnapshotIdx(latest);
         setAnnotations(notes);
-        setSandboxActions(sbx);
+        setSandboxActions([]);
         setClaimedMissions(new Set());
         setLiveMode(false);
         setLiveBranchName(null);
@@ -617,7 +622,7 @@ export function App() {
         bulldozer: `Demolished unimported dead module (fan-in == 0)`,
       };
 
-      const nextList = await client.appendSandboxAction({
+      const nextList = appendSandboxAction(sandboxActionsRef.current, {
         tool,
         target_path: file.file_path,
         secondary_path: validation.secondaryPath ?? null,
@@ -625,6 +630,7 @@ export function App() {
         summary: summaryMap[tool],
         velocity_cost: validation.cost,
       });
+      sandboxActionsRef.current = nextList;
       setSandboxActions(nextList);
       setPendingTransitStart(null);
 
@@ -679,10 +685,9 @@ export function App() {
     [handleToolAction],
   );
 
-  const handleUndo = useCallback(async () => {
+  const handleUndo = useCallback(() => {
     const prevActive = [...sandboxActions].reverse().find((a) => a.active);
-    const updated = await client.undoSandboxAction();
-    setSandboxActions(updated);
+    setSandboxActions(undoSandboxAction(sandboxActions));
     if (coopSyncEnabled && !isStaticMode && activeRepo && prevActive) {
       void client
         .toggleRemoteSandboxAction(activeRepo.owner, activeRepo.repo, prevActive.action_id, false)
@@ -691,10 +696,9 @@ export function App() {
     setToastMsg("Undid last Mayor intervention");
   }, [activeRepo, client, coopSyncEnabled, isStaticMode, sandboxActions]);
 
-  const handleRedo = useCallback(async () => {
+  const handleRedo = useCallback(() => {
     const nextInactive = sandboxActions.find((a) => !a.active);
-    const updated = await client.redoSandboxAction();
-    setSandboxActions(updated);
+    setSandboxActions(redoSandboxAction(sandboxActions));
     if (coopSyncEnabled && !isStaticMode && activeRepo && nextInactive) {
       void client
         .toggleRemoteSandboxAction(activeRepo.owner, activeRepo.repo, nextInactive.action_id, true)
@@ -703,8 +707,8 @@ export function App() {
     setToastMsg("Redid Mayor intervention");
   }, [activeRepo, client, coopSyncEnabled, isStaticMode, sandboxActions]);
 
-  const handleResetSandbox = useCallback(async () => {
-    setSandboxActions(await client.resetSandboxActions());
+  const handleResetSandbox = useCallback(() => {
+    setSandboxActions([]);
     setPendingTransitStart(null);
     if (coopSyncEnabled && !isStaticMode && activeRepo) {
       void client.clearRemoteSandboxActions(activeRepo.owner, activeRepo.repo).catch(() => {});
@@ -1173,9 +1177,9 @@ export function App() {
                   isModePopoverOpen={openPopover === "mayorMode"}
                   onToggleModePopover={() => togglePopover("mayorMode")}
                   onClosePopover={closePopover}
-                  onUndo={() => void handleUndo()}
-                  onRedo={() => void handleRedo()}
-                  onReset={() => void handleResetSandbox()}
+                  onUndo={handleUndo}
+                  onRedo={handleRedo}
+                  onReset={handleResetSandbox}
                   onToggleLiveMode={() => {
                     if (!liveMode && activeRepo && !isStaticMode) {
                       void client

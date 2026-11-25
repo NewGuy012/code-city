@@ -169,3 +169,9 @@ export interface StaticManifest {
   source: string;
   generated_at: string;
 }
+
+export interface AuthorSummary {
+  author: string;
+  sole_files: string[];
+  total_files: number;
+}

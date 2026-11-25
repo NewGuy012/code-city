@@ -4,10 +4,10 @@ import duckdbMvpWorker from "@duckdb/duckdb-wasm/dist/duckdb-browser-mvp.worker.
 import duckdbEhWasm from "@duckdb/duckdb-wasm/dist/duckdb-eh.wasm?url";
 import duckdbMvpWasm from "@duckdb/duckdb-wasm/dist/duckdb-mvp.wasm?url";
 
-import type { AuthorSummary } from "../components/DisastersMenu";
 import type { SandboxActionRecord } from "../game/sandboxOverlay";
 import type {
   Annotation,
+  AuthorSummary,
   BlastRadiusResult,
   BuildingArchetype,
   CochangePair,
@@ -229,29 +229,41 @@ function mapCochangeRow(r: Record<string, unknown>): CochangePair {
 export class CityDataClient {
   private db: duckdb.AsyncDuckDB | null = null;
   private conn: duckdb.AsyncDuckDBConnection | null = null;
+  private worker: Worker | null = null;
   private initPromise: Promise<duckdb.AsyncDuckDBConnection> | null = null;
+  private initGen = 0;
   private loadedKey: string | null = null;
-  private sandboxTableReady = false;
+  private loadQueue: Promise<void> = Promise.resolve();
 
   initWasm(): Promise<duckdb.AsyncDuckDBConnection> {
     if (this.conn) return Promise.resolve(this.conn);
     if (!this.initPromise) {
-      this.initPromise = (async () => {
+      const gen = this.initGen;
+      let worker: Worker | null = null;
+      let db: duckdb.AsyncDuckDB | null = null;
+      const pending = (async () => {
         const bundle = await duckdb.selectBundle({
           mvp: { mainModule: duckdbMvpWasm, mainWorker: duckdbMvpWorker },
           eh: { mainModule: duckdbEhWasm, mainWorker: duckdbEhWorker },
         });
-        const worker = new Worker(bundle.mainWorker!);
+        if (this.initGen !== gen) throw new Error("DuckDB client closed");
+        worker = new Worker(bundle.mainWorker!);
+        this.worker = worker;
         const logger = new duckdb.ConsoleLogger(duckdb.LogLevel.WARNING);
-        const db = new duckdb.AsyncDuckDB(logger, worker);
+        db = new duckdb.AsyncDuckDB(logger, worker);
         await db.instantiate(bundle.mainModule, bundle.pthreadWorker);
+        if (this.initGen !== gen) throw new Error("DuckDB client closed");
         this.db = db;
         this.conn = await db.connect();
         return this.conn;
-      })().catch((err) => {
-        this.initPromise = null;
+      })().catch(async (err) => {
+        if (this.initPromise === pending) this.initPromise = null;
+        if (db) await db.terminate().catch(() => {});
+        else worker?.terminate();
+        if (this.worker === worker) this.worker = null;
         throw err;
       });
+      this.initPromise = pending;
     }
     return this.initPromise;
   }
@@ -271,7 +283,17 @@ export class CityDataClient {
     }
   }
 
-  async loadParquetTables(baseUrl: string, cacheKey: string, force = false): Promise<void> {
+  loadParquetTables(baseUrl: string, cacheKey: string, force = false): Promise<void> {
+    const run = this.loadQueue.then(() => this._loadParquetTablesImpl(baseUrl, cacheKey, force));
+    this.loadQueue = run.catch(() => {});
+    return run;
+  }
+
+  private async _loadParquetTablesImpl(
+    baseUrl: string,
+    cacheKey: string,
+    force: boolean,
+  ): Promise<void> {
     if (!force && this.loadedKey === cacheKey && this.conn) return;
     const conn = await this.initWasm();
     const db = this.db!;
@@ -286,7 +308,6 @@ export class CityDataClient {
       }),
     );
 
-    const repoChanged = this.loadedKey !== null && this.loadedKey !== cacheKey;
     for (const { table, buf } of buffers) {
       const vpath = `${table}.parquet`;
       await db.registerFileBuffer(vpath, buf);
@@ -294,102 +315,7 @@ export class CityDataClient {
         `CREATE OR REPLACE TABLE ${table} AS SELECT * FROM read_parquet('${vpath}');`,
       );
     }
-    await this.ensureSandboxTable();
-    if (repoChanged) {
-      await conn.query(`DELETE FROM sandbox_actions;`);
-    }
     this.loadedKey = cacheKey;
-  }
-
-  async ensureSandboxTable(): Promise<void> {
-    if (this.sandboxTableReady) return;
-    const conn = await this.initWasm();
-    await conn.query(`
-      CREATE TABLE IF NOT EXISTS sandbox_actions (
-        action_id VARCHAR,
-        action_seq INTEGER,
-        tool VARCHAR,
-        target_path VARCHAR,
-        secondary_path VARCHAR,
-        district_path VARCHAR,
-        summary VARCHAR,
-        velocity_cost INTEGER,
-        active BOOLEAN,
-        created_at VARCHAR
-      );
-    `);
-    this.sandboxTableReady = true;
-  }
-
-  async querySandboxActions(): Promise<SandboxActionRecord[]> {
-    await this.ensureSandboxTable();
-    const rows = await this.runReadSql(`SELECT * FROM sandbox_actions ORDER BY action_seq ASC;`);
-    return rows.map((r) => ({
-      action_id: String(r.action_id),
-      action_seq: Number(r.action_seq),
-      tool: String(r.tool) as SandboxActionRecord["tool"],
-      target_path: String(r.target_path),
-      secondary_path: r.secondary_path ? String(r.secondary_path) : null,
-      district_path: String(r.district_path),
-      summary: String(r.summary),
-      velocity_cost: Number(r.velocity_cost ?? 0),
-      active: Boolean(r.active),
-      created_at: String(r.created_at),
-    }));
-  }
-
-  async appendSandboxAction(
-    action: Omit<SandboxActionRecord, "action_id" | "action_seq" | "active" | "created_at">,
-  ): Promise<SandboxActionRecord[]> {
-    await this.ensureSandboxTable();
-    const conn = await this.initWasm();
-    await conn.query(`DELETE FROM sandbox_actions WHERE active = false;`);
-    const maxRows = await this.runReadSql(
-      `SELECT COALESCE(MAX(action_seq), 0) AS m FROM sandbox_actions;`,
-    );
-    const nextSeq = Number(maxRows[0]?.m ?? 0) + 1;
-    const id = `sbx-${Date.now().toString(36)}-${nextSeq}`;
-    await this.runReadSql(`INSERT INTO sandbox_actions VALUES (?, ?, ?, ?, ?, ?, ?, ?, true, ?);`, [
-      id,
-      nextSeq,
-      action.tool,
-      action.target_path,
-      action.secondary_path ?? null,
-      action.district_path,
-      action.summary,
-      Math.round(action.velocity_cost),
-      new Date().toISOString(),
-    ]);
-    return this.querySandboxActions();
-  }
-
-  async undoSandboxAction(): Promise<SandboxActionRecord[]> {
-    await this.ensureSandboxTable();
-    const conn = await this.initWasm();
-    await conn.query(`
-      UPDATE sandbox_actions
-      SET active = false
-      WHERE action_seq = (SELECT MAX(action_seq) FROM sandbox_actions WHERE active = true);
-    `);
-    return this.querySandboxActions();
-  }
-
-  async redoSandboxAction(): Promise<SandboxActionRecord[]> {
-    await this.ensureSandboxTable();
-    const conn = await this.initWasm();
-    await conn.query(`
-      UPDATE sandbox_actions
-      SET active = true
-      WHERE action_seq = (SELECT MIN(action_seq) FROM sandbox_actions WHERE active = false);
-    `);
-    return this.querySandboxActions();
-  }
-
-  async resetSandboxActions(): Promise<SandboxActionRecord[]> {
-    await this.ensureSandboxTable();
-    const conn = await this.initWasm();
-    await conn.query(`DELETE FROM sandbox_actions;`);
-    return [];
   }
 
   async detectStaticManifest(): Promise<StaticManifest | null> {
@@ -675,12 +601,16 @@ export class CityDataClient {
     );
   }
 
-  async fetchAnnotationChanges(owner: string, repo: string): Promise<AnnotationChangeEvent[]> {
+  private async requestJsonOrEmpty<T>(url: string): Promise<T[]> {
     try {
-      return await this.requestJson(`${this.repoBase(owner, repo)}/annotations/changes`);
+      return await this.requestJson<T[]>(url);
     } catch {
       return [];
     }
+  }
+
+  fetchAnnotationChanges(owner: string, repo: string): Promise<AnnotationChangeEvent[]> {
+    return this.requestJsonOrEmpty(`${this.repoBase(owner, repo)}/annotations/changes`);
   }
 
   fetchQuackSnippet(owner: string, repo: string): Promise<QuackSnippetInfo> {
@@ -691,12 +621,8 @@ export class CityDataClient {
     );
   }
 
-  async fetchAuthors(owner: string, repo: string): Promise<AuthorSummary[]> {
-    try {
-      return await this.requestJson(`${this.repoBase(owner, repo)}/authors`);
-    } catch {
-      return [];
-    }
+  fetchAuthors(owner: string, repo: string): Promise<AuthorSummary[]> {
+    return this.requestJsonOrEmpty(`${this.repoBase(owner, repo)}/authors`);
   }
 
   triggerExport(
@@ -748,12 +674,8 @@ export class CityDataClient {
     );
   }
 
-  async fetchRemoteSandboxActions(owner: string, repo: string): Promise<SandboxActionRecord[]> {
-    try {
-      return await this.requestJson(`${this.repoBase(owner, repo)}/sandbox-actions`);
-    } catch {
-      return [];
-    }
+  fetchRemoteSandboxActions(owner: string, repo: string): Promise<SandboxActionRecord[]> {
+    return this.requestJsonOrEmpty(`${this.repoBase(owner, repo)}/sandbox-actions`);
   }
 
   pushRemoteSandboxAction(
@@ -801,16 +723,20 @@ export class CityDataClient {
   }
 
   async close(): Promise<void> {
+    this.initGen += 1;
+    this.initPromise = null;
+    this.loadedKey = null;
     if (this.conn) {
-      await this.conn.close();
+      await this.conn.close().catch(() => {});
       this.conn = null;
     }
     if (this.db) {
-      await this.db.terminate();
+      await this.db.terminate().catch(() => {});
       this.db = null;
     }
-    this.initPromise = null;
-    this.loadedKey = null;
-    this.sandboxTableReady = false;
+    if (this.worker) {
+      this.worker.terminate();
+      this.worker = null;
+    }
   }
 }

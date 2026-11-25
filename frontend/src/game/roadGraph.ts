@@ -5,9 +5,6 @@ export interface RoadNode {
   id: string;
   x: number;
   z: number;
-  kind: "intersection" | "harbor_gate";
-  xi: number;
-  zi: number;
   bottleneckWeight: number;
 }
 
@@ -23,13 +20,10 @@ export interface RoadGraph {
   adj: Map<string, RoadEdge[]>;
   fileToNode: Map<string, string>;
   harborNodeIds: string[];
-  xLines: number[];
-  zLines: number[];
   bottleneckFilePaths: Set<string>;
 }
 
 export interface StreetPathResult {
-  nodeIds: string[];
   waypoints: Array<{ x: number; z: number }>;
 }
 
@@ -55,9 +49,6 @@ export function buildRoadGraph(
         id: `n_${xi}_${zi}`,
         x: safeX[xi],
         z: safeZ[zi],
-        kind: isHarbor ? "harbor_gate" : "intersection",
-        xi,
-        zi,
         bottleneckWeight: 0,
       };
       nodes.push(node);
@@ -159,8 +150,6 @@ export function buildRoadGraph(
     adj,
     fileToNode,
     harborNodeIds,
-    xLines: safeX,
-    zLines: safeZ,
     bottleneckFilePaths,
   };
 }
@@ -173,10 +162,10 @@ export function findStreetPath(
   const startNode = graph.nodeById.get(startId);
   const goalNode = graph.nodeById.get(goalId);
   if (!startNode || !goalNode) {
-    return { nodeIds: [], waypoints: [] };
+    return { waypoints: [] };
   }
   if (startId === goalId) {
-    return { nodeIds: [startId], waypoints: [{ x: startNode.x, z: startNode.z }] };
+    return { waypoints: [{ x: startNode.x, z: startNode.z }] };
   }
 
   const open = new Set<string>([startId]);
@@ -205,7 +194,6 @@ export function findStreetPath(
       }
       rev.reverse();
       return {
-        nodeIds: rev,
         waypoints: rev
           .map((id) => graph.nodeById.get(id))
           .filter((n): n is RoadNode => Boolean(n))
@@ -233,7 +221,6 @@ export function findStreetPath(
 
   // Fallback direct line if disconnected
   return {
-    nodeIds: [startId, goalId],
     waypoints: [
       { x: startNode.x, z: startNode.z },
       { x: goalNode.x, z: goalNode.z },

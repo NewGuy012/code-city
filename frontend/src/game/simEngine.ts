@@ -83,6 +83,12 @@ export interface SimStateSnapshot {
 }
 
 const TICKS_PER_SPRINT = 40; // 4 seconds per sprint at 1x (10Hz)
+const MILESTONE_RANK: readonly CityMilestone[] = [
+  "Frontier Outpost",
+  "Bustling Harbor Town",
+  "Civic Metropolis",
+  "A+ Sunlit Smart City",
+];
 
 function computeCityMilestone(
   healthScore: number,
@@ -123,17 +129,12 @@ export class CitySimulationEngine {
   private fireFiles = new Set<string>();
   private blackoutFiles = new Set<string>();
   private brownoutFiles = new Set<string>();
+  private combinedBlackoutFiles = new Set<string>();
   private activeDisaster: ActiveDisasterState | null = null;
   private floatingPopups: FloatingStatPopup[] = [];
   private nextId = 1;
 
   private hudVersion = 0;
-  private fireSnapVersion = 0;
-  private cachedFireSnapVersion = -1;
-  private cachedFireSnap = new Set<string>();
-  private blackoutSnapVersion = 0;
-  private cachedBlackoutSnapVersion = -1;
-  private cachedBlackoutSnap = new Set<string>();
   private renderListeners = new Set<() => void>();
 
   subscribeRender(fn: () => void): () => void {
@@ -149,20 +150,8 @@ export class CitySimulationEngine {
     }
   }
 
-  private getStableFireFiles(): Set<string> {
-    if (this.cachedFireSnapVersion !== this.fireSnapVersion) {
-      this.cachedFireSnap = new Set(this.fireFiles);
-      this.cachedFireSnapVersion = this.fireSnapVersion;
-    }
-    return this.cachedFireSnap;
-  }
-
-  private getStableBlackoutFiles(): Set<string> {
-    if (this.cachedBlackoutSnapVersion !== this.blackoutSnapVersion) {
-      this.cachedBlackoutSnap = new Set<string>([...this.blackoutFiles, ...this.brownoutFiles]);
-      this.cachedBlackoutSnapVersion = this.blackoutSnapVersion;
-    }
-    return this.cachedBlackoutSnap;
+  private rebuildCombinedBlackouts(): void {
+    this.combinedBlackoutFiles = new Set<string>([...this.blackoutFiles, ...this.brownoutFiles]);
   }
 
   getHudVersion(): number {
@@ -172,8 +161,8 @@ export class CitySimulationEngine {
   getRenderFrame(): SimRenderFrame {
     return {
       vehicles: this.vehicles,
-      fireFiles: this.getStableFireFiles(),
-      blackoutFiles: this.getStableBlackoutFiles(),
+      fireFiles: this.fireFiles,
+      blackoutFiles: this.combinedBlackoutFiles,
       floatingPopups: this.floatingPopups,
     };
   }
@@ -204,7 +193,7 @@ export class CitySimulationEngine {
     }
   }
 
-  spawnFloatingPopup(x: number, z: number, text: string, color = "#4ade80"): void {
+  spawnFloatingPopup(x: number, z: number, text: string, color = "#4ade80", notify = true): void {
     this.floatingPopups.push({
       id: `pop-${this.nextId++}`,
       x,
@@ -213,7 +202,7 @@ export class CitySimulationEngine {
       color,
       progress: 0,
     });
-    this.emitRender();
+    if (notify) this.emitRender();
   }
 
   private ensureGraph(bundle: CitySnapshotBundle): void {
@@ -255,8 +244,8 @@ export class CitySimulationEngine {
   reset(): void {
     this.clearDisaster();
     if (this.brownoutFiles.size > 0) {
-      this.brownoutFiles.clear();
-      this.blackoutSnapVersion += 1;
+      this.brownoutFiles = new Set();
+      this.rebuildCombinedBlackouts();
     }
     this.floatingPopups = [];
     this.vehicles = [];
@@ -415,14 +404,14 @@ export class CitySimulationEngine {
     impactedFiles: string[],
     greenbeltProtected: Set<string>,
   ): void {
-    this.blackoutFiles.clear();
-    this.blackoutFiles.add(sourceFile);
+    const next = new Set<string>([sourceFile]);
     for (const fp of impactedFiles) {
       if (!greenbeltProtected.has(fp)) {
-        this.blackoutFiles.add(fp);
+        next.add(fp);
       }
     }
-    this.blackoutSnapVersion += 1;
+    this.blackoutFiles = next;
+    this.rebuildCombinedBlackouts();
     this.activeDisaster = {
       kind: "power_outage",
       title: "Cascading Power Outage",
@@ -437,7 +426,7 @@ export class CitySimulationEngine {
 
   triggerBusFactorVacation(authorLabel: string, affectedFiles: string[]): void {
     this.blackoutFiles = new Set(affectedFiles);
-    this.blackoutSnapVersion += 1;
+    this.rebuildCombinedBlackouts();
     this.activeDisaster = {
       kind: "bus_factor_vacation",
       title: `Bus Factor Vacation: ${authorLabel}`,
@@ -451,7 +440,7 @@ export class CitySimulationEngine {
   }
 
   triggerCrunchStorm(bundle: CitySnapshotBundle): void {
-    this.fireFiles.clear();
+    const nextFires = new Set<string>();
     const hot = [...bundle.files]
       .filter((f) => f.building_archetype !== "park_stadium")
       .sort((a, b) => b.hotspot_score - a.hotspot_score)
@@ -462,12 +451,12 @@ export class CitySimulationEngine {
         .map((f) => f.district_path),
     );
     for (const f of hot) {
-      if (!greenbeltDistricts.has(f.district_path) || this.fireFiles.size < 2) {
-        this.fireFiles.add(f.file_path);
+      if (!greenbeltDistricts.has(f.district_path) || nextFires.size < 2) {
+        nextFires.add(f.file_path);
         this.dispatchServiceUnit("fire_truck", f, bundle);
       }
     }
-    this.fireSnapVersion += 1;
+    this.fireFiles = nextFires;
     this.activeDisaster = {
       kind: "crunch_storm",
       title: "Release Crunch Storm",
@@ -490,7 +479,7 @@ export class CitySimulationEngine {
       )
       .slice(0, 6);
     this.blackoutFiles = new Set(harborAndVault.map((f) => f.file_path));
-    this.blackoutSnapVersion += 1;
+    this.rebuildCombinedBlackouts();
     this.activeDisaster = {
       kind: "supply_dock_storm",
       title: `Supply Dock Storm: ${depName}`,
@@ -508,12 +497,11 @@ export class CitySimulationEngine {
     const hadBlackout = this.blackoutFiles.size > 0;
     const hadDisaster = this.activeDisaster !== null;
     if (hadFire) {
-      this.fireFiles.clear();
-      this.fireSnapVersion += 1;
+      this.fireFiles = new Set();
     }
     if (hadBlackout) {
-      this.blackoutFiles.clear();
-      this.blackoutSnapVersion += 1;
+      this.blackoutFiles = new Set();
+      this.rebuildCombinedBlackouts();
     }
     this.activeDisaster = null;
     if (hadFire || hadBlackout || hadDisaster) {
@@ -531,10 +519,10 @@ export class CitySimulationEngine {
 
   private advanceVehicles(): void {
     const nodeLoad = new Map<string, number>();
-    if (this.graph) {
+    if (this.bottleneckNodes.length > 0) {
       for (const v of this.vehicles) {
         if (v.type === "cargo_ship") continue;
-        for (const n of this.graph.nodes) {
+        for (const n of this.bottleneckNodes) {
           if (Math.hypot(v.x - n.x, v.z - n.z) < 4.5) {
             nodeLoad.set(n.id, (nodeLoad.get(n.id) ?? 0) + 1);
           }
@@ -576,10 +564,11 @@ export class CitySimulationEngine {
           v.wpIdx = 0;
           remainingVehicles.push(v);
         } else if (v.type === "fire_truck" && v.targetFile && this.fireFiles.has(v.targetFile)) {
-          this.fireFiles.delete(v.targetFile);
-          this.fireSnapVersion += 1;
+          const next = new Set(this.fireFiles);
+          next.delete(v.targetFile);
+          this.fireFiles = next;
           this.hudVersion += 1;
-          this.spawnFloatingPopup(v.x, v.z, "🔥 Fire Contained", "#4ade80");
+          this.spawnFloatingPopup(v.x, v.z, "🔥 Fire Contained", "#4ade80", false);
           if (this.fireFiles.size === 0 && this.activeDisaster?.kind === "crunch_storm") {
             this.activeDisaster = { ...this.activeDisaster, resolved: true };
           }
@@ -601,14 +590,8 @@ export class CitySimulationEngine {
     this.emitRender();
   }
 
-  step(bundle: CitySnapshotBundle, options?: { ambientOnly?: boolean }): SimStateSnapshot {
+  step(bundle: CitySnapshotBundle): SimStateSnapshot {
     this.ensureGraph(bundle);
-
-    if (options?.ambientOnly) {
-      this.advanceVehicles();
-      this.emitRender();
-      return this.getSnapshot();
-    }
 
     if (this.speed > 0) {
       this.tickCount += 1;
@@ -670,11 +653,8 @@ export class CitySimulationEngine {
         }
       }
       if (brownoutChanged) {
-        this.brownoutFiles.clear();
-        if (nextBrownouts) {
-          for (const fp of nextBrownouts) this.brownoutFiles.add(fp);
-        }
-        this.blackoutSnapVersion += 1;
+        this.brownoutFiles = nextBrownouts ? new Set(nextBrownouts) : new Set();
+        this.rebuildCombinedBlackouts();
       }
 
       const nextLevel = computeCityMilestone(
@@ -682,13 +662,7 @@ export class CitySimulationEngine {
         bundle.files.length,
         this.happiness,
       );
-      const rank = [
-        "Frontier Outpost",
-        "Bustling Harbor Town",
-        "Civic Metropolis",
-        "A+ Sunlit Smart City",
-      ];
-      if (rank.indexOf(nextLevel) > rank.indexOf(this.cityLevel)) {
+      if (MILESTONE_RANK.indexOf(nextLevel) > MILESTONE_RANK.indexOf(this.cityLevel)) {
         this.milestoneEvent = nextLevel;
       }
       this.cityLevel = nextLevel;
@@ -730,8 +704,8 @@ export class CitySimulationEngine {
         heading: v.heading,
         jammed: v.jammed,
       })),
-      fireFiles: this.getStableFireFiles(),
-      blackoutFiles: this.getStableBlackoutFiles(),
+      fireFiles: this.fireFiles,
+      blackoutFiles: this.combinedBlackoutFiles,
       activeDisaster: this.activeDisaster,
       floatingPopups: [...this.floatingPopups],
       milestoneEvent: this.milestoneEvent,

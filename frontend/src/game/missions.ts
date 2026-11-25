@@ -37,7 +37,7 @@ export async function evaluateAdvisorMissions(
   const transitSql = `SELECT file_path, max_complexity, hotspot_score FROM file_metrics WHERE snapshot_idx = ? ORDER BY max_complexity DESC, hotspot_score DESC LIMIT 3;`;
   const airSql = `SELECT COUNT(*) AS smog_files, COALESCE(SUM(lint_issue_count), 0) AS total_lints FROM file_metrics WHERE snapshot_idx = ? AND (lint_issue_count > 0 OR format_drift = true);`;
   const greenSql = `SELECT COALESCE(SUM(CASE WHEN building_archetype = 'park_stadium' THEN sloc ELSE 0 END), 0) AS park_sloc, COALESCE(SUM(sloc), 1) AS total_sloc FROM file_metrics WHERE snapshot_idx = ?;`;
-  const busSql = `SELECT file_path, sloc FROM file_metrics WHERE snapshot_idx = ? AND distinct_authors_90d <= 1 AND sloc >= 40 ORDER BY hotspot_score DESC LIMIT 5;`;
+  const busSql = `SELECT COUNT(*) AS lone_count FROM file_metrics WHERE snapshot_idx = ? AND distinct_authors_90d <= 1 AND sloc >= 40;`;
 
   let clientCache = baselineCache.get(client);
   if (!clientCache) {
@@ -64,7 +64,7 @@ export async function evaluateAdvisorMissions(
           (100 * Number(gRows[0].park_sloc ?? 0)) / Math.max(1, Number(gRows[0].total_sloc ?? 1)),
         );
       }
-      base.sqlLoneCount = bRows.length;
+      base.sqlLoneCount = Number(bRows[0]?.lone_count ?? 0);
       if (clientCache.size >= 32) clientCache.clear();
       clientCache.set(cacheKey, base);
     } catch {

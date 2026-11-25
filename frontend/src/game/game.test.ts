@@ -5,8 +5,11 @@ import { evaluateAdvisorMissions } from "./missions";
 import { buildRoadGraph, detectImportCycles, findStreetPath } from "./roadGraph";
 import {
   type SandboxActionRecord,
+  appendSandboxAction,
   applySandboxOverlay,
   generateRefactorBlueprintMarkdown,
+  redoSandboxAction,
+  undoSandboxAction,
   validateToolOnFile,
 } from "./sandboxOverlay";
 import { CitySimulationEngine, computeImpactedFiles } from "./simEngine";
@@ -223,6 +226,39 @@ describe("CodeCity simulation & Mayor sandbox", () => {
     expect(md).toContain("Mayor's Refactor Blueprint — acme/demo");
     expect(md).toContain("[SPLITTER]");
     expect(md).toContain("[BULLDOZER]");
+
+    let list = appendSandboxAction([], {
+      tool: "sweeper",
+      target_path: "core/hub.py",
+      secondary_path: null,
+      district_path: "core",
+      summary: "clean",
+      velocity_cost: 10,
+    });
+    list = appendSandboxAction(list, {
+      tool: "proving_park",
+      target_path: "core/worker.py",
+      secondary_path: null,
+      district_path: "core",
+      summary: "park",
+      velocity_cost: 25,
+    });
+    expect(list.map((a) => a.action_seq)).toEqual([1, 2]);
+    list = undoSandboxAction(list);
+    expect(list.map((a) => a.active)).toEqual([true, false]);
+    list = redoSandboxAction(list);
+    expect(list.map((a) => a.active)).toEqual([true, true]);
+    list = undoSandboxAction(list);
+    list = appendSandboxAction(list, {
+      tool: "co_maintainer",
+      target_path: "core/hub.py",
+      secondary_path: null,
+      district_path: "core",
+      summary: "co",
+      velocity_cost: 15,
+    });
+    expect(list.length).toBe(2);
+    expect(list[1].tool).toBe("co_maintainer");
   });
 
   test("A* road graph, 10Hz economy simulation, disasters, and advisor missions", async () => {
@@ -297,53 +333,7 @@ describe("CodeCity simulation & Mayor sandbox", () => {
     soundEngine.playDisaster();
   });
 
-  test("ambientOnly stepping moves vehicles while freezing gameplay economy and sprints", () => {
-    const bundle = makeTestBundle();
-    const engine = new CitySimulationEngine();
-
-    const first = engine.step(bundle, { ambientOnly: true });
-    expect(first.vehicles.length).toBeGreaterThan(0);
-    expect(first.tick).toBe(0);
-    expect(first.sprintNumber).toBe(1);
-    expect(first.sprintProgress).toBe(0);
-
-    const initialPositions = first.vehicles.map(
-      (v) => `${v.id}:${v.x.toFixed(3)},${v.z.toFixed(3)}`,
-    );
-
-    let latest = first;
-    for (let i = 0; i < 45; i++) {
-      latest = engine.step(bundle, { ambientOnly: true });
-    }
-    const afterPositions = latest.vehicles.map(
-      (v) => `${v.id}:${v.x.toFixed(3)},${v.z.toFixed(3)}`,
-    );
-    expect(afterPositions).not.toEqual(initialPositions);
-    expect(latest.tick).toBe(0);
-    expect(latest.sprintNumber).toBe(1);
-    expect(latest.sprintProgress).toBe(0);
-    expect(latest.velocityTreasury).toBe(first.velocityTreasury);
-    expect(latest.incomePerSprint).toBe(first.incomePerSprint);
-    expect(latest.upkeepPerSprint).toBe(first.upkeepPerSprint);
-    expect(latest.happiness).toBe(first.happiness);
-    expect(latest.cityLevel).toBe(first.cityLevel);
-    expect(latest.milestoneEvent).toBeNull();
-
-    engine.spawnFloatingPopup(10, 10, "test");
-    expect(engine.getSnapshot().floatingPopups.length).toBe(1);
-    engine.clearFloatingPopups();
-    expect(engine.getSnapshot().floatingPopups.length).toBe(0);
-
-    // Switching to full Play stepping resumes sprint & economy progression
-    for (let i = 0; i < 45; i++) {
-      latest = engine.step(bundle);
-    }
-    expect(latest.tick).toBe(45);
-    expect(latest.sprintNumber).toBe(2);
-    expect(latest.velocityTreasury).not.toBe(first.velocityTreasury);
-  });
-
-  test("simEngine keeps stable disaster Set refs and notifies render subscribers without HUD churn", () => {
+  test("stepAmbient moves vehicles and notifies render subscribers without HUD or economy churn", () => {
     const bundle = makeTestBundle();
     const engine = new CitySimulationEngine();
     let renderCount = 0;
@@ -353,23 +343,52 @@ describe("CodeCity simulation & Mayor sandbox", () => {
 
     const hudV0 = engine.getHudVersion();
     engine.stepAmbient(bundle);
+    const first = engine.getSnapshot();
     const frame1 = engine.getRenderFrame();
-    engine.stepAmbient(bundle);
-    const frame2 = engine.getRenderFrame();
+    expect(first.vehicles.length).toBeGreaterThan(0);
+    expect(first.tick).toBe(0);
+    expect(first.sprintNumber).toBe(1);
+    expect(first.sprintProgress).toBe(0);
 
-    expect(renderCount).toBe(2);
+    const initialPositions = first.vehicles.map(
+      (v) => `${v.id}:${v.x.toFixed(3)},${v.z.toFixed(3)}`,
+    );
+
+    for (let i = 0; i < 45; i++) {
+      engine.stepAmbient(bundle);
+    }
+    const frame2 = engine.getRenderFrame();
+    const latest = engine.getSnapshot();
+    const afterPositions = latest.vehicles.map(
+      (v) => `${v.id}:${v.x.toFixed(3)},${v.z.toFixed(3)}`,
+    );
+    expect(renderCount).toBe(46);
     expect(engine.getHudVersion()).toBe(hudV0);
     expect(frame1.fireFiles).toBe(frame2.fireFiles);
     expect(frame1.blackoutFiles).toBe(frame2.blackoutFiles);
+    expect(afterPositions).not.toEqual(initialPositions);
+    expect(latest.tick).toBe(0);
+    expect(latest.sprintNumber).toBe(1);
+    expect(latest.velocityTreasury).toBe(first.velocityTreasury);
+    expect(latest.happiness).toBe(first.happiness);
+    expect(latest.milestoneEvent).toBeNull();
+
+    engine.spawnFloatingPopup(10, 10, "test");
+    expect(engine.getSnapshot().floatingPopups.length).toBe(1);
+    engine.clearFloatingPopups();
+    expect(engine.getSnapshot().floatingPopups.length).toBe(0);
 
     engine.triggerPowerOutage("core/hub.py", ["api/routes.py"], new Set());
-    const snapA = engine.getSnapshot();
-    const snapB = engine.getSnapshot();
-    expect(snapA.blackoutFiles).toBe(snapB.blackoutFiles);
+    expect(engine.getSnapshot().blackoutFiles).toBe(engine.getSnapshot().blackoutFiles);
     expect(engine.getHudVersion()).toBeGreaterThan(hudV0);
 
     unsub();
-    engine.stepAmbient(bundle);
-    expect(renderCount).toBe(3);
+    for (let i = 0; i < 45; i++) {
+      engine.step(bundle);
+    }
+    expect(renderCount).toBe(49);
+    expect(engine.getSnapshot().tick).toBe(45);
+    expect(engine.getSnapshot().sprintNumber).toBe(2);
+    expect(engine.getSnapshot().velocityTreasury).not.toBe(first.velocityTreasury);
   });
 });

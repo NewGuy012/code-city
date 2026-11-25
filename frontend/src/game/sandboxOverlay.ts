@@ -47,6 +47,52 @@ export const TOOL_COSTS: Record<Exclude<MayorToolId, "inspect">, number> = {
   bulldozer: 5,
 };
 
+export function appendSandboxAction(
+  actions: readonly SandboxActionRecord[],
+  action: Omit<SandboxActionRecord, "action_id" | "action_seq" | "active" | "created_at">,
+): SandboxActionRecord[] {
+  const active = actions.filter((a) => a.active);
+  const nextSeq = active.reduce((m, a) => Math.max(m, a.action_seq), 0) + 1;
+  return [
+    ...active,
+    {
+      ...action,
+      action_id: `sbx-${Date.now().toString(36)}-${nextSeq}`,
+      action_seq: nextSeq,
+      active: true,
+      created_at: new Date().toISOString(),
+    },
+  ];
+}
+
+function toggleSandboxActionBySeq(
+  actions: readonly SandboxActionRecord[],
+  targetActive: boolean,
+): SandboxActionRecord[] {
+  let chosen: SandboxActionRecord | null = null;
+  for (const a of actions) {
+    if (a.active === targetActive) continue;
+    if (
+      !chosen ||
+      (targetActive ? a.action_seq < chosen.action_seq : a.action_seq > chosen.action_seq)
+    ) {
+      chosen = a;
+    }
+  }
+  if (!chosen) return [...actions];
+  return actions.map((a) =>
+    a.action_id === chosen.action_id ? { ...a, active: targetActive } : a,
+  );
+}
+
+export function undoSandboxAction(actions: readonly SandboxActionRecord[]): SandboxActionRecord[] {
+  return toggleSandboxActionBySeq(actions, false);
+}
+
+export function redoSandboxAction(actions: readonly SandboxActionRecord[]): SandboxActionRecord[] {
+  return toggleSandboxActionBySeq(actions, true);
+}
+
 export function validateToolOnFile(
   tool: Exclude<MayorToolId, "inspect">,
   file: FileMetric,

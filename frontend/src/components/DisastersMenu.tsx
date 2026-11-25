@@ -2,6 +2,7 @@ import { Anchor, Flame, PlaneTakeoff, ShieldCheck, Zap } from "lucide-react";
 import { type ReactNode, useState } from "react";
 
 import type { CitySnapshotBundle } from "../data/cityDataClient";
+import type { AuthorSummary } from "../types/city";
 import { ModalShell } from "./ModalShell";
 
 function DisasterCard({
@@ -52,12 +53,6 @@ function DisasterCard({
       </button>
     </div>
   );
-}
-
-export interface AuthorSummary {
-  author: string;
-  sole_files: string[];
-  total_files: number;
 }
 
 interface DisastersMenuProps {

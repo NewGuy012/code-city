@@ -511,13 +511,40 @@ export function useUnifiedCameraHotkeys(viewMode: "2d" | "3d"): void {
 
 const BOOKMARK_STORAGE_PREFIX = "codecity_bookmarks_v2:";
 
+function isValidBookmark(b: unknown): b is CameraBookmark {
+  if (!b || typeof b !== "object") return false;
+  const o = b as Record<string, unknown>;
+  return (
+    typeof o.id === "string" &&
+    typeof o.name === "string" &&
+    Number.isFinite(o.targetX) &&
+    Number.isFinite(o.targetZ) &&
+    Number.isFinite(o.zoom) &&
+    Number.isFinite(o.yaw) &&
+    Number.isFinite(o.pitch) &&
+    (o.projection === "perspective" || o.projection === "orthographic") &&
+    typeof o.createdAt === "string"
+  );
+}
+
+function persistBookmarks(repoKey: string, list: CameraBookmark[]): CameraBookmark[] {
+  if (typeof localStorage !== "undefined") {
+    try {
+      localStorage.setItem(`${BOOKMARK_STORAGE_PREFIX}${repoKey}`, JSON.stringify(list));
+    } catch {
+      // Ignore storage quota or private-browsing failures
+    }
+  }
+  return list;
+}
+
 export function loadRepoBookmarks(repoKey: string): CameraBookmark[] {
   if (typeof localStorage === "undefined") return [];
   try {
     const raw = localStorage.getItem(`${BOOKMARK_STORAGE_PREFIX}${repoKey}`);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? (parsed as CameraBookmark[]) : [];
+    return Array.isArray(parsed) ? parsed.filter(isValidBookmark) : [];
   } catch {
     return [];
   }
@@ -536,17 +563,12 @@ export function saveRepoBookmark(repoKey: string, name: string): CameraBookmark[
     projection: cam.projection,
     createdAt: new Date().toISOString(),
   };
-  const list = [next, ...loadRepoBookmarks(repoKey)].slice(0, 12);
-  if (typeof localStorage !== "undefined") {
-    localStorage.setItem(`${BOOKMARK_STORAGE_PREFIX}${repoKey}`, JSON.stringify(list));
-  }
-  return list;
+  return persistBookmarks(repoKey, [next, ...loadRepoBookmarks(repoKey)].slice(0, 12));
 }
 
 export function deleteRepoBookmark(repoKey: string, id: string): CameraBookmark[] {
-  const list = loadRepoBookmarks(repoKey).filter((b) => b.id !== id);
-  if (typeof localStorage !== "undefined") {
-    localStorage.setItem(`${BOOKMARK_STORAGE_PREFIX}${repoKey}`, JSON.stringify(list));
-  }
-  return list;
+  return persistBookmarks(
+    repoKey,
+    loadRepoBookmarks(repoKey).filter((b) => b.id !== id),
+  );
 }
