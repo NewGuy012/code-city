@@ -9,7 +9,7 @@ import re
 import tempfile
 import threading
 import uuid
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
@@ -164,16 +164,76 @@ def create_app(
     lakehouse: LakehouseManager | None = None,
     enable_quack: bool = True,
     frontend_dist: Path | None = None,
+    shutdown_event: threading.Event | None = None,
+    on_shutdown_request: Callable[[], None] | None = None,
+    auto_exit: bool = False,
+    auto_exit_grace: float = 15.0,
 ) -> FastAPI:
     """Create the CodeCity FastAPI Control Plane application."""
     lake = lakehouse or LakehouseManager()
     llm_cache = LlmSummaryCache(lake.data_dir / "llm_cache.sqlite")
     quack_mgr = QuackServerManager(lake) if enable_quack else None
+    shutdown_evt = shutdown_event or threading.Event()
     jobs: dict[str, AnalyzeJob] = {}
     repo_locks: dict[tuple[str, str], threading.Lock] = {}
     jobs_lock = threading.Lock()
     db_lock = threading.Lock()
+    presence_lock = threading.Lock()
+    presence_state: dict[str, Any] = {
+        "active_clients": 0,
+        "has_seen_client": False,
+        "timer": None,
+    }
     job_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="codecity-job")
+
+    def _has_active_jobs() -> bool:
+        with jobs_lock:
+            snapshot = list(jobs.values())
+        for j in snapshot:
+            with j.lock:
+                if j.status in {"queued", "running"}:
+                    return True
+        return False
+
+    def _cancel_auto_exit_timer() -> None:
+        timer: threading.Timer | None = presence_state["timer"]
+        if timer is not None:
+            timer.cancel()
+            presence_state["timer"] = None
+
+    def _schedule_auto_exit(delay: float) -> None:
+        if not auto_exit or on_shutdown_request is None or shutdown_evt.is_set():
+            return
+        _cancel_auto_exit_timer()
+
+        def _fire() -> None:
+            if _has_active_jobs():
+                with presence_lock:
+                    presence_state["timer"] = None
+                    if (
+                        not shutdown_evt.is_set()
+                        and presence_state["has_seen_client"]
+                        and presence_state["active_clients"] == 0
+                    ):
+                        _schedule_auto_exit(min(1.0, max(0.05, auto_exit_grace)))
+                return
+            should_trigger = False
+            with presence_lock:
+                presence_state["timer"] = None
+                if (
+                    not shutdown_evt.is_set()
+                    and presence_state["has_seen_client"]
+                    and presence_state["active_clients"] == 0
+                ):
+                    shutdown_evt.set()
+                    should_trigger = True
+            if should_trigger and on_shutdown_request is not None:
+                on_shutdown_request()
+
+        t = threading.Timer(max(0.05, delay), _fire)
+        t.daemon = True
+        presence_state["timer"] = t
+        t.start()
 
     @contextmanager
     def locked_read_con(*, read_only: bool = True) -> Iterator[duckdb.DuckDBPyConnection]:
@@ -206,11 +266,15 @@ def create_app(
         try:
             yield
         finally:
+            shutdown_evt.set()
+            with presence_lock:
+                _cancel_auto_exit_timer()
             job_pool.shutdown(wait=False, cancel_futures=True)
             if quack_mgr is not None:
                 quack_mgr.stop()
 
     app = FastAPI(title="CodeCity Control Plane", version="0.1.0", lifespan=lifespan)
+    app.state.shutdown_event = shutdown_evt
     app.add_middleware(
         CORSMiddleware,
         allow_origin_regex=_LOCAL_ORIGIN_RE.pattern,
@@ -362,8 +426,53 @@ def create_app(
             "duckdb_version": duckdb.__version__,
             "quack_enabled": quack_mgr is not None,
             "quack_uri": ep.quack_uri if ep else None,
+            "auto_exit": auto_exit,
             **describe_llm_status(),
         }
+
+    @app.post("/api/shutdown")
+    async def api_shutdown() -> dict[str, str]:
+        if on_shutdown_request is None:
+            raise HTTPException(status_code=501, detail="Server shutdown is not enabled")
+        shutdown_evt.set()
+        with presence_lock:
+            _cancel_auto_exit_timer()
+        loop = asyncio.get_running_loop()
+        loop.call_later(0.05, on_shutdown_request)
+        return {"status": "shutting_down"}
+
+    @app.get("/api/client/session")
+    async def stream_client_session() -> StreamingResponse:
+        async def presence_gen() -> AsyncIterator[bytes]:
+            with presence_lock:
+                presence_state["active_clients"] += 1
+                presence_state["has_seen_client"] = True
+                _cancel_auto_exit_timer()
+            try:
+                yield b": connected\n\n"
+                ticks = 0
+                while not shutdown_evt.is_set():
+                    await asyncio.sleep(0.25)
+                    ticks += 1
+                    if ticks >= 20 and not shutdown_evt.is_set():
+                        ticks = 0
+                        yield b": ping\n\n"
+            finally:
+                with presence_lock:
+                    presence_state["active_clients"] = max(0, presence_state["active_clients"] - 1)
+                    if (
+                        auto_exit
+                        and presence_state["has_seen_client"]
+                        and presence_state["active_clients"] == 0
+                        and not shutdown_evt.is_set()
+                    ):
+                        _schedule_auto_exit(auto_exit_grace)
+
+        return StreamingResponse(
+            presence_gen(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
 
     @app.post("/api/analyze")
     def start_analyze(req: AnalyzeRequest) -> dict[str, str]:
@@ -414,7 +523,7 @@ def create_app(
                     done = job.status in {"completed", "failed"}
                 for evt in batch:
                     yield f"event: progress\ndata: {json.dumps(evt)}\n\n".encode()
-                if done:
+                if done or shutdown_evt.is_set():
                     break
                 await asyncio.sleep(0.15)
 

@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
+import threading
 import time
 from pathlib import Path
 
 import duckdb
+import httpx
 import pytest
+import uvicorn
 from fastapi.testclient import TestClient
 
 from codecity.analyzer.plugins.base import safe_repo_target
 from codecity.api.app import create_app
 from codecity.storage.lakehouse import LakehouseManager
+from codecity.storage.quack_server import _pick_free_port
 from tests.conftest import create_polyglot_fixture_repo, git_commit
 
 
@@ -322,3 +326,209 @@ def test_control_plane_mayor_export_quack_and_security(tmp_path: Path) -> None:
         )
         assert client.delete("/api/repos/acme/poly_city/sandbox-actions").status_code == 200
         assert client.get("/api/repos/acme/poly_city/sandbox-actions").json() == []
+
+
+def test_shutdown_endpoint_security_and_callback(tmp_path: Path) -> None:
+    lake = LakehouseManager(data_dir=tmp_path / "lake_disabled")
+    disabled_app = create_app(lakehouse=lake, enable_quack=False)
+    with TestClient(disabled_app) as client:
+        assert client.post("/api/shutdown").status_code == 501
+        assert (
+            client.post("/api/shutdown", headers={"Origin": "https://evil.example"}).status_code
+            == 403
+        )
+        assert (
+            client.post("/api/shutdown", headers={"Sec-Fetch-Site": "cross-site"}).status_code
+            == 403
+        )
+        assert (
+            client.post("/api/shutdown", headers={"Host": "evil.example:8787"}).status_code == 403
+        )
+
+    triggered = threading.Event()
+    shutdown_evt = threading.Event()
+    enabled_app = create_app(
+        lakehouse=LakehouseManager(data_dir=tmp_path / "lake_enabled"),
+        enable_quack=False,
+        shutdown_event=shutdown_evt,
+        on_shutdown_request=triggered.set,
+    )
+    with TestClient(enabled_app) as client:
+        resp = client.post("/api/shutdown")
+        assert resp.status_code == 200
+        assert resp.json() == {"status": "shutting_down"}
+        assert shutdown_evt.is_set()
+        assert triggered.wait(timeout=1.5)
+
+
+def test_presence_auto_exit_reconnect_job_defer_and_job_sse_shutdown(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    triggered = threading.Event()
+    shutdown_evt = threading.Event()
+    job_started = threading.Event()
+    release_job = threading.Event()
+
+    def _blocking_analyze(*_args: object, **_kwargs: object) -> object:
+        job_started.set()
+        release_job.wait(timeout=5.0)
+        raise ValueError("cancelled for test")
+
+    monkeypatch.setattr("codecity.api.app.analyze_repository", _blocking_analyze)
+
+    port = _pick_free_port()
+    app = create_app(
+        lakehouse=LakehouseManager(data_dir=tmp_path / "lake_presence"),
+        enable_quack=False,
+        shutdown_event=shutdown_evt,
+        on_shutdown_request=triggered.set,
+        auto_exit=True,
+        auto_exit_grace=0.35,
+    )
+    server = uvicorn.Server(
+        uvicorn.Config(
+            app,
+            host="127.0.0.1",
+            port=port,
+            log_level="warning",
+            timeout_graceful_shutdown=2,
+        )
+    )
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    base_url = f"http://127.0.0.1:{port}"
+
+    try:
+        for _ in range(50):
+            try:
+                if httpx.get(f"{base_url}/api/health", timeout=0.5).status_code == 200:
+                    break
+            except Exception:
+                time.sleep(0.05)
+
+        # Before any browser connects, auto-exit must NOT fire
+        time.sleep(0.45)
+        assert not triggered.is_set()
+
+        # Connect presence SSE, then disconnect and reconnect inside the grace window
+        with httpx.stream("GET", f"{base_url}/api/client/session", timeout=3.0) as resp:
+            assert resp.status_code == 200
+            lines = resp.iter_lines()
+            assert next(lines) == ": connected"
+
+        time.sleep(0.1)
+        assert not triggered.is_set()
+
+        # Reconnect before 0.35s grace expires -> cancels auto-exit
+        with httpx.stream("GET", f"{base_url}/api/client/session", timeout=3.0) as resp:
+            assert resp.status_code == 200
+            lines = resp.iter_lines()
+            assert next(lines) == ": connected"
+            time.sleep(0.45)
+            assert not triggered.is_set()
+
+            # Start a blocking job so we verify auto-exit defers while a job runs
+            job_id = httpx.post(
+                f"{base_url}/api/analyze",
+                json={"source": str(tmp_path), "owner": "acme", "repo": "demo"},
+                timeout=2.0,
+            ).json()["job_id"]
+            assert job_started.wait(timeout=2.0)
+
+        # All clients disconnected, but job is still running -> auto-exit defers
+        time.sleep(0.5)
+        assert not triggered.is_set()
+
+        # Open job SSE stream, then finish job -> auto-exit fires and closes job SSE cleanly
+        sse_done = threading.Event()
+
+        def _consume_job_sse() -> None:
+            with httpx.stream("GET", f"{base_url}/api/jobs/{job_id}/events", timeout=3.0) as resp:
+                for _ in resp.iter_lines():
+                    pass
+            sse_done.set()
+
+        sse_thread = threading.Thread(target=_consume_job_sse, daemon=True)
+        sse_thread.start()
+
+        release_job.set()
+        assert sse_done.wait(timeout=3.0)
+        assert triggered.wait(timeout=2.5)
+        assert shutdown_evt.is_set()
+    finally:
+        release_job.set()
+        shutdown_evt.set()
+        server.should_exit = True
+        thread.join(timeout=5)
+
+
+def test_job_events_stream_exits_promptly_on_shutdown_event(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shutdown_evt = threading.Event()
+    job_started = threading.Event()
+    release_job = threading.Event()
+
+    def _blocking_analyze(*_args: object, **_kwargs: object) -> object:
+        job_started.set()
+        release_job.wait(timeout=5.0)
+        raise ValueError("stopped")
+
+    monkeypatch.setattr("codecity.api.app.analyze_repository", _blocking_analyze)
+
+    port = _pick_free_port()
+    app = create_app(
+        lakehouse=LakehouseManager(data_dir=tmp_path / "lake_sse"),
+        enable_quack=False,
+        shutdown_event=shutdown_evt,
+    )
+    server = uvicorn.Server(
+        uvicorn.Config(
+            app,
+            host="127.0.0.1",
+            port=port,
+            log_level="warning",
+            timeout_graceful_shutdown=2,
+        )
+    )
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    base_url = f"http://127.0.0.1:{port}"
+
+    try:
+        for _ in range(50):
+            try:
+                if httpx.get(f"{base_url}/api/health", timeout=0.5).status_code == 200:
+                    break
+            except Exception:
+                time.sleep(0.05)
+
+        job_id = httpx.post(
+            f"{base_url}/api/analyze",
+            json={"source": str(tmp_path), "owner": "acme", "repo": "hang"},
+            timeout=2.0,
+        ).json()["job_id"]
+        assert job_started.wait(timeout=2.0)
+
+        stream_finished = threading.Event()
+
+        def _stream() -> None:
+            with httpx.stream("GET", f"{base_url}/api/jobs/{job_id}/events", timeout=3.0) as resp:
+                for _ in resp.iter_lines():
+                    pass
+            stream_finished.set()
+
+        t = threading.Thread(target=_stream, daemon=True)
+        t.start()
+        time.sleep(0.15)
+        assert not stream_finished.is_set()
+
+        shutdown_evt.set()
+        assert stream_finished.wait(timeout=1.5)
+    finally:
+        release_job.set()
+        shutdown_evt.set()
+        server.should_exit = True
+        thread.join(timeout=5)
