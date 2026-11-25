@@ -22,6 +22,9 @@
 
 ---
 
+> [!IMPORTANT]
+> **Local Mode Only (For Now):** CodeCity is currently built for **local mode only**. The control plane (`codecity serve`) binds to `127.0.0.1` by default, restricts API/CORS/CSRF requests to `localhost` / `127.0.0.1` origins, persists data in a local `.codecity/` DuckLake catalog, and runs repository analysis and Live Mayor Git operations directly on your machine with no user authentication or hosted/multi-tenant backend. Do not expose `codecity serve` to public networks.
+
 ## Quickstart
 
 Requires [`uv`](https://docs.astral.sh/uv/) (`>= 0.5`, Python `3.12+`) and [`bun`](https://bun.sh/) (`>= 1.4.6` / native `bun lint` + `bun fmt`).
@@ -34,15 +37,21 @@ uv sync --extra dev
 # 2. Analyze a local repository or public Git URL
 uv run codecity analyze . --max-keyframes 16 --workers 4
 
-# 3. Launch the Studio UI on http://127.0.0.1:8787
+# 3. Launch the Studio UI locally at http://127.0.0.1:8787
 uv run codecity serve
 ```
 
-Export a self-contained static report (with an optional Playwright PNG postcard):
+### Previewing on Localhost
+
+- **Full Local App (`http://127.0.0.1:8787`)**: Run `uv run codecity serve` after building `frontend/dist` and open `http://127.0.0.1:8787` (or `http://localhost:8787`). Once dependencies are installed and a repository has been analyzed into `.codecity/`, you only need `uv run codecity serve` on subsequent runs.
+- **Frontend Hot-Reload Dev Mode (`http://localhost:5173`)**: Run `uv run codecity serve` in one terminal and `cd frontend && bun run dev` in a second terminal. Vite proxies `/api` and `/quack` requests to `http://127.0.0.1:8787`.
+- **Read-Only Static Export Preview**: Export a static bundle and serve it over local HTTP (required for DuckDB-Wasm workers and Parquet fetches; `file://` will not work):
 
 ```bash
 uv run codecity list
 uv run codecity export <owner>/<repo> --out ./export-dist --postcard
+python3 -m http.server 8080 --bind 127.0.0.1 --directory ./export-dist
+# Open http://127.0.0.1:8080 (read-only snapshot; live analysis, fix diffs, Live Mayor Mode, and Quack require `codecity serve`)
 ```
 
 ---
