@@ -10,6 +10,7 @@ import type {
   District,
   ExternalDep,
   FileMetric,
+  ZoneType,
 } from "../types/city";
 import { BuildingTooltip } from "./BuildingTooltip";
 import {
@@ -20,7 +21,6 @@ import {
   cameraStore,
 } from "./cameraStore";
 import {
-  ZONE_PALETTES,
   buildImpactedHopMap,
   canvasCursorClass,
   commuterCarColor,
@@ -33,7 +33,9 @@ import {
   buildingColor3D,
   buildingFootprint3D,
   buildingHeight3D,
+  computePartTransform,
   computeSliceHeights,
+  createBuildingPartMaterial,
   getArchetypeKitForFile,
   getPartGeometry,
   getSharedGeometrySet,
@@ -41,7 +43,7 @@ import {
 } from "./geometries3D";
 import type { SimVehicleRender } from "./isoRenderer2D";
 import { computeNatureAndStreetPlacements } from "./islandLayout";
-import { type BuildingShaderUniforms, applyBuildingFacadeShader } from "./shaders3D";
+import type { BuildingShaderUniforms } from "./shaders3D";
 import {
   type CoastalOceanHandle,
   createBroadleafTreeGeometries,
@@ -50,6 +52,8 @@ import {
   createCoastalOcean,
   createDistantHeadlands,
   createPineCanopyGeometry,
+  createSailboatGeometries,
+  createSkyEnvironmentTarget,
   createVehicleGeometry,
 } from "./terrain3D";
 import {
@@ -99,33 +103,38 @@ interface HighlightBox {
 const BASE_ORBIT_DISTANCE = 92;
 const MAX_VEHICLES = 120;
 const MAX_FIRES = 64;
-const UNIT_BOX_EDGES = new THREE.EdgesGeometry(new THREE.BoxGeometry(1, 1, 1));
-const UNIT_PLANE = new THREE.PlaneGeometry(1, 1);
 
 function clearGroup(group: THREE.Group, keepGeometries?: Set<THREE.BufferGeometry>): void {
+  const geoms = new Set<THREE.BufferGeometry>();
   const mats = new Set<THREE.Material>();
   while (group.children.length > 0) {
     const child = group.children[0];
     group.remove(child);
     child.traverse((obj) => {
       if (obj instanceof THREE.Mesh || obj instanceof THREE.Line) {
-        if (!keepGeometries?.has(obj.geometry)) obj.geometry.dispose();
+        if (!keepGeometries?.has(obj.geometry)) geoms.add(obj.geometry);
         for (const m of Array.isArray(obj.material) ? obj.material : [obj.material]) mats.add(m);
       }
     });
   }
+  for (const g of geoms) g.dispose();
   for (const m of mats) m.dispose();
 }
 
-function makeHighlightBox(color: string, opacity: number): HighlightBox {
+function makeHighlightBox(
+  color: string,
+  opacity: number,
+  boxEdges: THREE.EdgesGeometry,
+  unitPlane: THREE.PlaneGeometry,
+): HighlightBox {
   const group = new THREE.Group();
   group.visible = false;
   const edges = new THREE.LineSegments(
-    UNIT_BOX_EDGES,
+    boxEdges,
     new THREE.LineBasicMaterial({ color, transparent: true, opacity }),
   );
   const pad = new THREE.Mesh(
-    UNIT_PLANE,
+    unitPlane,
     new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.24, depthWrite: false }),
   );
   pad.rotation.x = -Math.PI / 2;
@@ -144,41 +153,6 @@ function positionHighlightBox(box: HighlightBox, file: FileMetric | null): void 
   box.pad.position.set(cx, 0.2, cz);
   box.pad.scale.set(bw + 0.72, bd + 0.72, 1);
   box.group.visible = true;
-}
-
-function createSkyEnvironmentTarget(
-  pmrem: THREE.PMREMGenerator,
-  zenithHex: string,
-  horizonHex: string,
-  groundHex: string,
-): THREE.WebGLRenderTarget {
-  const envScene = new THREE.Scene();
-  const domeGeom = new THREE.SphereGeometry(20, 16, 12);
-  const pos = domeGeom.attributes.position as THREE.BufferAttribute;
-  const cols = new Float32Array(pos.count * 3);
-  const cZen = new THREE.Color(zenithHex);
-  const cHor = new THREE.Color(horizonHex);
-  const cGnd = new THREE.Color(groundHex);
-  const c = new THREE.Color();
-
-  for (let i = 0; i < pos.count; i++) {
-    const ny = pos.getY(i) / 20;
-    if (ny >= 0) {
-      c.copy(cHor).lerp(cZen, Math.pow(ny, 0.6));
-    } else {
-      c.copy(cHor).lerp(cGnd, Math.min(1, -ny * 1.8));
-    }
-    cols[i * 3] = c.r;
-    cols[i * 3 + 1] = c.g;
-    cols[i * 3 + 2] = c.b;
-  }
-  domeGeom.setAttribute("color", new THREE.BufferAttribute(cols, 3));
-  const domeMat = new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.BackSide });
-  envScene.add(new THREE.Mesh(domeGeom, domeMat));
-  const target = pmrem.fromScene(envScene, 0.04);
-  domeGeom.dispose();
-  domeMat.dispose();
-  return target;
 }
 
 function createNightSkyDome(): THREE.Mesh {
@@ -213,6 +187,24 @@ function sunVecFromAngles(elevDeg: number, azimDeg: number): THREE.Vector3 {
   return new THREE.Vector3().setFromSphericalCoords(1, phi, theta);
 }
 
+interface PlateMaterials {
+  grass: THREE.MeshStandardMaterial;
+  paved: THREE.MeshStandardMaterial;
+  industrial: THREE.MeshStandardMaterial;
+  clay: THREE.MeshStandardMaterial;
+}
+
+function selectPlateMaterial(
+  zone: ZoneType,
+  analytical: boolean,
+  mats: PlateMaterials,
+): THREE.MeshStandardMaterial {
+  if (analytical) return mats.clay;
+  if (zone === "downtown_core") return mats.paved;
+  if (zone === "industrial_quarter" || zone === "supply_docks") return mats.industrial;
+  return mats.grass;
+}
+
 interface SceneHandle {
   renderer: THREE.WebGLRenderer;
   scene: THREE.Scene;
@@ -227,8 +219,11 @@ interface SceneHandle {
   firesMesh: THREE.InstancedMesh;
   selectedBox: HighlightBox;
   hoveredBox: HighlightBox;
+  unitPlane: THREE.PlaneGeometry;
   batches: BuildingBatch[];
   sharedPartGeoms: Set<THREE.BufferGeometry>;
+  districtPlates: Array<{ mesh: THREE.Mesh; zone: ZoneType }>;
+  plateMats: PlateMaterials | null;
   streetlightMat: THREE.MeshStandardMaterial | null;
   applyAtmosphere: (tod: TimeOfDay) => void;
   updateBuildingColors: () => void;
@@ -361,8 +356,12 @@ export default function CityCanvas3D({
     const sailboatsGroup = new THREE.Group();
     const buildingsGroup = new THREE.Group();
     const faultsGroup = new THREE.Group();
-    const selectedBox = makeHighlightBox("#fef08a", 0.95);
-    const hoveredBox = makeHighlightBox("#ffffff", 0.85);
+    const tmpBox = new THREE.BoxGeometry(1, 1, 1);
+    const unitBoxEdges = new THREE.EdgesGeometry(tmpBox);
+    tmpBox.dispose();
+    const unitPlane = new THREE.PlaneGeometry(1, 1);
+    const selectedBox = makeHighlightBox("#fef08a", 0.95, unitBoxEdges, unitPlane);
+    const hoveredBox = makeHighlightBox("#ffffff", 0.85, unitBoxEdges, unitPlane);
 
     const vehicleGeom = createVehicleGeometry();
     const vehiclesMesh = new THREE.InstancedMesh(
@@ -417,8 +416,11 @@ export default function CityCanvas3D({
       firesMesh,
       selectedBox,
       hoveredBox,
+      unitPlane,
       batches: [],
       sharedPartGeoms: getSharedGeometrySet(),
+      districtPlates: [],
+      plateMats: null,
       streetlightMat: null,
       applyAtmosphere(tod: TimeOfDay) {
         const isNight = tod === "night";
@@ -731,8 +733,12 @@ export default function CityCanvas3D({
       clearGroup(docksGroup);
       clearGroup(shipsGroup);
       clearGroup(sailboatsGroup);
-      clearGroup(buildingsGroup, getSharedGeometrySet());
+      clearGroup(buildingsGroup, new Set([...handle.sharedPartGeoms, unitPlane]));
       clearGroup(faultsGroup);
+      if (handle.plateMats) {
+        Object.values(handle.plateMats).forEach((m) => m.dispose());
+        handle.plateMats = null;
+      }
       clearGroup(headlands);
       ocean.mesh.geometry.dispose();
       (ocean.mesh.material as THREE.Material).dispose();
@@ -751,6 +757,8 @@ export default function CityCanvas3D({
       (vehiclesMesh.material as THREE.Material).dispose();
       firesMesh.geometry.dispose();
       (firesMesh.material as THREE.Material).dispose();
+      unitBoxEdges.dispose();
+      unitPlane.dispose();
       (selectedBox.edges.material as THREE.Material).dispose();
       (selectedBox.pad.material as THREE.Material).dispose();
       (hoveredBox.edges.material as THREE.Material).dispose();
@@ -768,8 +776,13 @@ export default function CityCanvas3D({
     clearGroup(h.districtsGroup);
     clearGroup(h.natureGroup);
     clearGroup(h.sailboatsGroup);
+    if (h.plateMats) {
+      Object.values(h.plateMats).forEach((m) => m.dispose());
+      h.plateMats = null;
+    }
+    h.districtPlates = [];
 
-    const analytical = isAnalyticalDataMap(dataMap);
+    const analytical = isAnalyticalDataMap(latestRef.current.dataMap);
 
     const addBox = (
       w: number,
@@ -786,6 +799,7 @@ export default function CityCanvas3D({
       m.rotation.y = rotY;
       m.receiveShadow = true;
       h.districtsGroup.add(m);
+      return m;
     };
 
     const xLines = streetLines?.xLines ?? [];
@@ -857,40 +871,43 @@ export default function CityCanvas3D({
         color: "#d4dae0",
         roughness: 0.9,
       });
-      const grassPlateMat = new THREE.MeshStandardMaterial({
-        map: getMeadowGrassTexture(),
-        color: "#ffffff",
-        roughness: 0.92,
-      });
-      const pavedPlateMat = new THREE.MeshStandardMaterial({
-        map: getSidewalkTexture(),
-        color: "#cbd2da",
-        roughness: 0.88,
-      });
-      const industrialPlateMat = new THREE.MeshStandardMaterial({
-        map: getSidewalkTexture(),
-        color: "#b4afa5",
-        roughness: 0.94,
-      });
-      const clayPlateMat = new THREE.MeshStandardMaterial({
-        color: "#d1d5db",
-        roughness: 0.9,
-      });
+      const plateMats: PlateMaterials = {
+        grass: new THREE.MeshStandardMaterial({
+          map: getMeadowGrassTexture(),
+          color: "#ffffff",
+          roughness: 0.92,
+        }),
+        paved: new THREE.MeshStandardMaterial({
+          map: getSidewalkTexture(),
+          color: "#cbd2da",
+          roughness: 0.88,
+        }),
+        industrial: new THREE.MeshStandardMaterial({
+          map: getSidewalkTexture(),
+          color: "#b4afa5",
+          roughness: 0.94,
+        }),
+        clay: new THREE.MeshStandardMaterial({
+          color: "#d1d5db",
+          roughness: 0.9,
+        }),
+      };
+      h.plateMats = plateMats;
 
       for (const d of districts) {
         const cx = d.bounds_x + d.bounds_w * 0.5 - WORLD_CENTER_X;
         const cz = d.bounds_z + d.bounds_d * 0.5 - WORLD_CENTER_Z;
         addBox(d.bounds_w + 0.85, 0.08, d.bounds_d + 0.85, cx, 0.04, cz, walkMat);
-
-        const plateMat = analytical
-          ? clayPlateMat
-          : d.zone_type === "downtown_core"
-            ? pavedPlateMat
-            : d.zone_type === "industrial_quarter" || d.zone_type === "supply_docks"
-              ? industrialPlateMat
-              : grassPlateMat;
-
-        addBox(d.bounds_w, 0.06, d.bounds_d, cx, 0.09, cz, plateMat);
+        const plateMesh = addBox(
+          d.bounds_w,
+          0.06,
+          d.bounds_d,
+          cx,
+          0.09,
+          cz,
+          selectPlateMaterial(d.zone_type, analytical, plateMats),
+        );
+        h.districtPlates.push({ mesh: plateMesh, zone: d.zone_type });
       }
     }
 
@@ -1044,29 +1061,29 @@ export default function CityCanvas3D({
       h.streetlightMat = null;
     }
 
-    for (const sb of placements.sailboats) {
-      const boat = new THREE.Group();
-      const hull = new THREE.Mesh(
-        new THREE.BoxGeometry(2.2, 0.45, 0.9),
-        new THREE.MeshStandardMaterial({ color: "#f8fafc", roughness: 0.4 }),
-      );
-      hull.position.y = 0.2;
-      const sail = new THREE.Mesh(
-        new THREE.ConeGeometry(0.85, 2.5, 3),
-        new THREE.MeshStandardMaterial({ color: "#ffffff", roughness: 0.7 }),
-      );
-      sail.position.set(0.1, 1.55, 0);
-      sail.scale.set(0.25, 1, 0.9);
-      boat.add(hull, sail);
-      boat.position.set(sb.x, -0.25, sb.z);
-      boat.rotation.y = sb.rotY;
-      boat.scale.setScalar(sb.scale);
-      h.sailboatsGroup.add(boat);
+    if (placements.sailboats.length > 0) {
+      const boatGeoms = createSailboatGeometries();
+      const hullMat = new THREE.MeshStandardMaterial({ color: "#f8fafc", roughness: 0.4 });
+      const sailMat = new THREE.MeshStandardMaterial({ color: "#ffffff", roughness: 0.7 });
+      for (const sb of placements.sailboats) {
+        const boat = new THREE.Group();
+        boat.add(new THREE.Mesh(boatGeoms.hull, hullMat), new THREE.Mesh(boatGeoms.sail, sailMat));
+        boat.position.set(sb.x, -0.25, sb.z);
+        boat.rotation.y = sb.rotY;
+        boat.scale.setScalar(sb.scale);
+        h.sailboatsGroup.add(boat);
+      }
     }
+  }, [districts, files, plazas, streetLines]);
 
-    // Also update ZONE_PALETTES reference so unused warning doesn't trip if tree-shaken
-    void ZONE_PALETTES;
-  }, [dataMap, districts, files, plazas, streetLines]);
+  useEffect(() => {
+    const h = handleRef.current;
+    if (!h || !h.plateMats) return;
+    const analytical = isAnalyticalDataMap(dataMap);
+    for (const entry of h.districtPlates) {
+      entry.mesh.material = selectPlateMaterial(entry.zone, analytical, h.plateMats);
+    }
+  }, [dataMap]);
 
   // Waterfront timber & stone piers and moored cargo ships
   useEffect(() => {
@@ -1075,7 +1092,15 @@ export default function CityCanvas3D({
     clearGroup(h.docksGroup);
     clearGroup(h.shipsGroup);
     const directDeps = deps.filter((d) => d.is_direct).slice(0, 8);
+    if (directDeps.length === 0) return;
+
     const shipGeom = createCargoShipGeometry();
+    const apronGeom = new THREE.BoxGeometry(10.2, 0.25, 2.2);
+    const pierGeom = new THREE.BoxGeometry(8.8, 0.28, 4.8);
+    const shedGeom = new THREE.BoxGeometry(2.6, 0.75, 1.8);
+    const shedRoofGeom = new THREE.BoxGeometry(2.8, 0.14, 2.0);
+    const pilingGeom = new THREE.CylinderGeometry(0.15, 0.17, 1.3, 6);
+
     const shipMat = new THREE.MeshStandardMaterial({
       color: "#ffffff",
       vertexColors: true,
@@ -1090,25 +1115,25 @@ export default function CityCanvas3D({
 
     directDeps.forEach((_, idx) => {
       const dx = 10 + idx * 16 + 5.5 - WORLD_CENTER_X;
-      const apron = new THREE.Mesh(new THREE.BoxGeometry(10.2, 0.25, 2.2), pierStoneMat);
+      const apron = new THREE.Mesh(apronGeom, pierStoneMat);
       apron.position.set(dx, 0.02, 54.4);
       apron.receiveShadow = true;
 
-      const pier = new THREE.Mesh(new THREE.BoxGeometry(8.8, 0.28, 4.8), pierDeckMat);
+      const pier = new THREE.Mesh(pierGeom, pierDeckMat);
       pier.position.set(dx, 0.04, 57.4);
       pier.castShadow = true;
       pier.receiveShadow = true;
 
-      const shed = new THREE.Mesh(new THREE.BoxGeometry(2.6, 0.75, 1.8), pierShedMat);
+      const shed = new THREE.Mesh(shedGeom, pierShedMat);
       shed.position.set(dx - 2.4, 0.55, 56.4);
       shed.castShadow = true;
-      const shedRoof = new THREE.Mesh(new THREE.BoxGeometry(2.8, 0.14, 2.0), pierRoofMat);
+      const shedRoof = new THREE.Mesh(shedRoofGeom, pierRoofMat);
       shedRoof.position.set(dx - 2.4, 0.98, 56.4);
 
       h.docksGroup.add(apron, pier, shed, shedRoof);
 
       for (const px of [-3.9, 0, 3.9]) {
-        const piling = new THREE.Mesh(new THREE.CylinderGeometry(0.15, 0.17, 1.3, 6), pilingMat);
+        const piling = new THREE.Mesh(pilingGeom, pilingMat);
         piling.position.set(dx + px, -0.35, 59.6);
         h.docksGroup.add(piling);
       }
@@ -1124,7 +1149,7 @@ export default function CityCanvas3D({
   useEffect(() => {
     const h = handleRef.current;
     if (!h) return;
-    clearGroup(h.buildingsGroup, h.sharedPartGeoms);
+    clearGroup(h.buildingsGroup, new Set([...h.sharedPartGeoms, h.unitPlane]));
     h.batches = [];
 
     const grouped = new Map<string, { template: BuildingPartSpec; entries: BatchEntry[] }>();
@@ -1145,14 +1170,14 @@ export default function CityCanvas3D({
     const dummy = new THREE.Object3D();
     const tod = cameraStore.getState().timeOfDay;
     const emScale = tod === "night" ? 0.95 : tod === "golden" ? 0.58 : 0.03;
+    const beaconEmissive = tod === "night" ? 2.4 : tod === "golden" ? 1.6 : 0.7;
     const analytical = isAnalyticalDataMap(latestRef.current.dataMap);
     const aoTex = getContactAoTexture();
     const turfTex = getTurfTexture();
 
-    // Soft ground contact-AO pads under every building footprint
     if (aoTex && files.length > 0) {
       const aoMesh = new THREE.InstancedMesh(
-        UNIT_PLANE,
+        h.unitPlane,
         new THREE.MeshBasicMaterial({
           map: aoTex,
           transparent: true,
@@ -1174,64 +1199,37 @@ export default function CityCanvas3D({
     }
 
     for (const { template, entries } of grouped.values()) {
-      const isTurf = template.role === "turf";
-      const isBeacon = template.role === "beacon";
-
-      const material = new THREE.MeshStandardMaterial({
-        map: isTurf ? turfTex : null,
-        color: "#ffffff",
-        emissive: new THREE.Color(isBeacon ? (template.tintHex ?? "#fde047") : "#000000"),
-        emissiveIntensity: isBeacon ? (tod === "night" ? 2.4 : tod === "golden" ? 1.6 : 0.7) : 0,
-        roughness: template.shaderMode === "glass" ? 0.22 : 0.78,
-        metalness: template.shaderMode === "glass" ? 0.42 : 0.08,
+      const { material, uniforms } = createBuildingPartMaterial(template, {
+        turfTex,
+        beaconEmissive,
+        emissiveScale: emScale,
+        analytical,
       });
-
-      let uniforms: BuildingShaderUniforms | null = null;
-      if (!isTurf && !isBeacon) {
-        uniforms = applyBuildingFacadeShader(material, template.shaderMode, template.slice);
-        uniforms.uEmissiveScale.value = emScale;
-        uniforms.uDataMapMix.value = analytical ? 1.0 : 0.0;
-      }
 
       const geom = getPartGeometry(template.geomKey);
       const mesh = new THREE.InstancedMesh(geom, material, entries.length);
-      mesh.castShadow = !isTurf;
+      mesh.castShadow = template.role !== "turf";
       mesh.receiveShadow = true;
 
       entries.forEach(({ file: f, part }, idx) => {
         const fp = buildingFootprint3D(f);
         const { rotY, localW, localD } = lotOrientation(f, fp.bw, fp.bd);
         const slices = computeSliceHeights(f.building_archetype, fp.h);
+        const t = computePartTransform(
+          part,
+          localW,
+          localD,
+          slices,
+          fp.h,
+          0.12,
+          fp.cx,
+          fp.cz,
+          rotY,
+        );
 
-        let yBase = 0.12;
-        let sliceH = fp.h;
-        if (part.slice === "base") {
-          yBase = 0.12 + part.offset[1] * slices.baseH;
-          sliceH = slices.baseH * part.scale[1];
-        } else if (part.slice === "shaft") {
-          yBase = 0.12 + slices.baseH + part.offset[1] * slices.shaftH;
-          sliceH = slices.shaftH * part.scale[1];
-        } else if (part.slice === "crown") {
-          yBase = 0.12 + slices.baseH + slices.shaftH + part.offset[1] * slices.crownH;
-          sliceH = slices.crownH * part.scale[1];
-        } else {
-          yBase = 0.12 + part.offset[1] * fp.h;
-          sliceH = fp.h * part.scale[1];
-        }
-
-        const sx = (part.squareAspect ? Math.min(localW, localD) : localW) * part.scale[0];
-        const sz = (part.squareAspect ? Math.min(localW, localD) : localD) * part.scale[2];
-
-        const cosR = Math.cos(rotY);
-        const sinR = Math.sin(rotY);
-        const oxLocal = part.offset[0] * localW;
-        const ozLocal = part.offset[2] * localD;
-        const oxWorld = oxLocal * cosR + ozLocal * sinR;
-        const ozWorld = -oxLocal * sinR + ozLocal * cosR;
-
-        dummy.position.set(fp.cx + oxWorld, yBase, fp.cz + ozWorld);
+        dummy.position.set(t.x, t.y, t.z);
         dummy.rotation.set(0, rotY, 0);
-        dummy.scale.set(Math.max(0.1, sx), Math.max(0.1, sliceH), Math.max(0.1, sz));
+        dummy.scale.set(t.sx, t.sy, t.sz);
         dummy.updateMatrix();
         mesh.setMatrixAt(idx, dummy.matrix);
       });
@@ -1250,7 +1248,7 @@ export default function CityCanvas3D({
   // Building tint & selection highlight updates (no geometry rebuild)
   useEffect(() => {
     handleRef.current?.updateBuildingColors();
-  }, [blackoutFiles, blastRadius, dataMap, files, selectedFile]);
+  }, [blackoutFiles, blastRadius, dataMap, selectedFile]);
 
   // Live simulation vehicles & fire markers
   useEffect(() => {

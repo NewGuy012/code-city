@@ -4,6 +4,53 @@ import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js
 import { islandElevation, islandSignedDist, plateauEdgeDistance, smoothstep } from "./islandLayout";
 import { getMeadowGrassTexture } from "./textures3D";
 
+export function createSkyEnvironmentTarget(
+  pmrem: THREE.PMREMGenerator,
+  zenithHex: string,
+  horizonHex: string,
+  groundHex: string,
+): THREE.WebGLRenderTarget {
+  const envScene = new THREE.Scene();
+  const domeGeom = new THREE.SphereGeometry(20, 16, 12);
+  const pos = domeGeom.attributes.position as THREE.BufferAttribute;
+  const cols = new Float32Array(pos.count * 3);
+  const cZen = new THREE.Color(zenithHex);
+  const cHor = new THREE.Color(horizonHex);
+  const cGnd = new THREE.Color(groundHex);
+  const c = new THREE.Color();
+
+  for (let i = 0; i < pos.count; i++) {
+    const ny = pos.getY(i) / 20;
+    if (ny >= 0) {
+      c.copy(cHor).lerp(cZen, Math.pow(ny, 0.6));
+    } else {
+      c.copy(cHor).lerp(cGnd, Math.min(1, -ny * 1.8));
+    }
+    cols[i * 3] = c.r;
+    cols[i * 3 + 1] = c.g;
+    cols[i * 3 + 2] = c.b;
+  }
+  domeGeom.setAttribute("color", new THREE.BufferAttribute(cols, 3));
+  const domeMat = new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.BackSide });
+  envScene.add(new THREE.Mesh(domeGeom, domeMat));
+  const target = pmrem.fromScene(envScene, 0.04);
+  domeGeom.dispose();
+  domeMat.dispose();
+  return target;
+}
+
+export function createSailboatGeometries(): {
+  hull: THREE.BufferGeometry;
+  sail: THREE.BufferGeometry;
+} {
+  const hull = new THREE.BoxGeometry(2.2, 0.45, 0.9);
+  hull.translate(0, 0.2, 0);
+  const sail = new THREE.ConeGeometry(0.85, 2.5, 3);
+  sail.scale(0.25, 1, 0.9);
+  sail.translate(0.1, 1.55, 0);
+  return { hull, sail };
+}
+
 /** Build the sculpted coastal island terrain mesh with vertex colors + grass texture. */
 export function createCoastalIslandMesh(): THREE.Mesh {
   const width = 224;

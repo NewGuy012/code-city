@@ -1,18 +1,22 @@
 import type { BuildingArchetype, FileMetric } from "../types/city";
 import { buildingVariantIndex, hashFilePath } from "./cityTheme";
 
-const ARCHETYPE_ROW: Record<BuildingArchetype, number> = {
-  grand_terminal: 0,
-  city_hall: 1,
-  archive_vault: 2,
-  twin_silos: 3,
-  factory: 4,
-  office_tower: 5,
-  glass_pavilion: 6,
-  watchtower: 7,
-  civic_kiosk: 8,
-  park_stadium: 9,
-};
+export const ARCHETYPE_ORDER: readonly BuildingArchetype[] = [
+  "grand_terminal",
+  "city_hall",
+  "archive_vault",
+  "twin_silos",
+  "factory",
+  "office_tower",
+  "glass_pavilion",
+  "watchtower",
+  "civic_kiosk",
+  "park_stadium",
+];
+
+const ARCHETYPE_ROW: Record<BuildingArchetype, number> = Object.fromEntries(
+  ARCHETYPE_ORDER.map((a, idx) => [a, idx]),
+) as Record<BuildingArchetype, number>;
 
 export interface AtlasTierMetrics {
   readonly tier: 0 | 1 | 2;

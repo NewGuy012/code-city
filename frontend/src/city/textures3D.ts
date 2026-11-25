@@ -1,19 +1,8 @@
 import * as THREE from "three";
 
-export interface FacadeTextureSet {
-  map: THREE.CanvasTexture;
-  roughnessMap: THREE.CanvasTexture;
-  bumpMap: THREE.CanvasTexture;
-  emissiveMap: THREE.CanvasTexture;
-}
-
-export type FacadeStyle = "glass" | "stone" | "industrial" | "brick" | "silo" | "metal";
-
-const facadeCache = new Map<FacadeStyle, FacadeTextureSet>();
 let cachedAsphalt: THREE.CanvasTexture | null = null;
 let cachedSidewalk: THREE.CanvasTexture | null = null;
 let cachedGrass: THREE.CanvasTexture | null = null;
-let cachedWaterBump: THREE.CanvasTexture | null = null;
 let cachedTurf: THREE.CanvasTexture | null = null;
 let cachedContactAo: THREE.CanvasTexture | null = null;
 
@@ -44,100 +33,6 @@ function makeTex(
 function pseudoNoise(x: number, y: number, seed = 17): number {
   const n = Math.sin(x * 127.1 + y * 311.7 + seed * 74.7) * 43758.5453;
   return n - Math.floor(n);
-}
-
-/** Procedural 512x512 facade PBR texture set (used by material fallback & 3D preview helpers). */
-export function getFacadeTextureSet(style: FacadeStyle): FacadeTextureSet | null {
-  if (typeof document === "undefined") return null;
-  const hit = facadeCache.get(style);
-  if (hit) return hit;
-
-  const size = 512;
-  const colCanvas = makeCanvas(size, size);
-  const roughCanvas = makeCanvas(size, size);
-  const bumpCanvas = makeCanvas(size, size);
-  const emCanvas = makeCanvas(size, size);
-
-  const cCtx = colCanvas.getContext("2d")!;
-  const rCtx = roughCanvas.getContext("2d")!;
-  const bCtx = bumpCanvas.getContext("2d")!;
-  const eCtx = emCanvas.getContext("2d")!;
-
-  const baseColor =
-    style === "glass"
-      ? "#8fa0b3"
-      : style === "stone"
-        ? "#e2ddd2"
-        : style === "brick" || style === "industrial"
-          ? "#c7b8a8"
-          : "#cfd6df";
-  cCtx.fillStyle = baseColor;
-  cCtx.fillRect(0, 0, size, size);
-
-  rCtx.fillStyle = style === "glass" ? "#969696" : "#d8d8d8";
-  rCtx.fillRect(0, 0, size, size);
-
-  bCtx.fillStyle = "#949494";
-  bCtx.fillRect(0, 0, size, size);
-
-  eCtx.fillStyle = "#000000";
-  eCtx.fillRect(0, 0, size, size);
-
-  const rows = style === "silo" ? 12 : 8;
-  const cols = style === "silo" ? 4 : 6;
-  const cellW = size / cols;
-  const cellH = size / rows;
-
-  for (let r = 0; r < rows; r++) {
-    cCtx.fillStyle = "rgba(30, 41, 59, 0.24)";
-    cCtx.fillRect(0, r * cellH, size, 6);
-    bCtx.fillStyle = "#d4d4d4";
-    bCtx.fillRect(0, r * cellH, size, 6);
-
-    if (style === "silo" || style === "metal") {
-      cCtx.fillStyle = "rgba(51, 65, 85, 0.25)";
-      cCtx.fillRect(0, r * cellH + cellH * 0.5, size, 3);
-      continue;
-    }
-
-    for (let c = 0; c < cols; c++) {
-      const wx = c * cellW + 10;
-      const wy = r * cellH + 12;
-      const ww = cellW - 20;
-      const wh = cellH - 22;
-
-      cCtx.fillStyle = style === "glass" ? "#264663" : style === "stone" ? "#3b4754" : "#353942";
-      cCtx.fillRect(wx, wy, ww, wh);
-
-      rCtx.fillStyle = style === "glass" ? "#242424" : "#3c3c3c";
-      rCtx.fillRect(wx, wy, ww, wh);
-
-      bCtx.fillStyle = "#323232";
-      bCtx.fillRect(wx, wy, ww, wh);
-
-      const hash = (r * 13 + c * 7 + style.length * 3) % 7;
-      if (hash !== 0 && hash !== 3) {
-        eCtx.fillStyle =
-          style === "glass"
-            ? hash % 2 === 0
-              ? "#fef08a"
-              : "#dbeafe"
-            : style === "industrial" || style === "brick"
-              ? "#fdba74"
-              : "#fde68a";
-        eCtx.fillRect(wx + 2, wy + 2, ww - 4, wh - 4);
-      }
-    }
-  }
-
-  const bundle: FacadeTextureSet = {
-    map: makeTex(colCanvas, 1, 2, true),
-    roughnessMap: makeTex(roughCanvas, 1, 2, false),
-    bumpMap: makeTex(bumpCanvas, 1, 2, false),
-    emissiveMap: makeTex(emCanvas, 1, 2, true),
-  };
-  facadeCache.set(style, bundle);
-  return bundle;
 }
 
 /** Realistic weathered medium-charcoal asphalt road texture with center striping. */
@@ -243,31 +138,6 @@ export function getMeadowGrassTexture(): THREE.CanvasTexture | null {
 
   cachedGrass = makeTex(canvas, 6, 6, true);
   return cachedGrass;
-}
-
-export function getWaterRippleTexture(): THREE.CanvasTexture | null {
-  if (typeof document === "undefined") return null;
-  if (cachedWaterBump) return cachedWaterBump;
-
-  const size = 256;
-  const canvas = makeCanvas(size, size);
-  const ctx = canvas.getContext("2d")!;
-  ctx.fillStyle = "#808080";
-  ctx.fillRect(0, 0, size, size);
-
-  for (let y = 0; y < size; y += 4) {
-    for (let x = 0; x < size; x += 4) {
-      const wave =
-        Math.sin((x / size) * Math.PI * 4) * 26 +
-        Math.cos((y / size) * Math.PI * 6) * 24 +
-        Math.sin(((x + y) / size) * Math.PI * 8) * 14;
-      const v = Math.max(0, Math.min(255, Math.round(128 + wave)));
-      ctx.fillStyle = `rgb(${v},${v},${v})`;
-      ctx.fillRect(x, y, 4, 4);
-    }
-  }
-  cachedWaterBump = makeTex(canvas, 12, 12, false);
-  return cachedWaterBump;
 }
 
 /** Lush mowed athletic turf + terracotta running track oval for park stadiums. */
