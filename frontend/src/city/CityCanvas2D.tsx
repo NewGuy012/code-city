@@ -1,4 +1,4 @@
-import { memo, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
 
 import type { CitySimulationEngine } from "../game/simEngine";
 import type {
@@ -10,8 +10,8 @@ import type {
   FileImport,
   FileMetric,
 } from "../types/city";
-import { MAX_ZOOM, MIN_ZOOM, cameraStore, computeMouseYaw, useAltKeyHeld } from "./cameraStore";
 import { BuildingTooltip } from "./BuildingTooltip";
+import { MAX_ZOOM, MIN_ZOOM, cameraStore, computeMouseYaw, useAltKeyHeld } from "./cameraStore";
 import { canvasCursorClass } from "./cityTheme";
 import {
   type FloatingStatPopup,
@@ -19,7 +19,8 @@ import {
   type HitBuilding,
   type SimVehicleRender,
   cameraFromTarget,
-  renderCityScene,
+  renderDynamicCityOverlay,
+  renderStaticCityLayer,
   screenToWorldGround,
 } from "./isoRenderer2D";
 
@@ -47,6 +48,31 @@ interface CityCanvas2DProps {
   onToolAction?: (file: FileMetric) => void;
 }
 
+interface StaticCacheKey {
+  w: number;
+  h: number;
+  dpr: number;
+  targetX: number;
+  targetZ: number;
+  zoom: number;
+  yaw: number;
+  pitch: number;
+  timeOfDay: string;
+  districts: District[];
+  files: FileMetric[];
+  cochanges: CochangePair[];
+  deps: ExternalDep[];
+  dataMap: DataMapMode;
+  selectedFile: string | null;
+  hoveredFile: string | null;
+  blastRadius: BlastRadiusResult | null;
+  addedFiles: Set<string>;
+  removedLots: GhostLot[];
+  blackoutFiles: ReadonlySet<string> | undefined;
+  plazas: Array<{ x: number; z: number; w: number; d: number; kind: string }>;
+  streetLines: { xLines: number[]; zLines: number[] } | undefined;
+}
+
 export const CityCanvas2D = memo(function CityCanvas2D({
   districts,
   files,
@@ -72,8 +98,11 @@ export const CityCanvas2D = memo(function CityCanvas2D({
 }: CityCanvas2DProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const staticCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const staticKeyRef = useRef<StaticCacheKey | null>(null);
   const hitsRef = useRef<HitBuilding[]>([]);
   const hasAutoFitRef = useRef(false);
+  const requestRenderRef = useRef<() => void>(() => {});
   const altHeld = useAltKeyHeld();
   const [yawDragging, setYawDragging] = useState(false);
 
@@ -100,6 +129,8 @@ export const CityCanvas2D = memo(function CityCanvas2D({
   });
 
   const edgeMouseRef = useRef<{ x: number; y: number } | null>(null);
+  const hoverPendingRef = useRef<{ clientX: number; clientY: number } | null>(null);
+  const hoverRafRef = useRef(0);
   const [hoveredHit, setHoveredHit] = useState<{
     file: FileMetric;
     x: number;
@@ -164,23 +195,40 @@ export const CityCanvas2D = memo(function CityCanvas2D({
 
   useEffect(() => {
     let raf = 0;
+    let throttleTimer: ReturnType<typeof setTimeout> | null = null;
     const startMs = performance.now();
     let lastTs = startMs;
 
+    const scheduleFrame = () => {
+      if (typeof document !== "undefined" && document.hidden) return;
+      if (raf === 0) {
+        raf = requestAnimationFrame(frame);
+      }
+    };
+    requestRenderRef.current = scheduleFrame;
+
     const frame = (now: number) => {
+      raf = 0;
+      if (typeof document !== "undefined" && document.hidden) return;
+
       const dt = Math.min(0.05, Math.max(0.001, (now - lastTs) / 1000));
       lastTs = now;
 
       const canvas = canvasRef.current;
       const box = containerRef.current;
+      let edgePanning = false;
+      let needsOverlayTick = false;
+
       if (canvas && box) {
-        const dpr = Math.min(2, window.devicePixelRatio || 1);
+        const dpr = Math.min(1.5, window.devicePixelRatio || 1);
         const w = box.clientWidth;
         const h = box.clientHeight;
         if (w > 0 && h > 0) {
-          if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)) {
-            canvas.width = Math.round(w * dpr);
-            canvas.height = Math.round(h * dpr);
+          const pw = Math.round(w * dpr);
+          const ph = Math.round(h * dpr);
+          if (canvas.width !== pw || canvas.height !== ph) {
+            canvas.width = pw;
+            canvas.height = ph;
           }
 
           const state = cameraStore.getState();
@@ -190,6 +238,7 @@ export const CityCanvas2D = memo(function CityCanvas2D({
             const right = mx < margin ? -1 : mx > w - margin ? 1 : 0;
             const fwd = my < margin ? 1 : my > h - margin ? -1 : 0;
             if (right !== 0 || fwd !== 0) {
+              edgePanning = true;
               const spd = (32 / Math.max(0.4, state.zoom)) * dt;
               cameraStore.panRelative(right * spd, fwd * spd);
             }
@@ -203,48 +252,186 @@ export const CityCanvas2D = memo(function CityCanvas2D({
             latestCam.yaw,
             latestCam.pitch,
           );
+          const cur = propsRef.current;
+          const simFrame = cur.sim?.getRenderFrame();
+          const activeVehicles = simFrame ? simFrame.vehicles : cur.vehicles;
+          const activeFires = simFrame ? simFrame.fireFiles : cur.fireFiles;
+          const activeBlackouts = simFrame ? simFrame.blackoutFiles : cur.blackoutFiles;
+          const activePopups = simFrame ? simFrame.floatingPopups : cur.floatingPopups;
+
+          let staticCanvas = staticCanvasRef.current;
+          if (!staticCanvas) {
+            staticCanvas = document.createElement("canvas");
+            staticCanvasRef.current = staticCanvas;
+          }
+          if (staticCanvas.width !== pw || staticCanvas.height !== ph) {
+            staticCanvas.width = pw;
+            staticCanvas.height = ph;
+          }
+
+          const prevKey = staticKeyRef.current;
+          const staticDirty =
+            !prevKey ||
+            prevKey.w !== w ||
+            prevKey.h !== h ||
+            prevKey.dpr !== dpr ||
+            prevKey.targetX !== latestCam.targetX ||
+            prevKey.targetZ !== latestCam.targetZ ||
+            prevKey.zoom !== latestCam.zoom ||
+            prevKey.yaw !== latestCam.yaw ||
+            prevKey.pitch !== latestCam.pitch ||
+            prevKey.timeOfDay !== latestCam.timeOfDay ||
+            prevKey.districts !== cur.districts ||
+            prevKey.files !== cur.files ||
+            prevKey.cochanges !== cur.cochanges ||
+            prevKey.deps !== cur.deps ||
+            prevKey.dataMap !== cur.dataMap ||
+            prevKey.selectedFile !== cur.selectedFile ||
+            prevKey.hoveredFile !== cur.hoveredFile ||
+            prevKey.blastRadius !== cur.blastRadius ||
+            prevKey.addedFiles !== cur.addedFiles ||
+            prevKey.removedLots !== cur.removedLots ||
+            prevKey.blackoutFiles !== activeBlackouts ||
+            prevKey.plazas !== cur.plazas ||
+            prevKey.streetLines !== cur.streetLines;
+
+          if (staticDirty) {
+            const sCtx = staticCanvas.getContext("2d");
+            if (sCtx) {
+              sCtx.save();
+              sCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+              hitsRef.current = renderStaticCityLayer({
+                ctx: sCtx,
+                width: w,
+                height: h,
+                camera: cam2d,
+                timeOfDay: latestCam.timeOfDay,
+                districts: cur.districts,
+                files: cur.files,
+                cochanges: cur.cochanges,
+                deps: cur.deps,
+                dataMap: cur.dataMap,
+                selectedFile: cur.selectedFile,
+                hoveredFile: cur.hoveredFile,
+                blastRadius: cur.blastRadius,
+                addedFiles: cur.addedFiles,
+                removedLots: cur.removedLots,
+                blackoutFiles: activeBlackouts,
+                plazas: cur.plazas,
+                streetLines: cur.streetLines,
+              });
+              sCtx.restore();
+              staticKeyRef.current = {
+                w,
+                h,
+                dpr,
+                targetX: latestCam.targetX,
+                targetZ: latestCam.targetZ,
+                zoom: latestCam.zoom,
+                yaw: latestCam.yaw,
+                pitch: latestCam.pitch,
+                timeOfDay: latestCam.timeOfDay,
+                districts: cur.districts,
+                files: cur.files,
+                cochanges: cur.cochanges,
+                deps: cur.deps,
+                dataMap: cur.dataMap,
+                selectedFile: cur.selectedFile,
+                hoveredFile: cur.hoveredFile,
+                blastRadius: cur.blastRadius,
+                addedFiles: cur.addedFiles,
+                removedLots: cur.removedLots,
+                blackoutFiles: activeBlackouts,
+                plazas: cur.plazas,
+                streetLines: cur.streetLines,
+              };
+            }
+          }
 
           const ctx = canvas.getContext("2d");
           if (ctx) {
             ctx.save();
-            ctx.scale(dpr, dpr);
-            const cur = propsRef.current;
-            const simFrame = cur.sim?.getRenderFrame();
-            hitsRef.current = renderCityScene({
+            ctx.setTransform(1, 0, 0, 1, 0, 0);
+            ctx.clearRect(0, 0, pw, ph);
+            ctx.drawImage(staticCanvas, 0, 0);
+            ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+            renderDynamicCityOverlay({
               ctx,
               width: w,
               height: h,
               camera: cam2d,
               timeSec: (now - startMs) / 1000,
-              timeOfDay: latestCam.timeOfDay,
-              districts: cur.districts,
               files: cur.files,
               imports: cur.imports,
-              cochanges: cur.cochanges,
-              deps: cur.deps,
-              dataMap: cur.dataMap,
-              selectedFile: cur.selectedFile,
-              hoveredFile: cur.hoveredFile,
-              blastRadius: cur.blastRadius,
-              addedFiles: cur.addedFiles,
-              removedLots: cur.removedLots,
               showTraffic: cur.showTraffic,
-              vehicles: simFrame ? simFrame.vehicles : cur.vehicles,
-              fireFiles: simFrame ? simFrame.fireFiles : cur.fireFiles,
-              blackoutFiles: simFrame ? simFrame.blackoutFiles : cur.blackoutFiles,
-              plazas: cur.plazas,
-              streetLines: cur.streetLines,
-              floatingPopups: simFrame ? simFrame.floatingPopups : cur.floatingPopups,
+              vehicles: activeVehicles,
+              fireFiles: activeFires,
+              floatingPopups: activePopups,
             });
             ctx.restore();
           }
+
+          const hasFires = Boolean(activeFires && activeFires.size > 0);
+          const hasPulseFallback =
+            cur.showTraffic && cur.imports.length > 0 && activeVehicles.length === 0;
+          needsOverlayTick = hasFires || hasPulseFallback;
         }
       }
-      raf = requestAnimationFrame(frame);
+
+      if (edgePanning) {
+        scheduleFrame();
+      } else if (needsOverlayTick && throttleTimer === null) {
+        throttleTimer = setTimeout(() => {
+          throttleTimer = null;
+          scheduleFrame();
+        }, 66);
+      }
     };
-    raf = requestAnimationFrame(frame);
-    return () => cancelAnimationFrame(raf);
-  }, []);
+
+    const unsubCam = cameraStore.subscribe(scheduleFrame);
+    const unsubSim = sim?.subscribeRender(scheduleFrame);
+    const ro = new ResizeObserver(scheduleFrame);
+    if (containerRef.current) ro.observe(containerRef.current);
+    const onVisibility = () => {
+      if (!document.hidden) scheduleFrame();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+
+    scheduleFrame();
+
+    return () => {
+      requestRenderRef.current = () => {};
+      if (raf !== 0) cancelAnimationFrame(raf);
+      if (throttleTimer !== null) clearTimeout(throttleTimer);
+      unsubCam();
+      unsubSim?.();
+      ro.disconnect();
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [sim]);
+
+  useEffect(() => {
+    requestRenderRef.current();
+  }, [
+    addedFiles,
+    blackoutFiles,
+    blastRadius,
+    cochanges,
+    dataMap,
+    deps,
+    districts,
+    files,
+    fireFiles,
+    floatingPopups,
+    hoveredHit?.file.file_path,
+    imports,
+    plazas,
+    removedLots,
+    selectedFile,
+    showTraffic,
+    streetLines,
+    vehicles,
+  ]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -288,7 +475,13 @@ export const CityCanvas2D = memo(function CityCanvas2D({
     return () => canvas.removeEventListener("wheel", onWheel);
   }, []);
 
-  function findHitAt(clientX: number, clientY: number): HitBuilding | null {
+  useEffect(() => {
+    return () => {
+      if (hoverRafRef.current !== 0) cancelAnimationFrame(hoverRafRef.current);
+    };
+  }, []);
+
+  const findHitAt = useCallback((clientX: number, clientY: number): HitBuilding | null => {
     const canvas = canvasRef.current;
     if (!canvas) return null;
     const rect = canvas.getBoundingClientRect();
@@ -302,7 +495,7 @@ export const CityCanvas2D = memo(function CityCanvas2D({
       }
     }
     return null;
-  }
+  }, []);
 
   function handlePointerDown(e: React.PointerEvent<HTMLCanvasElement>) {
     const state = cameraStore.getState();
@@ -343,6 +536,9 @@ export const CityCanvas2D = memo(function CityCanvas2D({
     if (canvas) {
       const rect = canvas.getBoundingClientRect();
       edgeMouseRef.current = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+      if (cameraStore.getState().edgeScrollEnabled) {
+        requestRenderRef.current();
+      }
     }
 
     if (dragRef.current.active) {
@@ -405,16 +601,27 @@ export const CityCanvas2D = memo(function CityCanvas2D({
       return;
     }
 
-    const hit = findHitAt(e.clientX, e.clientY);
-    if (hit && canvas) {
-      const rect = canvas.getBoundingClientRect();
-      setHoveredHit({
-        file: hit.file,
-        x: e.clientX - rect.left,
-        y: e.clientY - rect.top,
+    hoverPendingRef.current = { clientX: e.clientX, clientY: e.clientY };
+    if (hoverRafRef.current === 0) {
+      hoverRafRef.current = requestAnimationFrame(() => {
+        hoverRafRef.current = 0;
+        const pt = hoverPendingRef.current;
+        const c = canvasRef.current;
+        if (!pt || !c || dragRef.current.active) return;
+        const hit = findHitAt(pt.clientX, pt.clientY);
+        if (hit) {
+          const rect = c.getBoundingClientRect();
+          const nx = pt.clientX - rect.left;
+          const ny = pt.clientY - rect.top;
+          setHoveredHit((prev) =>
+            prev && prev.file === hit.file && Math.abs(prev.x - nx) < 2 && Math.abs(prev.y - ny) < 2
+              ? prev
+              : { file: hit.file, x: nx, y: ny },
+          );
+        } else {
+          setHoveredHit((prev) => (prev === null ? prev : null));
+        }
       });
-    } else {
-      setHoveredHit(null);
     }
   }
 
@@ -452,6 +659,7 @@ export const CityCanvas2D = memo(function CityCanvas2D({
         onPointerUp={handlePointerUp}
         onPointerCancel={finishDrag}
         onPointerLeave={() => {
+          hoverPendingRef.current = null;
           setHoveredHit(null);
           edgeMouseRef.current = null;
         }}

@@ -23,8 +23,13 @@ import {
   islandElevation,
   islandSignedDist,
 } from "./islandLayout";
-import { cameraFromTarget, screenToWorldGround, worldToIso, worldToScreen } from "./isoRenderer2D";
-import { ATLAS_TIERS, spriteAtlas } from "./spriteAtlas2D";
+import {
+  cameraFromTarget,
+  renderStaticCityLayer,
+  screenToWorldGround,
+  worldToIso,
+  worldToScreen,
+} from "./isoRenderer2D";
 
 describe("isoRenderer2D projection", () => {
   test("worldToScreen and screenToWorldGround invert cleanly", () => {
@@ -197,28 +202,90 @@ describe("isoRenderer2D projection", () => {
     expect(scatter.streetlights.length).toBe(5);
   });
 
-  test("spriteAtlas 1x1 vs 1x2 rect selection and 3D architecture slice/part cache", () => {
+  test("2D static block renderer builds hit boxes for distinct archetypes and 3D slice/part cache", () => {
     const sample = { file_path: "src/app/tower.tsx", building_archetype: "office_tower" as const };
-    const squareSpec = spriteAtlas.getSpriteSpecForFile(sample, 4, 4, 42, 0);
-    const wideSpec = spriteAtlas.getSpriteSpecForFile(sample, 8, 4, 42, 0);
-    const t0Spec = spriteAtlas.getSpriteSpecForFile(sample, 4, 4, 18, 0);
-    const t2Spec = spriteAtlas.getSpriteSpecForFile(sample, 4, 4, 68, 0);
-    expect(t0Spec.tier).toBe(0);
-    expect(t0Spec.sw).toBe(ATLAS_TIERS[0].cellW);
-    expect(squareSpec.tier).toBe(1);
-    expect(squareSpec.sw).toBe(ATLAS_TIERS[1].cellW);
-    expect(squareSpec.sh).toBe(ATLAS_TIERS[1].cellH);
-    expect(wideSpec.sw).toBe(ATLAS_TIERS[1].cellW);
-    expect(wideSpec.sh).toBe(ATLAS_TIERS[1].cellH);
-    expect(t2Spec.tier).toBe(2);
-    expect(t2Spec.sw).toBe(ATLAS_TIERS[2].cellW);
-    expect(t2Spec.sh).toBe(ATLAS_TIERS[2].cellH);
-    // Wide lot uses slot 3 (col >= 12) while tall/wide flipped lots rotate by 90 deg
-    expect(wideSpec.sx).toBeGreaterThanOrEqual(12 * ATLAS_TIERS[1].cellW);
-    const tallSpec = spriteAtlas.getSpriteSpecForFile(sample, 4, 8, 42, 0);
-    expect(Math.abs(tallSpec.rotOffset - wideSpec.rotOffset) % 2).toBe(1);
+    const fullFile = {
+      ...sample,
+      snapshot_idx: 0,
+      district_path: "src/app",
+      language: "typescript",
+      zone_type: "downtown_core",
+      role_confidence: 0.9,
+      role_signals: {},
+      sloc: 180,
+      symbol_count: 8,
+      max_complexity: 9,
+      type_or_doc_ratio: 0.5,
+      lint_issue_count: 0,
+      format_drift: false,
+      lint_by_category: {},
+      churn_90d: 3,
+      bugfix_commits_90d: 0,
+      distinct_authors_90d: 2,
+      hotspot_score: 2,
+      condition_flags: {},
+      layout_x: 20,
+      layout_z: 20,
+      layout_w: 6,
+      layout_d: 6,
+    } as FileMetric;
 
-    const fullFile = { ...sample } as FileMetric;
+    const noop = () => {};
+    const mockCtx = {
+      clearRect: noop,
+      fillRect: noop,
+      fillText: noop,
+      measureText: () => ({ width: 32 }),
+      createLinearGradient: () => ({ addColorStop: noop }),
+      save: noop,
+      restore: noop,
+      beginPath: noop,
+      closePath: noop,
+      moveTo: noop,
+      lineTo: noop,
+      fill: noop,
+      stroke: noop,
+      arc: noop,
+      translate: noop,
+      scale: noop,
+      setLineDash: noop,
+      quadraticCurveTo: noop,
+      fillStyle: "",
+      strokeStyle: "",
+      lineWidth: 1,
+      globalAlpha: 1,
+      font: "",
+      textAlign: "left",
+    } as unknown as CanvasRenderingContext2D;
+
+    const hits = renderStaticCityLayer({
+      ctx: mockCtx,
+      width: 1280,
+      height: 720,
+      camera: cameraFromTarget(WORLD_CENTER_X, WORLD_CENTER_Z, 1.0),
+      districts: [],
+      files: [
+        fullFile,
+        { ...fullFile, file_path: "db/silos.py", building_archetype: "twin_silos", layout_x: 32 },
+        {
+          ...fullFile,
+          file_path: "tests/park.py",
+          building_archetype: "park_stadium",
+          layout_x: 44,
+        },
+      ],
+      cochanges: [],
+      deps: [],
+      dataMap: "living",
+      selectedFile: null,
+      hoveredFile: null,
+      blastRadius: null,
+      addedFiles: new Set(),
+      removedLots: [],
+    });
+    expect(hits.length).toBe(3);
+    expect(hits[0].maxX).toBeGreaterThan(hits[0].minX);
+
     const wideOri = lotOrientation(fullFile, 6, 3);
     expect(wideOri.localW).toBeGreaterThanOrEqual(wideOri.localD);
     const tallOri = lotOrientation(fullFile, 3, 6);
