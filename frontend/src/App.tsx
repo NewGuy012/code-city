@@ -13,6 +13,7 @@ import { EconomyBar } from "./components/EconomyBar";
 import { HealthCardModal } from "./components/HealthCardModal";
 import { InspectorDrawer } from "./components/InspectorDrawer";
 import { MAYOR_TOOLS, MayorToolbar } from "./components/MayorToolbar";
+import { MayorWelcomeModal } from "./components/MayorWelcomeModal";
 import { Minimap2D } from "./components/Minimap2D";
 import { type AppMode, ModeAndUtilitiesBar } from "./components/ModeAndUtilitiesBar";
 import { OnboardingTour } from "./components/OnboardingTour";
@@ -25,6 +26,7 @@ import {
   usePopoverOutsideDismiss,
   useViewportHudMetrics,
 } from "./components/hudPopover";
+import { buildFallbackCityBriefing } from "./data/buildingDescription";
 import {
   type CitySnapshotBundle,
   CityDataClient,
@@ -54,8 +56,11 @@ import type {
   Annotation,
   AuthorSummary,
   BlastRadiusResult,
+  BuildingDescription,
+  CityBriefing,
   DataMapMode,
   FileMetric,
+  FileSourcePayload,
   LintDiagnostic,
   RepoRef,
   Snapshot,
@@ -254,6 +259,22 @@ export function App() {
   const [radarOpen, setRadarOpen] = useState(false);
   const [zenMode, setZenMode] = useState(false);
 
+  const [llmEnabled, setLlmEnabled] = useState(false);
+  const [welcomeModalOpen, setWelcomeModalOpen] = useState(false);
+  const [liveBriefing, setLiveBriefing] = useState<CityBriefing | null>(null);
+  const [briefingLoading, setBriefingLoading] = useState(false);
+  const welcomeCheckedRepoRef = useRef<string | null>(null);
+  const briefingFetchedRepoRef = useRef<string | null>(null);
+
+  const [liveDetailsMap, setLiveDetailsMap] = useState<Record<string, BuildingDescription>>({});
+  const [detailsLoadingKey, setDetailsLoadingKey] = useState<string | null>(null);
+  const detailsInFlightRef = useRef<Set<string>>(new Set());
+
+  const [sourceCache, setSourceCache] = useState<Record<string, FileSourcePayload>>({});
+  const [sourceLoadingKey, setSourceLoadingKey] = useState<string | null>(null);
+  const [sourceErrorMap, setSourceErrorMap] = useState<Record<string, string>>({});
+  const sourceInFlightRef = useRef<Set<string>>(new Set());
+
   const togglePopover = useCallback((id: Exclude<HudPopoverId, null>) => {
     setOpenPopover((cur) => (cur === id ? null : id));
   }, []);
@@ -393,6 +414,17 @@ export function App() {
         setSelectedFile(null);
         setBlastRadius(null);
         setTourActive(false);
+        setLiveBriefing(null);
+        setWelcomeModalOpen(false);
+        welcomeCheckedRepoRef.current = null;
+        briefingFetchedRepoRef.current = null;
+        setLiveDetailsMap({});
+        setDetailsLoadingKey(null);
+        detailsInFlightRef.current.clear();
+        setSourceCache({});
+        setSourceLoadingKey(null);
+        setSourceErrorMap({});
+        sourceInFlightRef.current.clear();
       } catch (err) {
         if (seq === loadSeqRef.current) {
           setErrorMsg(err instanceof Error ? err.message : String(err));
@@ -419,6 +451,12 @@ export function App() {
         return;
       }
       try {
+        void client
+          .fetchHealth()
+          .then((h) => {
+            if (!cancelled) setLlmEnabled(Boolean(h.llm_enabled));
+          })
+          .catch(() => {});
         const list = await client.fetchRepos();
         if (cancelled) return;
         setRepos(list);
@@ -546,6 +584,167 @@ export function App() {
     if (!effectiveBundle || !selectedFile) return null;
     return effectiveBundle.files.find((f) => f.file_path === selectedFile) ?? null;
   }, [effectiveBundle, selectedFile]);
+
+  const selectedDistrict = useMemo(() => {
+    if (!effectiveBundle || !selectedFileMetric) return null;
+    return (
+      effectiveBundle.districts.find((d) => d.district_path === selectedFileMetric.district_path) ??
+      null
+    );
+  }, [effectiveBundle, selectedFileMetric]);
+
+  const selectedOutgoingImports = useMemo(() => {
+    if (!effectiveBundle || !selectedFile) return [];
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const imp of effectiveBundle.imports) {
+      if (imp.source_file === selectedFile && !seen.has(imp.target_file)) {
+        seen.add(imp.target_file);
+        out.push(imp.target_file);
+      }
+    }
+    return out;
+  }, [effectiveBundle, selectedFile]);
+
+  const latestBriefing = useMemo(() => {
+    for (let i = snapshots.length - 1; i >= 0; i -= 1) {
+      if (snapshots[i]?.city_briefing) return snapshots[i].city_briefing ?? null;
+    }
+    return null;
+  }, [snapshots]);
+
+  const activeBriefing = useMemo(() => {
+    if (liveBriefing) return liveBriefing;
+    if (latestBriefing) return latestBriefing;
+    if (!bundle || !activeRepo) return null;
+    return buildFallbackCityBriefing(`${activeRepo.owner}/${activeRepo.repo}`, bundle);
+  }, [activeRepo, bundle, latestBriefing, liveBriefing]);
+
+  useEffect(() => {
+    if (!activeRepo || !bundle || isStaticMode || latestBriefing || liveBriefing) return;
+    const repoKey = `${activeRepo.owner}/${activeRepo.repo}`;
+    if (briefingFetchedRepoRef.current === repoKey) return;
+    briefingFetchedRepoRef.current = repoKey;
+    let cancelled = false;
+    void client
+      .fetchCityBriefing(activeRepo.owner, activeRepo.repo, false)
+      .then((b) => {
+        if (!cancelled) setLiveBriefing(b);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [activeRepo, bundle, client, isStaticMode, latestBriefing, liveBriefing]);
+
+  useEffect(() => {
+    if (!activeRepo || !bundle) return;
+    const repoKey = `${activeRepo.owner}/${activeRepo.repo}`;
+    if (welcomeCheckedRepoRef.current === repoKey) return;
+    welcomeCheckedRepoRef.current = repoKey;
+    const isPostcard =
+      typeof window !== "undefined" &&
+      new URLSearchParams(window.location.search).get("postcard") === "1";
+    const dismissed =
+      typeof window !== "undefined" &&
+      window.localStorage.getItem(`codecity.welcomeDismissed.${repoKey}`) === "1";
+    if (!isPostcard && !dismissed) {
+      setWelcomeModalOpen(true);
+    }
+  }, [activeRepo, bundle]);
+
+  const handleDismissWelcome = useCallback(() => {
+    setWelcomeModalOpen(false);
+    if (activeRepo && typeof window !== "undefined") {
+      window.localStorage.setItem(
+        `codecity.welcomeDismissed.${activeRepo.owner}/${activeRepo.repo}`,
+        "1",
+      );
+    }
+  }, [activeRepo]);
+
+  const handleRefreshBriefingWithAi = useCallback(() => {
+    if (!activeRepo || isStaticMode) return;
+    setBriefingLoading(true);
+    void client
+      .fetchCityBriefing(activeRepo.owner, activeRepo.repo, true)
+      .then((b) => setLiveBriefing(b))
+      .catch(() => {})
+      .finally(() => setBriefingLoading(false));
+  }, [activeRepo, client, isStaticMode]);
+
+  const activeCommitSha = bundle?.snapshot.commit_sha ?? "";
+  const selectedDetailCacheKey = selectedFile ? `${activeCommitSha}:${selectedFile}` : null;
+
+  const handleRequestLiveDetails = useCallback(
+    (filePath: string, enhanceLlm: boolean) => {
+      if (!activeRepo || isStaticMode) return;
+      const cacheKey = `${activeCommitSha}:${filePath}`;
+      const reqKey = `${cacheKey}:${enhanceLlm ? "ai" : "ast"}`;
+      if (detailsInFlightRef.current.has(reqKey)) return;
+      detailsInFlightRef.current.add(reqKey);
+      setDetailsLoadingKey(cacheKey);
+      void client
+        .fetchFileDetails(activeRepo.owner, activeRepo.repo, filePath, activeCommitSha, enhanceLlm)
+        .then((desc) => {
+          setLiveDetailsMap((prev) => ({ ...prev, [cacheKey]: desc }));
+        })
+        .catch(() => {})
+        .finally(() => {
+          detailsInFlightRef.current.delete(reqKey);
+          setDetailsLoadingKey((cur) => (cur === cacheKey ? null : cur));
+        });
+    },
+    [activeCommitSha, activeRepo, client, isStaticMode],
+  );
+
+  const handleRequestSourceCode = useCallback(
+    (filePath: string, full: boolean) => {
+      if (!activeRepo || isStaticMode) return;
+      const baseKey = `${activeCommitSha}:${filePath}`;
+      const reqKey = `${baseKey}:${full ? "full" : "head"}`;
+      if (sourceInFlightRef.current.has(reqKey)) return;
+      sourceInFlightRef.current.add(reqKey);
+      setSourceLoadingKey(baseKey);
+      setSourceErrorMap((prev) => {
+        if (!prev[baseKey]) return prev;
+        const copy = { ...prev };
+        delete copy[baseKey];
+        return copy;
+      });
+      void client
+        .fetchFileSource(activeRepo.owner, activeRepo.repo, filePath, activeCommitSha, full)
+        .then((payload) => {
+          setSourceCache((prev) => ({ ...prev, [baseKey]: payload }));
+        })
+        .catch((err) => {
+          setSourceErrorMap((prev) => ({
+            ...prev,
+            [baseKey]: err instanceof Error ? err.message : "Failed to load source file",
+          }));
+        })
+        .finally(() => {
+          sourceInFlightRef.current.delete(reqKey);
+          setSourceLoadingKey((cur) => (cur === baseKey ? null : cur));
+        });
+    },
+    [activeCommitSha, activeRepo, client, isStaticMode],
+  );
+
+  const handleFocusDistrict = useCallback(
+    (districtPath: string) => {
+      const dist = effectiveBundle?.districts.find((d) => d.district_path === districtPath);
+      if (!dist) return;
+      setSelectedFile(null);
+      cameraStore.flyTo({
+        targetX: dist.bounds_x + dist.bounds_w * 0.5,
+        targetZ: dist.bounds_z + dist.bounds_d * 0.5,
+        zoom: 1.25,
+        durationMs: 480,
+      });
+    },
+    [effectiveBundle],
+  );
 
   const streetGrid = useMemo(() => {
     if (!effectiveBundle) return { xLines: [], zLines: [], plazas: [] };
@@ -1051,6 +1250,7 @@ export function App() {
                     onTogglePopover={togglePopover}
                     onClosePopover={closePopover}
                     onOpenHealthModal={handleOpenHealthModal}
+                    onOpenWelcome={() => setWelcomeModalOpen(true)}
                     onStartTour={handleStartTour}
                     onToggleSound={() => {
                       const next = !soundEnabled;
@@ -1211,11 +1411,31 @@ export function App() {
 
             <InspectorDrawer
               file={selectedFileMetric}
+              district={selectedDistrict}
+              outgoingImports={selectedOutgoingImports}
               blastRadius={blastRadius}
               diagnostics={fileDiagnostics}
               history={fileHistory}
               annotations={annotations}
               isStaticMode={isStaticMode}
+              llmEnabled={llmEnabled}
+              liveDescription={
+                selectedDetailCacheKey ? (liveDetailsMap[selectedDetailCacheKey] ?? null) : null
+              }
+              detailsLoading={
+                selectedDetailCacheKey !== null && detailsLoadingKey === selectedDetailCacheKey
+              }
+              sourcePayload={
+                selectedDetailCacheKey ? (sourceCache[selectedDetailCacheKey] ?? null) : null
+              }
+              sourceLoading={
+                selectedDetailCacheKey !== null && sourceLoadingKey === selectedDetailCacheKey
+              }
+              sourceError={
+                selectedDetailCacheKey ? (sourceErrorMap[selectedDetailCacheKey] ?? null) : null
+              }
+              onRequestLiveDetails={handleRequestLiveDetails}
+              onRequestSourceCode={handleRequestSourceCode}
               onRequestFixDiff={async (fpath) => {
                 if (!activeRepo) {
                   return {
@@ -1296,6 +1516,19 @@ export function App() {
         className="pointer-events-none fixed top-0 left-0 z-50 h-full w-full"
         style={hudShellStyle}
       >
+        <MayorWelcomeModal
+          open={welcomeModalOpen}
+          briefing={activeBriefing}
+          isStaticMode={isStaticMode}
+          llmEnabled={llmEnabled}
+          llmLoading={briefingLoading}
+          onRefreshBriefingWithAi={handleRefreshBriefingWithAi}
+          onFocusDistrict={handleFocusDistrict}
+          onFocusFile={handleFocusFile}
+          onStartTour={handleStartTour}
+          onClose={handleDismissWelcome}
+        />
+
         <HealthCardModal
           open={healthModalOpen}
           report={healthReport}

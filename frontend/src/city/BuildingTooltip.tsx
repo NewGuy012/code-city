@@ -1,4 +1,5 @@
 import { useViewportHudMetrics } from "../components/hudPopover";
+import { extractBuildingDescription } from "../data/buildingDescription";
 import type { FileMetric } from "../types/city";
 import { cameraStore } from "./cameraStore";
 
@@ -18,8 +19,9 @@ export function BuildingTooltip({
   containerHeight = 800,
 }: BuildingTooltipProps) {
   const { scale } = useViewportHudMetrics();
+  const shortSummary = extractBuildingDescription(file)?.short_summary;
   const estWidth = 280 * scale;
-  const estHeight = 104 * scale;
+  const estHeight = (shortSummary ? 132 : 104) * scale;
 
   return (
     <div
@@ -32,6 +34,11 @@ export function BuildingTooltip({
       }}
     >
       <div className="truncate font-mono font-semibold text-amber-300">{file.file_path}</div>
+      {shortSummary && (
+        <p className="mt-0.5 line-clamp-2 text-[11px] leading-snug text-slate-200">
+          {shortSummary}
+        </p>
+      )}
       <div className="mt-1 flex flex-wrap items-center gap-2 text-slate-300">
         <span className="rounded bg-white/[0.08] px-1.5 py-0.5 capitalize">
           {file.building_archetype.replace(/_/g, " ")}

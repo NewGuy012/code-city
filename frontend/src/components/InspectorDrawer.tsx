@@ -4,18 +4,34 @@ import {
   Building2,
   GitBranch,
   MessageSquarePlus,
-  Sparkles,
   Wrench,
   X,
   Zap,
 } from "lucide-react";
 import { useEffect, useState } from "react";
 
+import {
+  METRIC_PLAIN_EXPLANATIONS,
+  extractBuildingDescription,
+  synthesizeFallbackDescription,
+} from "../data/buildingDescription";
 import type { FixDiffResult } from "../data/cityDataClient";
-import type { Annotation, BlastRadiusResult, FileMetric, LintDiagnostic } from "../types/city";
+import type {
+  Annotation,
+  BlastRadiusResult,
+  BuildingDescription,
+  District,
+  FileMetric,
+  FileSourcePayload,
+  LintDiagnostic,
+} from "../types/city";
+import { BuildingDescriptionSection } from "./BuildingDescriptionSection";
+import { CodeExplorerSection } from "./CodeExplorerSection";
 
 interface InspectorDrawerProps {
   file: FileMetric | null;
+  district: District | null;
+  outgoingImports: string[];
   blastRadius: BlastRadiusResult | null;
   diagnostics: LintDiagnostic[];
   history: Array<{
@@ -26,6 +42,14 @@ interface InspectorDrawerProps {
   }>;
   annotations: Annotation[];
   isStaticMode: boolean;
+  llmEnabled: boolean;
+  liveDescription: BuildingDescription | null;
+  detailsLoading: boolean;
+  sourcePayload: FileSourcePayload | null;
+  sourceLoading: boolean;
+  sourceError: string | null;
+  onRequestLiveDetails: (filePath: string, enhanceLlm: boolean) => void;
+  onRequestSourceCode: (filePath: string, full: boolean) => void;
   onRequestFixDiff: (filePath: string) => Promise<FixDiffResult>;
   onAddAnnotation: (payload: {
     file_path: string;
@@ -65,11 +89,21 @@ function Sparkline({ values, color }: { values: number[]; color: string }) {
 
 export function InspectorDrawer({
   file,
+  district,
+  outgoingImports,
   blastRadius,
   diagnostics,
   history,
   annotations,
   isStaticMode,
+  llmEnabled,
+  liveDescription,
+  detailsLoading,
+  sourcePayload,
+  sourceLoading,
+  sourceError,
+  onRequestLiveDetails,
+  onRequestSourceCode,
   onRequestFixDiff,
   onAddAnnotation,
   onSelectFile,
@@ -77,6 +111,9 @@ export function InspectorDrawer({
   className = "absolute top-16 right-3 bottom-24 z-30",
 }: InspectorDrawerProps) {
   const [activeTab, setActiveTab] = useState<InspectorTab>("overview");
+  const [detailsExpanded, setDetailsExpanded] = useState(false);
+  const [codeExpanded, setCodeExpanded] = useState(false);
+  const [targetCodeLine, setTargetCodeLine] = useState<number | null>(null);
   const [fixDiff, setFixDiff] = useState<FixDiffResult | null>(null);
   const [fixError, setFixError] = useState<string | null>(null);
   const [fixLoading, setFixLoading] = useState(false);
@@ -86,17 +123,64 @@ export function InspectorDrawer({
   const [noteError, setNoteError] = useState<string | null>(null);
   const [savingNote, setSavingNote] = useState(false);
 
+  const filePath = file?.file_path ?? null;
+  const storedDescription = file ? extractBuildingDescription(file) : null;
+  const isSandboxVirtual = storedDescription?.source === "sandbox";
+
   useEffect(() => {
+    setDetailsExpanded(false);
+    setCodeExpanded(false);
+    setTargetCodeLine(null);
     setFixDiff(null);
     setFixError(null);
     setNoteError(null);
-  }, [file?.file_path]);
+  }, [filePath]);
+
+  useEffect(() => {
+    if (!filePath || isStaticMode || isSandboxVirtual || liveDescription) return;
+    const storedSource = storedDescription?.source;
+    if (!storedDescription) {
+      onRequestLiveDetails(filePath, llmEnabled);
+    } else if (llmEnabled && storedSource !== "llamacpp" && storedSource !== "gemini") {
+      onRequestLiveDetails(filePath, true);
+    }
+  }, [
+    filePath,
+    isSandboxVirtual,
+    isStaticMode,
+    liveDescription,
+    llmEnabled,
+    onRequestLiveDetails,
+    storedDescription,
+  ]);
+
+  useEffect(() => {
+    if (!codeExpanded || !filePath || isStaticMode || isSandboxVirtual) return;
+    if (!sourcePayload && !sourceLoading && !sourceError) {
+      onRequestSourceCode(filePath, false);
+    }
+  }, [
+    codeExpanded,
+    filePath,
+    isSandboxVirtual,
+    isStaticMode,
+    onRequestSourceCode,
+    sourceError,
+    sourceLoading,
+    sourcePayload,
+  ]);
 
   if (!file) return null;
 
-  const reasons = Array.isArray(file.role_signals?.reasons)
-    ? (file.role_signals.reasons as string[])
-    : [];
+  const incomingCount = Number(file.condition_flags?.fan_in ?? 0);
+  const description =
+    liveDescription ??
+    storedDescription ??
+    synthesizeFallbackDescription(file, {
+      district,
+      outgoingImports,
+      incomingCount,
+    });
   const fileNotes = annotations.filter((a) => a.file_path === file.file_path);
   const couplingCount =
     (blastRadius?.impacted_files.length ?? 0) + (blastRadius?.fault_lines.length ?? 0);
@@ -200,7 +284,11 @@ export function InspectorDrawer({
 
       <div className="grid grid-cols-3 gap-1.5 border-b border-white/[0.07] px-3.5 py-2.5">
         {statTiles.map((t) => (
-          <div key={t.label} className="rounded-lg bg-white/[0.04] px-2 py-1.5">
+          <div
+            key={t.label}
+            title={METRIC_PLAIN_EXPLANATIONS[t.label]}
+            className="rounded-lg bg-white/[0.04] px-2 py-1.5"
+          >
             <div className="text-[9px] uppercase tracking-wider text-slate-400">{t.label}</div>
             <div className={`sim-pixel-badge font-mono text-xs font-bold ${t.tone}`}>{t.value}</div>
           </div>
@@ -233,26 +321,45 @@ export function InspectorDrawer({
       <div className="sim-scrollbar flex-1 space-y-3 overflow-y-auto px-3.5 py-3 text-xs">
         {activeTab === "overview" && (
           <>
-            <div className="rounded-xl bg-white/[0.04] p-2.5">
-              <div className="flex items-center gap-1.5 font-semibold text-slate-200">
-                <Sparkles className="h-3.5 w-3.5 text-amber-400" />
-                <span>Blueprint Role ({Math.round(file.role_confidence * 100)}%)</span>
-              </div>
-              {reasons.length > 0 ? (
-                <ul className="mt-1.5 space-y-1 text-[11px] text-slate-300">
-                  {reasons.map((r) => (
-                    <li key={r} className="leading-snug">
-                      • {r}
-                    </li>
-                  ))}
-                </ul>
-              ) : (
-                <p className="mt-1 text-[11px] text-slate-400">
-                  Classified as {file.building_archetype.replace(/_/g, " ")} in {file.district_path}
-                  /.
-                </p>
-              )}
-            </div>
+            <BuildingDescriptionSection
+              file={file}
+              district={district}
+              description={description}
+              outgoingImports={outgoingImports}
+              blastRadius={blastRadius}
+              isStaticMode={isStaticMode}
+              llmEnabled={llmEnabled}
+              detailsLoading={detailsLoading}
+              expanded={detailsExpanded}
+              onToggleExpanded={() => setDetailsExpanded((v) => !v)}
+              onPolishWithAi={() => onRequestLiveDetails(file.file_path, true)}
+              onSelectFile={onSelectFile}
+              onJumpToSymbol={(sym) => {
+                setTargetCodeLine(sym.start_line || 1);
+                setCodeExpanded(true);
+                if (!isStaticMode && !isSandboxVirtual && !sourcePayload) {
+                  onRequestSourceCode(file.file_path, false);
+                }
+              }}
+              onOpenCouplingTab={() => setActiveTab("coupling")}
+            />
+
+            <CodeExplorerSection
+              filePath={file.file_path}
+              language={file.language}
+              sloc={file.sloc}
+              symbols={description.key_symbols}
+              sourcePayload={sourcePayload}
+              loading={sourceLoading}
+              error={sourceError}
+              isStaticMode={isStaticMode}
+              isSandboxVirtual={isSandboxVirtual}
+              expanded={codeExpanded}
+              targetLine={targetCodeLine}
+              onToggleExpanded={() => setCodeExpanded((v) => !v)}
+              onSelectLine={(line) => setTargetCodeLine(line)}
+              onLoadFullFile={() => onRequestSourceCode(file.file_path, true)}
+            />
 
             {history.length > 0 && (
               <div className="rounded-xl bg-white/[0.04] p-2.5">

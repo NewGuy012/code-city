@@ -1,5 +1,6 @@
 import {
   Award,
+  BookOpen,
   Compass,
   EyeOff,
   Gamepad2,
@@ -24,6 +25,7 @@ interface ModeAndUtilitiesBarProps {
   onTogglePopover: (id: Exclude<HudPopoverId, null>) => void;
   onClosePopover: () => void;
   onOpenHealthModal: () => void;
+  onOpenWelcome: () => void;
   onStartTour: () => void;
   onToggleSound: () => void;
   onToggleRadar: () => void;
@@ -64,6 +66,7 @@ export function ModeAndUtilitiesBar({
   onTogglePopover,
   onClosePopover,
   onOpenHealthModal,
+  onOpenWelcome,
   onStartTour,
   onToggleSound,
   onToggleRadar,
@@ -72,6 +75,16 @@ export function ModeAndUtilitiesBar({
   const utilitiesOpen = openPopover === "utilities";
 
   const utilityItems = [
+    {
+      testId: "open-welcome-btn",
+      icon: <BookOpen className="h-3.5 w-3.5 text-amber-300" />,
+      label: "Mayor's Welcome Briefing",
+      right: null,
+      onClick: () => {
+        onClosePopover();
+        onOpenWelcome();
+      },
+    },
     {
       testId: "open-health-btn",
       icon: <Award className="h-3.5 w-3.5 text-amber-300" />,
