@@ -86,6 +86,51 @@ def test_control_plane_mayor_export_quack_and_security(tmp_path: Path) -> None:
         repos = client.get("/api/repos").json()
         assert len(repos) == 1 and repos[0]["repo"] == "poly_city"
 
+        # Briefing, file-details, and file-source endpoints + security checks
+        briefing_resp = client.get("/api/repos/acme/poly_city/briefing")
+        assert briefing_resp.status_code == 200
+        briefing_data = briefing_resp.json()
+        assert "mayor_welcome" in briefing_data and briefing_data["recommended_starts"]
+
+        details_resp = client.get(
+            "/api/repos/acme/poly_city/file-details",
+            params={"file_path": "api/routes.py"},
+        )
+        assert details_resp.status_code == 200
+        details_data = details_resp.json()
+        assert details_data["short_summary"]
+        assert any(s["name"] == "handle_get" for s in details_data["key_symbols"])
+
+        src_resp = client.get(
+            "/api/repos/acme/poly_city/file-source",
+            params={"file_path": "api/routes.py"},
+        )
+        assert src_resp.status_code == 200
+        src_data = src_resp.json()
+        assert src_data["language"] == "python" and "def handle_get" in src_data["content"]
+
+        assert (
+            client.get(
+                "/api/repos/acme/poly_city/file-source",
+                params={"file_path": "../../etc/passwd"},
+            ).status_code
+            == 400
+        )
+        assert (
+            client.get(
+                "/api/repos/acme/poly_city/file-source",
+                params={"file_path": "api/routes.py", "commit_sha": "not-a-sha!"},
+            ).status_code
+            == 400
+        )
+        assert (
+            client.get(
+                "/api/repos/acme/poly_city/file-details",
+                params={"file_path": ".git/config"},
+            ).status_code
+            == 400
+        )
+
         # Auto-fix diff (Python & TS) + path traversal rejection
         assert (
             client.post(

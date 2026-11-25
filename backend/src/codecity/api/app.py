@@ -25,9 +25,24 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from codecity.analyzer.git_history import resolve_git_repo
+from codecity.analyzer.briefing import build_city_briefing
+from codecity.analyzer.describer import build_file_description
+from codecity.analyzer.git_history import resolve_git_repo, run_git
+from codecity.analyzer.llm_summarizer import (
+    describe_llm_status,
+    enhance_building_description_with_llm,
+    enhance_city_briefing_with_llm,
+)
 from codecity.analyzer.pipeline import analyze_repository
 from codecity.analyzer.plugins import preview_file_fix
+from codecity.analyzer.plugins.base import safe_repo_target
+from codecity.analyzer.role_classifier import classify_building_archetype
+from codecity.analyzer.semantic import extract_repo_docs_context, match_doc_for_file
+from codecity.analyzer.treesitter_core import (
+    MAX_ANALYZED_FILE_BYTES,
+    analyze_file_ast,
+    detect_language,
+)
 from codecity.api.exporter import (
     default_frontend_dist,
     export_static_site,
@@ -38,7 +53,20 @@ from codecity.api.mayor import (
     execute_live_mayor_tool,
     list_repo_authors_90d,
 )
-from codecity.models import AnalyzeRequest, Annotation, FixDiffResult, SandboxAction
+from codecity.models import (
+    AnalyzeRequest,
+    Annotation,
+    BuildingArchetype,
+    BuildingDescription,
+    CityBriefing,
+    District,
+    ExternalDep,
+    FileImport,
+    FileMetric,
+    FixDiffResult,
+    SandboxAction,
+    ZoneType,
+)
 from codecity.storage.lakehouse import (
     EXPORT_TABLES,
     LakehouseManager,
@@ -46,12 +74,15 @@ from codecity.storage.lakehouse import (
     sanitize_identifier,
     validate_action_id,
 )
+from codecity.storage.llm_cache import LlmSummaryCache
 from codecity.storage.quack_server import QuackServerManager
 
 _LOCAL_ORIGIN_RE = re.compile(r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$")
 _LOCAL_HOST_RE = re.compile(r"^(localhost|127\.0\.0\.1|\[::1\]|testserver)(:\d+)?$", re.I)
+_COMMIT_SHA_RE = re.compile(r"^[0-9a-fA-F]{7,40}$")
 _MUTATING_METHODS = frozenset({"POST", "PUT", "DELETE", "PATCH"})
 _MAX_QUACK_BODY_BYTES = 16 * 1024 * 1024
+_INLINE_CODE_MAX_LINES = 500
 _HOP_BY_HOP_REQ_HEADERS = frozenset(
     {"host", "content-length", "connection", "transfer-encoding", "keep-alive", "cookie"}
 )
@@ -136,6 +167,7 @@ def create_app(
 ) -> FastAPI:
     """Create the CodeCity FastAPI Control Plane application."""
     lake = lakehouse or LakehouseManager()
+    llm_cache = LlmSummaryCache(lake.data_dir / "llm_cache.sqlite")
     quack_mgr = QuackServerManager(lake) if enable_quack else None
     jobs: dict[str, AnalyzeJob] = {}
     repo_locks: dict[tuple[str, str], threading.Lock] = {}
@@ -230,6 +262,7 @@ def create_app(
                     max_keyframes=req.max_keyframes,
                     workers=req.workers,
                     semantic=req.semantic,
+                    llm_mode=req.llm_mode,
                     on_progress=on_prog,
                 )
             with job.lock:
@@ -290,6 +323,37 @@ def create_app(
                 return 0
         return int(row[0]) if row else 0
 
+    def _read_repo_file_at(
+        repo_path: Path,
+        file_path: str,
+        commit_sha: str | None = None,
+    ) -> tuple[str, str]:
+        try:
+            target = safe_repo_target(repo_path, file_path)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        rel = target.relative_to(repo_path.resolve()).as_posix()
+
+        sha = commit_sha.strip() if commit_sha else ""
+        if sha and sha.upper() != "HEAD":
+            if not _COMMIT_SHA_RE.fullmatch(sha):
+                raise HTTPException(status_code=400, detail="Invalid commit SHA")
+            proc = run_git(repo_path, ["show", f"{sha}:{rel}"], check=False, timeout=15)
+            if proc.returncode != 0:
+                raise HTTPException(status_code=404, detail="File not found in snapshot")
+            raw = proc.stdout
+            if "\x00" in raw[:1024]:
+                raise HTTPException(status_code=400, detail="Binary file cannot be displayed")
+            return rel, raw[:MAX_ANALYZED_FILE_BYTES]
+
+        if not target.is_file():
+            raise HTTPException(status_code=404, detail="File not found")
+        with target.open("rb") as fh:
+            raw_bytes = fh.read(MAX_ANALYZED_FILE_BYTES + 1024)
+        if b"\x00" in raw_bytes[:1024]:
+            raise HTTPException(status_code=400, detail="Binary file cannot be displayed")
+        return rel, raw_bytes[:MAX_ANALYZED_FILE_BYTES].decode("utf-8", errors="replace")
+
     @app.get("/api/health")
     def api_health() -> dict[str, Any]:
         ep = quack_mgr.endpoint if quack_mgr else None
@@ -298,6 +362,7 @@ def create_app(
             "duckdb_version": duckdb.__version__,
             "quack_enabled": quack_mgr is not None,
             "quack_uri": ep.quack_uri if ep else None,
+            **describe_llm_status(),
         }
 
     @app.post("/api/analyze")
@@ -378,6 +443,286 @@ def create_app(
             media_type="application/octet-stream",
             headers={"Cache-Control": "no-store"},
         )
+
+    @app.get("/api/repos/{owner}/{repo}/briefing")
+    def api_repo_briefing(
+        owner: str,
+        repo: str,
+        enhance_llm: bool = False,
+    ) -> dict[str, Any]:
+        with locked_read_con() as con:
+            matched = lake.get_repo(con, owner, repo)
+            if matched is None:
+                raise HTTPException(status_code=404, detail="Repository not found")
+            pfx = lake.schema_prefix(owner, repo)
+            snap_cols = {
+                str(r[0]).lower() for r in con.execute(f"DESCRIBE {pfx}.snapshots;").fetchall()
+            }
+            if "city_briefing" in snap_cols:
+                row = con.execute(
+                    f"""
+                    SELECT snapshot_idx, city_archetype_title, health_grade,
+                           to_json(city_briefing)::VARCHAR
+                    FROM {pfx}.snapshots
+                    ORDER BY snapshot_idx DESC LIMIT 1;
+                    """
+                ).fetchone()
+            else:
+                row = con.execute(
+                    f"""
+                    SELECT snapshot_idx, city_archetype_title, health_grade, NULL::VARCHAR
+                    FROM {pfx}.snapshots
+                    ORDER BY snapshot_idx DESC LIMIT 1;
+                    """
+                ).fetchone()
+
+            if not row:
+                raise HTTPException(status_code=404, detail="No snapshots found")
+
+            latest_idx = int(row[0])
+            city_title = str(row[1] or "")
+            health_grade = str(row[2] or "A")
+            raw_briefing = row[3]
+
+            if raw_briefing:
+                stored = CityBriefing.model_validate_json(str(raw_briefing))
+                if not enhance_llm or stored.source in {"llamacpp", "gemini"}:
+                    return stored.model_dump(mode="json")
+
+            dist_rows = con.execute(
+                f"""
+                SELECT snapshot_idx, district_path, display_name, zone_type,
+                       bounds_x, bounds_z, bounds_w, bounds_d,
+                       file_count, avg_health, summary_blurb
+                FROM {pfx}.districts WHERE snapshot_idx = ? ORDER BY district_path;
+                """,
+                [latest_idx],
+            ).fetchall()
+            file_rows = con.execute(
+                f"""
+                SELECT snapshot_idx, file_path, district_path, language, zone_type,
+                       building_archetype, sloc, to_json(role_signals)::VARCHAR,
+                       to_json(condition_flags)::VARCHAR
+                FROM {pfx}.file_metrics WHERE snapshot_idx = ? ORDER BY file_path;
+                """,
+                [latest_idx],
+            ).fetchall()
+            imp_rows = con.execute(
+                f"SELECT snapshot_idx, source_file, target_file FROM {pfx}.file_imports "
+                f"WHERE snapshot_idx = ?;",
+                [latest_idx],
+            ).fetchall()
+
+        districts = [
+            District(
+                snapshot_idx=int(r[0]),
+                district_path=str(r[1]),
+                display_name=str(r[2]),
+                zone_type=ZoneType(str(r[3])),
+                bounds_x=float(r[4]),
+                bounds_z=float(r[5]),
+                bounds_w=float(r[6]),
+                bounds_d=float(r[7]),
+                file_count=int(r[8]),
+                avg_health=float(r[9]),
+                summary_blurb=str(r[10] or ""),
+            )
+            for r in dist_rows
+        ]
+        files = [
+            FileMetric(
+                snapshot_idx=int(r[0]),
+                file_path=str(r[1]),
+                district_path=str(r[2]),
+                language=str(r[3]),
+                zone_type=ZoneType(str(r[4])),
+                building_archetype=BuildingArchetype(str(r[5])),
+                sloc=int(r[6]),
+                role_signals=json.loads(r[7]) if r[7] else {},
+                condition_flags=json.loads(r[8]) if r[8] else {},
+            )
+            for r in file_rows
+        ]
+        imports = [
+            FileImport(snapshot_idx=int(r[0]), source_file=str(r[1]), target_file=str(r[2]))
+            for r in imp_rows
+        ]
+
+        repo_path = _resolve_repo_path(owner, repo)
+        docs_ctx = extract_repo_docs_context(repo_path)
+        repo_slug = f"{matched.owner}/{matched.repo}"
+        briefing = build_city_briefing(
+            repo_slug,
+            docs_ctx,
+            districts,
+            files,
+            imports,
+            city_title=city_title,
+            health_grade=health_grade,
+        )
+        if enhance_llm:
+            briefing = enhance_city_briefing_with_llm(
+                briefing,
+                docs_ctx,
+                repo_slug=repo_slug,
+                cache=llm_cache,
+            )
+        return briefing.model_dump(mode="json")
+
+    @app.get("/api/repos/{owner}/{repo}/file-details")
+    def api_file_details(
+        owner: str,
+        repo: str,
+        file_path: str,
+        commit_sha: str | None = None,
+        enhance_llm: bool = False,
+    ) -> dict[str, Any]:
+        repo_path = _resolve_repo_path(owner, repo)
+        rel, source_text = _read_repo_file_at(repo_path, file_path, commit_sha)
+
+        stored_desc: BuildingDescription | None = None
+        fan_in = 0
+        fan_out = 0
+        churn_90d = 0
+        bugfix_commits_90d = 0
+        distinct_authors_90d = 1
+        internal_targets: list[str] = []
+        external_deps: list[ExternalDep] = []
+        stored_archetype: BuildingArchetype | None = None
+        stored_zone: ZoneType | None = None
+
+        with locked_read_con() as con:
+            matched = lake.get_repo(con, owner, repo)
+            if matched is not None:
+                pfx = lake.schema_prefix(owner, repo)
+                target_snap = None
+                if commit_sha and commit_sha.strip().upper() != "HEAD":
+                    snap_row = con.execute(
+                        f"SELECT snapshot_idx FROM {pfx}.snapshots WHERE commit_sha = ? LIMIT 1;",
+                        [commit_sha.strip()],
+                    ).fetchone()
+                    if snap_row:
+                        target_snap = int(snap_row[0])
+                if target_snap is None:
+                    snap_row = con.execute(
+                        f"SELECT COALESCE(MAX(snapshot_idx), 0) FROM {pfx}.snapshots;"
+                    ).fetchone()
+                    target_snap = int(snap_row[0]) if snap_row else 0
+
+                fm_row = con.execute(
+                    f"""
+                    SELECT zone_type, building_archetype, churn_90d, bugfix_commits_90d,
+                           distinct_authors_90d, to_json(role_signals)::VARCHAR,
+                           to_json(condition_flags)::VARCHAR
+                    FROM {pfx}.file_metrics
+                    WHERE snapshot_idx = ? AND file_path = ? LIMIT 1;
+                    """,
+                    [target_snap, rel],
+                ).fetchone()
+                if fm_row:
+                    stored_zone = ZoneType(str(fm_row[0]))
+                    stored_archetype = BuildingArchetype(str(fm_row[1]))
+                    churn_90d = int(fm_row[2] or 0)
+                    bugfix_commits_90d = int(fm_row[3] or 0)
+                    distinct_authors_90d = int(fm_row[4] or 1)
+                    raw_sig = json.loads(fm_row[5]) if fm_row[5] else {}
+                    flags = json.loads(fm_row[6]) if fm_row[6] else {}
+                    fan_in = int(flags.get("fan_in", 0) or 0)
+                    fan_out = int(flags.get("fan_out", 0) or 0)
+                    if isinstance(raw_sig.get("description"), dict):
+                        stored_desc = BuildingDescription.model_validate(raw_sig["description"])
+
+                imp_rows = con.execute(
+                    f"SELECT target_file FROM {pfx}.file_imports "
+                    f"WHERE snapshot_idx = ? AND source_file = ?;",
+                    [target_snap, rel],
+                ).fetchall()
+                internal_targets = [str(r[0]) for r in imp_rows]
+                dep_rows = con.execute(
+                    f"SELECT snapshot_idx, ecosystem, package_name, version, is_direct "
+                    f"FROM {pfx}.external_deps WHERE snapshot_idx = ?;",
+                    [target_snap],
+                ).fetchall()
+                external_deps = [
+                    ExternalDep(
+                        snapshot_idx=int(r[0]),
+                        ecosystem=str(r[1]),
+                        package_name=str(r[2]),
+                        version=str(r[3] or ""),
+                        is_direct=bool(r[4]),
+                    )
+                    for r in dep_rows
+                ]
+
+        docs_ctx = extract_repo_docs_context(repo_path)
+        repo_slug = f"{sanitize_identifier(owner)}/{sanitize_identifier(repo)}"
+
+        if stored_desc is not None and (
+            not enhance_llm or stored_desc.source in {"llamacpp", "gemini"}
+        ):
+            return stored_desc.model_dump(mode="json")
+
+        if stored_desc is not None:
+            desc = stored_desc
+        else:
+            ast_info = analyze_file_ast(rel, source_text)
+            if stored_archetype is None or stored_zone is None:
+                stored_archetype, stored_zone, _, _ = classify_building_archetype(
+                    ast_info, fan_in=fan_in, fan_out=fan_out, pagerank=0.0
+                )
+            desc = build_file_description(
+                ast_info,
+                archetype=stored_archetype,
+                zone=stored_zone,
+                fan_in=fan_in,
+                fan_out=fan_out,
+                internal_targets=internal_targets,
+                external_deps=external_deps,
+                churn_90d=churn_90d,
+                bugfix_commits_90d=bugfix_commits_90d,
+                distinct_authors_90d=distinct_authors_90d,
+                readme_context=match_doc_for_file(docs_ctx, rel),
+            )
+
+        if enhance_llm:
+            desc = enhance_building_description_with_llm(
+                desc,
+                file_path=rel,
+                source_text=source_text,
+                repo_name=repo_slug,
+                docs_ctx=docs_ctx,
+                repo_slug=repo_slug,
+                cache=llm_cache,
+            )
+        return desc.model_dump(mode="json")
+
+    @app.get("/api/repos/{owner}/{repo}/file-source")
+    def api_file_source(
+        owner: str,
+        repo: str,
+        file_path: str,
+        commit_sha: str | None = None,
+        full: bool = False,
+    ) -> dict[str, Any]:
+        repo_path = _resolve_repo_path(owner, repo)
+        rel, raw = _read_repo_file_at(repo_path, file_path, commit_sha)
+        lines = raw.splitlines()
+        total_lines = len(lines)
+        truncated = False
+        content = raw
+        if not full and total_lines > _INLINE_CODE_MAX_LINES:
+            content = "\n".join(lines[:_INLINE_CODE_MAX_LINES])
+            truncated = True
+        elif len(raw.encode("utf-8", errors="ignore")) >= MAX_ANALYZED_FILE_BYTES:
+            truncated = True
+        return {
+            "file_path": rel,
+            "language": detect_language(rel)[0],
+            "commit_sha": commit_sha.strip() if commit_sha else "HEAD",
+            "total_lines": total_lines,
+            "truncated": truncated,
+            "content": content,
+        }
 
     @app.post("/api/repos/{owner}/{repo}/fix-diff")
     def api_fix_diff(owner: str, repo: str, body: FixDiffRequest) -> dict[str, Any]:

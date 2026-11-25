@@ -98,7 +98,7 @@ def capture_postcard_png(static_dir: Path, dest_png: Path) -> Path:
         thread = threading.Thread(target=httpd.serve_forever, daemon=True)
         thread.start()
         try:
-            url = f"http://127.0.0.1:{port}/index.html"
+            url = f"http://127.0.0.1:{port}/index.html?postcard=1"
             with sync_playwright() as pw:
                 browser = pw.chromium.launch()
                 try:
