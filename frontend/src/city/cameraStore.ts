@@ -69,13 +69,6 @@ function normalizeAngle(rad: number): number {
   return ((rad % twoPi) + twoPi) % twoPi;
 }
 
-function shortestAngleDiff(from: number, to: number): number {
-  const twoPi = Math.PI * 2;
-  let diff = (((to - from) % twoPi) + twoPi) % twoPi;
-  if (diff > Math.PI) diff -= twoPi;
-  return diff;
-}
-
 function normalizeRollDeg(deg: number): number {
   if (deg >= MIN_ROLL && deg <= MAX_ROLL) return deg === 0 ? 0 : deg;
   let r = ((((deg + 180) % 360) + 360) % 360) - 180;
@@ -83,11 +76,20 @@ function normalizeRollDeg(deg: number): number {
   return r === 0 ? 0 : r;
 }
 
-function shortestAngleDiffDeg(from: number, to: number): number {
-  let diff = (((to - from) % 360) + 360) % 360;
-  if (diff > 180) diff -= 360;
+function wrapSignedDiff(from: number, to: number, period: number): number {
+  let diff = (((to - from) % period) + period) % period;
+  if (diff > period * 0.5) diff -= period;
   return diff;
 }
+
+const STATIC_PRESETS: Record<
+  1 | 2 | 3,
+  { targetZOffset: number; zoom?: number; yaw: number; pitch: number; durationMs: number }
+> = {
+  1: { targetZOffset: 4, yaw: DEFAULT_YAW, pitch: 46, durationMs: 560 },
+  2: { targetZOffset: 0, zoom: 0.96, yaw: DEFAULT_YAW, pitch: DEFAULT_PITCH, durationMs: 520 },
+  3: { targetZOffset: 12, zoom: 2.35, yaw: Math.PI * 0.14, pitch: 14, durationMs: 620 },
+};
 
 type Listener = (state: UnifiedCameraState) => void;
 
@@ -220,8 +222,8 @@ class CameraStore {
     const stopOrbit = opts.yaw !== undefined;
     this.cancelTween();
 
-    const yawDiff = shortestAngleDiff(start.yaw, endYaw);
-    const rollDiff = shortestAngleDiffDeg(start.roll, endRoll);
+    const yawDiff = wrapSignedDiff(start.yaw, endYaw, Math.PI * 2);
+    const rollDiff = wrapSignedDiff(start.roll, endRoll, 360);
     const duration = Math.max(120, opts.durationMs ?? 520);
 
     if (typeof requestAnimationFrame !== "function" || typeof performance === "undefined") {
@@ -278,38 +280,17 @@ class CameraStore {
     preset: CameraPresetId,
     options?: { fitZoom?: number; vehicleId?: string | null },
   ): void {
-    if (preset === 1) {
-      this.setState({ preset: 1, followVehicleId: null, cinematicOrbit: false });
+    if (preset === 1 || preset === 2 || preset === 3) {
+      const cfg = STATIC_PRESETS[preset];
+      this.setState({ preset, followVehicleId: null, cinematicOrbit: false });
       this.flyTo({
         targetX: WORLD_CENTER_X,
-        targetZ: WORLD_CENTER_Z + 4,
-        zoom: options?.fitZoom ?? 0.68,
-        yaw: DEFAULT_YAW,
-        pitch: 46,
+        targetZ: WORLD_CENTER_Z + cfg.targetZOffset,
+        zoom: preset === 1 ? (options?.fitZoom ?? 0.68) : cfg.zoom,
+        yaw: cfg.yaw,
+        pitch: cfg.pitch,
         roll: DEFAULT_ROLL,
-        durationMs: 560,
-      });
-    } else if (preset === 2) {
-      this.setState({ preset: 2, followVehicleId: null, cinematicOrbit: false });
-      this.flyTo({
-        targetX: WORLD_CENTER_X,
-        targetZ: WORLD_CENTER_Z,
-        zoom: 0.96,
-        yaw: DEFAULT_YAW,
-        pitch: DEFAULT_PITCH,
-        roll: DEFAULT_ROLL,
-        durationMs: 520,
-      });
-    } else if (preset === 3) {
-      this.setState({ preset: 3, followVehicleId: null, cinematicOrbit: false });
-      this.flyTo({
-        targetX: WORLD_CENTER_X,
-        targetZ: WORLD_CENTER_Z + 12,
-        zoom: 2.35,
-        yaw: Math.PI * 0.14,
-        pitch: 14,
-        roll: DEFAULT_ROLL,
-        durationMs: 620,
+        durationMs: cfg.durationMs,
       });
     } else if (preset === 4) {
       this.setState({
@@ -323,13 +304,9 @@ class CameraStore {
         roll: DEFAULT_ROLL,
         durationMs: 420,
       });
-    } else if (preset === 5) {
+    } else {
       const nextOrbit = !this.state.cinematicOrbit || this.state.preset !== 5;
-      this.setState({
-        preset: 5,
-        followVehicleId: null,
-        cinematicOrbit: nextOrbit,
-      });
+      this.setState({ preset: 5, followVehicleId: null, cinematicOrbit: nextOrbit });
       if (nextOrbit) {
         this.flyTo({
           targetX: WORLD_CENTER_X,
@@ -351,19 +328,6 @@ class CameraStore {
 }
 
 export const cameraStore = new CameraStore();
-
-export function useCameraSelector<T>(selector: (state: UnifiedCameraState) => T): T {
-  const [val, setVal] = useState<T>(() => selector(cameraStore.getState()));
-  useEffect(
-    () =>
-      cameraStore.subscribe((next) => {
-        const picked = selector(next);
-        setVal((prev) => (Object.is(prev, picked) ? prev : picked));
-      }),
-    [selector],
-  );
-  return val;
-}
 
 export function useCameraStore(): UnifiedCameraState {
   const [snap, setSnap] = useState<UnifiedCameraState>(() => cameraStore.getState());

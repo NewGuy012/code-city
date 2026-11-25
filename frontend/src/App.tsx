@@ -72,6 +72,7 @@ export function App() {
   const sim = simRef.current;
   const [simState, setSimState] = useState<SimStateSnapshot>(() => sim.getSnapshot());
   const analyzeEsRef = useRef<EventSource | null>(null);
+  const loadSeqRef = useRef(0);
 
   const [isStaticMode, setIsStaticMode] = useState(false);
   const [repos, setRepos] = useState<RepoRef[]>([]);
@@ -271,8 +272,6 @@ export function App() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
-        if (healthModalOpen || advisorsOpen || disastersOpen) return;
-        if (document.querySelector('[data-testid="blueprint-modal"]')) return;
         if (openPopover !== null) {
           setOpenPopover(null);
           return;
@@ -303,18 +302,11 @@ export function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [
-    activeTool,
-    advisorsOpen,
-    disastersOpen,
-    healthModalOpen,
-    openPopover,
-    selectedFile,
-    zenMode,
-  ]);
+  }, [activeTool, openPopover, selectedFile, zenMode]);
 
   const loadRepoData = useCallback(
     async (owner: string, repo: string, baseUrl: string, force = false) => {
+      const seq = ++loadSeqRef.current;
       setLoadingMsg(`Loading ${owner}/${repo} into DuckDB-Wasm...`);
       setErrorMsg(null);
       try {
@@ -324,6 +316,7 @@ export function App() {
           client.queryAnnotations(),
           client.querySandboxActions(),
         ]);
+        if (seq !== loadSeqRef.current) return;
         const latest = snaps[snaps.length - 1]?.snapshot_idx ?? 0;
         sim.reset();
         setSimState(sim.getSnapshot());
@@ -339,9 +332,13 @@ export function App() {
         setBlastRadius(null);
         setTourActive(false);
       } catch (err) {
-        setErrorMsg(err instanceof Error ? err.message : String(err));
+        if (seq === loadSeqRef.current) {
+          setErrorMsg(err instanceof Error ? err.message : String(err));
+        }
       } finally {
-        setLoadingMsg(null);
+        if (seq === loadSeqRef.current) {
+          setLoadingMsg(null);
+        }
       }
     },
     [client, sim],
@@ -805,6 +802,15 @@ export function App() {
   const closeAdvisorsModal = useCallback(() => setAdvisorsOpen(false), []);
   const closeDisastersModal = useCallback(() => setDisastersOpen(false), []);
 
+  const runDisaster = useCallback(
+    (action: () => void) => {
+      action();
+      soundEngine.playDisaster();
+      setSimState(sim.getSnapshot());
+    },
+    [sim],
+  );
+
   const activeToolMeta =
     activeTool === "inspect" ? null : (MAYOR_TOOLS.find((t) => t.id === activeTool) ?? null);
   const ActiveToolIcon = activeToolMeta?.icon ?? null;
@@ -1258,33 +1264,26 @@ export function App() {
           authors={repoAuthors}
           onTriggerPowerOutage={(targetFile) => {
             if (!effectiveBundle) return;
-            const impacted = computeImpactedFiles(targetFile, effectiveBundle.imports);
-            const protectedSet = new Set(
-              effectiveBundle.files
-                .filter((f) => overlayResult?.protectedDistricts.has(f.district_path))
-                .map((f) => f.file_path),
-            );
-            sim.triggerPowerOutage(targetFile, impacted, protectedSet);
-            soundEngine.playDisaster();
-            setSimState(sim.getSnapshot());
+            runDisaster(() => {
+              const impacted = computeImpactedFiles(targetFile, effectiveBundle.imports);
+              const protectedSet = new Set(
+                effectiveBundle.files
+                  .filter((f) => overlayResult?.protectedDistricts.has(f.district_path))
+                  .map((f) => f.file_path),
+              );
+              sim.triggerPowerOutage(targetFile, impacted, protectedSet);
+            });
             handleFocusFile(targetFile);
           }}
-          onTriggerBusFactorVacation={(authorLabel, filesList) => {
-            sim.triggerBusFactorVacation(authorLabel, filesList);
-            soundEngine.playDisaster();
-            setSimState(sim.getSnapshot());
-          }}
+          onTriggerBusFactorVacation={(authorLabel, filesList) =>
+            runDisaster(() => sim.triggerBusFactorVacation(authorLabel, filesList))
+          }
           onTriggerCrunchStorm={() => {
-            if (!effectiveBundle) return;
-            sim.triggerCrunchStorm(effectiveBundle);
-            soundEngine.playDisaster();
-            setSimState(sim.getSnapshot());
+            if (effectiveBundle) runDisaster(() => sim.triggerCrunchStorm(effectiveBundle));
           }}
           onTriggerSupplyDockStorm={(depName) => {
-            if (!effectiveBundle) return;
-            sim.triggerSupplyDockStorm(depName, effectiveBundle);
-            soundEngine.playDisaster();
-            setSimState(sim.getSnapshot());
+            if (effectiveBundle)
+              runDisaster(() => sim.triggerSupplyDockStorm(depName, effectiveBundle));
           }}
           onClearDisasters={() => {
             sim.clearDisaster();

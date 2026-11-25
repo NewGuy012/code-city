@@ -78,14 +78,18 @@ export function InspectorDrawer({
 }: InspectorDrawerProps) {
   const [activeTab, setActiveTab] = useState<InspectorTab>("overview");
   const [fixDiff, setFixDiff] = useState<FixDiffResult | null>(null);
+  const [fixError, setFixError] = useState<string | null>(null);
   const [fixLoading, setFixLoading] = useState(false);
   const [noteBody, setNoteBody] = useState("");
   const [noteAuthor, setNoteAuthor] = useState("mayor");
   const [noteTag, setNoteTag] = useState("refactor");
+  const [noteError, setNoteError] = useState<string | null>(null);
   const [savingNote, setSavingNote] = useState(false);
 
   useEffect(() => {
     setFixDiff(null);
+    setFixError(null);
+    setNoteError(null);
   }, [file?.file_path]);
 
   if (!file) return null;
@@ -101,9 +105,12 @@ export function InspectorDrawer({
   async function handleFixClick() {
     if (!file) return;
     setFixLoading(true);
+    setFixError(null);
     try {
       const res = await onRequestFixDiff(file.file_path);
       setFixDiff(res);
+    } catch (err) {
+      setFixError(err instanceof Error ? err.message : "Failed to preview fix");
     } finally {
       setFixLoading(false);
     }
@@ -113,6 +120,7 @@ export function InspectorDrawer({
     e.preventDefault();
     if (!file || !noteBody.trim()) return;
     setSavingNote(true);
+    setNoteError(null);
     try {
       await onAddAnnotation({
         file_path: file.file_path,
@@ -121,10 +129,40 @@ export function InspectorDrawer({
         body: noteBody.trim(),
       });
       setNoteBody("");
+    } catch (err) {
+      setNoteError(err instanceof Error ? err.message : "Failed to save note");
     } finally {
       setSavingNote(false);
     }
   }
+
+  const statTiles = [
+    { label: "SLOC", value: String(file.sloc), tone: "text-white" },
+    { label: "Complexity", value: `Cx ${file.max_complexity}`, tone: "text-amber-300" },
+    { label: "Hotspot", value: file.hotspot_score.toFixed(1), tone: "text-orange-400" },
+    { label: "90d Churn", value: String(file.churn_90d), tone: "text-sky-300" },
+    {
+      label: "Bus Factor",
+      value: String(file.distinct_authors_90d),
+      tone: file.distinct_authors_90d <= 1 ? "text-rose-400" : "text-emerald-300",
+    },
+    {
+      label: "Lint Debt",
+      value: `${file.lint_issue_count}${file.format_drift ? "+f" : ""}`,
+      tone: "text-purple-300",
+    },
+  ];
+
+  const tabs: Array<{
+    id: InspectorTab;
+    label: string;
+    badge?: number;
+    badgeTone?: string;
+  }> = [
+    { id: "overview", label: "Overview" },
+    { id: "coupling", label: "Coupling", badge: couplingCount, badgeTone: "text-amber-300" },
+    { id: "notes", label: "Lint & Notes", badge: notesAndLintCount, badgeTone: "text-sky-300" },
+  ];
 
   return (
     <aside
@@ -161,94 +199,35 @@ export function InspectorDrawer({
       </div>
 
       <div className="grid grid-cols-3 gap-1.5 border-b border-white/[0.07] px-3.5 py-2.5">
-        <div className="rounded-lg bg-white/[0.04] px-2 py-1.5">
-          <div className="text-[9px] uppercase tracking-wider text-slate-400">SLOC</div>
-          <div className="sim-pixel-badge font-mono text-xs font-bold text-white">{file.sloc}</div>
-        </div>
-        <div className="rounded-lg bg-white/[0.04] px-2 py-1.5">
-          <div className="text-[9px] uppercase tracking-wider text-slate-400">Complexity</div>
-          <div className="sim-pixel-badge font-mono text-xs font-bold text-amber-300">
-            Cx {file.max_complexity}
+        {statTiles.map((t) => (
+          <div key={t.label} className="rounded-lg bg-white/[0.04] px-2 py-1.5">
+            <div className="text-[9px] uppercase tracking-wider text-slate-400">{t.label}</div>
+            <div className={`sim-pixel-badge font-mono text-xs font-bold ${t.tone}`}>{t.value}</div>
           </div>
-        </div>
-        <div className="rounded-lg bg-white/[0.04] px-2 py-1.5">
-          <div className="text-[9px] uppercase tracking-wider text-slate-400">Hotspot</div>
-          <div className="sim-pixel-badge font-mono text-xs font-bold text-orange-400">
-            {file.hotspot_score.toFixed(1)}
-          </div>
-        </div>
-        <div className="rounded-lg bg-white/[0.04] px-2 py-1.5">
-          <div className="text-[9px] uppercase tracking-wider text-slate-400">90d Churn</div>
-          <div className="sim-pixel-badge font-mono text-xs font-bold text-sky-300">
-            {file.churn_90d}
-          </div>
-        </div>
-        <div className="rounded-lg bg-white/[0.04] px-2 py-1.5">
-          <div className="text-[9px] uppercase tracking-wider text-slate-400">Bus Factor</div>
-          <div
-            className={`sim-pixel-badge font-mono text-xs font-bold ${
-              file.distinct_authors_90d <= 1 ? "text-rose-400" : "text-emerald-300"
-            }`}
-          >
-            {file.distinct_authors_90d}
-          </div>
-        </div>
-        <div className="rounded-lg bg-white/[0.04] px-2 py-1.5">
-          <div className="text-[9px] uppercase tracking-wider text-slate-400">Lint Debt</div>
-          <div className="sim-pixel-badge font-mono text-xs font-bold text-purple-300">
-            {file.lint_issue_count}
-            {file.format_drift ? "+f" : ""}
-          </div>
-        </div>
+        ))}
       </div>
 
       <div className="flex items-center gap-1 border-b border-white/10 px-3 py-1.5 text-[11px]">
-        <button
-          type="button"
-          data-testid="inspector-tab-overview"
-          onClick={() => setActiveTab("overview")}
-          className={`flex-1 rounded-lg px-2 py-1 font-medium transition ${
-            activeTab === "overview"
-              ? "bg-white/[0.11] text-white"
-              : "text-slate-400 hover:bg-white/[0.05] hover:text-slate-200"
-          }`}
-        >
-          Overview
-        </button>
-        <button
-          type="button"
-          data-testid="inspector-tab-coupling"
-          onClick={() => setActiveTab("coupling")}
-          className={`flex flex-1 items-center justify-center gap-1 rounded-lg px-2 py-1 font-medium transition ${
-            activeTab === "coupling"
-              ? "bg-white/[0.11] text-white"
-              : "text-slate-400 hover:bg-white/[0.05] hover:text-slate-200"
-          }`}
-        >
-          <span>Coupling</span>
-          {couplingCount > 0 && (
-            <span className="rounded bg-white/10 px-1 font-mono text-[9px] text-amber-300">
-              {couplingCount}
-            </span>
-          )}
-        </button>
-        <button
-          type="button"
-          data-testid="inspector-tab-notes"
-          onClick={() => setActiveTab("notes")}
-          className={`flex flex-1 items-center justify-center gap-1 rounded-lg px-2 py-1 font-medium transition ${
-            activeTab === "notes"
-              ? "bg-white/[0.11] text-white"
-              : "text-slate-400 hover:bg-white/[0.05] hover:text-slate-200"
-          }`}
-        >
-          <span>Lint &amp; Notes</span>
-          {notesAndLintCount > 0 && (
-            <span className="rounded bg-white/10 px-1 font-mono text-[9px] text-sky-300">
-              {notesAndLintCount}
-            </span>
-          )}
-        </button>
+        {tabs.map((t) => (
+          <button
+            key={t.id}
+            type="button"
+            data-testid={`inspector-tab-${t.id}`}
+            onClick={() => setActiveTab(t.id)}
+            className={`flex flex-1 items-center justify-center gap-1 rounded-lg px-2 py-1 font-medium transition ${
+              activeTab === t.id
+                ? "bg-white/[0.11] text-white"
+                : "text-slate-400 hover:bg-white/[0.05] hover:text-slate-200"
+            }`}
+          >
+            <span>{t.label}</span>
+            {t.badge !== undefined && t.badge > 0 && (
+              <span className={`rounded bg-white/10 px-1 font-mono text-[9px] ${t.badgeTone}`}>
+                {t.badge}
+              </span>
+            )}
+          </button>
+        ))}
       </div>
 
       <div className="sim-scrollbar flex-1 space-y-3 overflow-y-auto px-3.5 py-3 text-xs">
@@ -424,6 +403,12 @@ export function InspectorDrawer({
                 </p>
               )}
 
+              {fixError && (
+                <div className="mt-2 rounded-lg border border-rose-500/35 bg-rose-950/40 px-2.5 py-1.5 text-[11px] text-rose-200">
+                  {fixError}
+                </div>
+              )}
+
               {fixDiff && (
                 <div className="mt-2.5 rounded-lg border border-emerald-500/35 bg-slate-950 p-2">
                   <div className="flex items-center justify-between text-[11px] font-semibold text-emerald-300">
@@ -499,6 +484,11 @@ export function InspectorDrawer({
                       Save
                     </button>
                   </div>
+                  {noteError && (
+                    <div className="rounded-lg border border-rose-500/35 bg-rose-950/40 px-2 py-1 text-[11px] text-rose-200">
+                      {noteError}
+                    </div>
+                  )}
                 </form>
               )}
             </div>

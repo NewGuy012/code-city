@@ -217,6 +217,25 @@ function getTiltFactors(pitchDeg = DEFAULT_PITCH): { isoYScale: number; heightSc
   };
 }
 
+function projectIsoCore(
+  wx: number,
+  wz: number,
+  wy: number,
+  cosT: number,
+  sinT: number,
+  isoYEff: number,
+  heightScale: number,
+): { x: number; y: number } {
+  const dx = wx - WORLD_CENTER_X;
+  const dz = wz - WORLD_CENTER_Z;
+  const rx = dx * cosT - dz * sinT;
+  const rz = dx * sinT + dz * cosT;
+  return {
+    x: (rx - rz) * ISO_X,
+    y: (rx + rz) * isoYEff - wy * heightScale,
+  };
+}
+
 function makeProjector(width: number, height: number, camera: Camera2D): IsoProjector {
   const yaw = camera.yaw ?? DEFAULT_YAW;
   const pitch = camera.pitch ?? DEFAULT_PITCH;
@@ -238,14 +257,8 @@ function makeProjector(width: number, height: number, camera: Camera2D): IsoProj
     heightScale,
     compassStep: compassStepFromYaw(yaw),
     project(wx: number, wz: number, wy: number) {
-      const dx = wx - WORLD_CENTER_X;
-      const dz = wz - WORLD_CENTER_Z;
-      const rx = dx * cosT - dz * sinT;
-      const rz = dx * sinT + dz * cosT;
-      return {
-        x: ox + (rx - rz) * ISO_X * zoom,
-        y: oy + ((rx + rz) * isoYEff - wy * heightScale) * zoom,
-      };
+      const p = projectIsoCore(wx, wz, wy, cosT, sinT, isoYEff, heightScale);
+      return { x: ox + p.x * zoom, y: oy + p.y * zoom };
     },
   };
 }
@@ -287,18 +300,9 @@ export function worldToIso(
   yaw = DEFAULT_YAW,
   pitch = DEFAULT_PITCH,
 ): { x: number; y: number } {
-  const dx = x - WORLD_CENTER_X;
-  const dz = z - WORLD_CENTER_Z;
   const theta = yaw - DEFAULT_YAW;
-  const cosT = Math.cos(theta);
-  const sinT = Math.sin(theta);
-  const rx = dx * cosT - dz * sinT;
-  const rz = dx * sinT + dz * cosT;
   const { isoYScale, heightScale } = getTiltFactors(pitch);
-  return {
-    x: (rx - rz) * ISO_X,
-    y: (rx + rz) * (ISO_Y * isoYScale) - y * heightScale,
-  };
+  return projectIsoCore(x, z, y, Math.cos(theta), Math.sin(theta), ISO_Y * isoYScale, heightScale);
 }
 
 export function worldToScreen(

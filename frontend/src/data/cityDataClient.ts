@@ -430,22 +430,23 @@ export class CityDataClient {
     if (!snapshot) {
       throw new Error(`No snapshot found for index ${snapshotIdx}`);
     }
+    const resolvedIdx = snapshot.snapshot_idx;
 
     const [distRows, fileRows, impRows, coRows, depRows] = await Promise.all([
       this.runReadSql(`SELECT * FROM districts WHERE snapshot_idx = ? ORDER BY district_path;`, [
-        snapshotIdx,
+        resolvedIdx,
       ]),
       this.runReadSql(`SELECT * FROM file_metrics WHERE snapshot_idx = ? ORDER BY file_path;`, [
-        snapshotIdx,
+        resolvedIdx,
       ]),
-      this.runReadSql(`SELECT * FROM file_imports WHERE snapshot_idx = ?;`, [snapshotIdx]),
+      this.runReadSql(`SELECT * FROM file_imports WHERE snapshot_idx = ?;`, [resolvedIdx]),
       this.runReadSql(
         `SELECT * FROM cochange_pairs WHERE snapshot_idx = ? ORDER BY coupling_ratio DESC;`,
-        [snapshotIdx],
+        [resolvedIdx],
       ),
       this.runReadSql(
         `SELECT * FROM external_deps WHERE snapshot_idx = ? ORDER BY is_direct DESC, package_name ASC;`,
-        [snapshotIdx],
+        [resolvedIdx],
       ),
     ]);
 

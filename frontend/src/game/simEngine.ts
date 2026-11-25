@@ -1,21 +1,29 @@
 import type { CitySnapshotBundle } from "../data/cityDataClient";
 import type { FloatingStatPopup, SimVehicleRender } from "../city/isoRenderer2D";
 import type { FileImport, FileMetric } from "../types/city";
-import { type RoadGraph, buildRoadGraph, detectImportCycles, findStreetPath } from "./roadGraph";
+import {
+  type RoadGraph,
+  type RoadNode,
+  buildRoadGraph,
+  detectImportCycles,
+  findStreetPath,
+} from "./roadGraph";
 
 export function computeImpactedFiles(targetFile: string, imports: FileImport[]): string[] {
+  const revAdj = new Map<string, string[]>();
+  for (const imp of imports) {
+    const arr = revAdj.get(imp.target_file);
+    if (arr) arr.push(imp.source_file);
+    else revAdj.set(imp.target_file, [imp.source_file]);
+  }
   const visited = new Set<string>();
   const queue = [targetFile];
-  while (queue.length > 0) {
-    const cur = queue.shift()!;
-    for (const imp of imports) {
-      if (
-        imp.target_file === cur &&
-        imp.source_file !== targetFile &&
-        !visited.has(imp.source_file)
-      ) {
-        visited.add(imp.source_file);
-        queue.push(imp.source_file);
+  for (let head = 0; head < queue.length; head++) {
+    const cur = queue[head];
+    for (const src of revAdj.get(cur) ?? []) {
+      if (src !== targetFile && !visited.has(src)) {
+        visited.add(src);
+        queue.push(src);
       }
     }
   }
@@ -94,7 +102,8 @@ export class CitySimulationEngine {
   private milestoneEvent: CityMilestone | null = null;
 
   private graph: RoadGraph | null = null;
-  private bundleKey = "";
+  private bottleneckNodes: RoadNode[] = [];
+  private lastBundle: CitySnapshotBundle | null = null;
   private bundleStats = {
     totalLint: 0,
     complexPenalty: 0,
@@ -139,11 +148,11 @@ export class CitySimulationEngine {
   }
 
   private ensureGraph(bundle: CitySnapshotBundle): void {
-    const key = `${bundle.snapshot.commit_sha}:${bundle.snapshot.snapshot_idx}:${bundle.files.length}:${bundle.imports.length}:${bundle.snapshot.total_lint_issues}`;
-    if (this.graph && this.bundleKey === key) return;
+    if (this.graph && this.lastBundle === bundle) return;
 
-    this.bundleKey = key;
+    this.lastBundle = bundle;
     this.graph = buildRoadGraph(bundle.districts, bundle.files, bundle.imports);
+    this.bottleneckNodes = this.graph.nodes.filter((n) => n.bottleneckWeight > 0);
     this.cycles = detectImportCycles(bundle.imports);
     let totalLint = 0;
     let complexCount = 0;
@@ -180,7 +189,8 @@ export class CitySimulationEngine {
     this.floatingPopups = [];
     this.vehicles = [];
     this.graph = null;
-    this.bundleKey = "";
+    this.bottleneckNodes = [];
+    this.lastBundle = null;
   }
 
   private seedTraffic(bundle: CitySnapshotBundle): void {
@@ -464,9 +474,9 @@ export class CitySimulationEngine {
 
         let localSpeed = v.speed;
         let isJammed = false;
-        if (this.graph && v.type !== "cargo_ship" && v.type !== "fire_truck") {
-          for (const n of this.graph.nodes) {
-            if (n.bottleneckWeight > 0 && Math.hypot(v.x - n.x, v.z - n.z) < 5.5) {
+        if (this.bottleneckNodes.length > 0 && v.type !== "cargo_ship" && v.type !== "fire_truck") {
+          for (const n of this.bottleneckNodes) {
+            if (Math.hypot(v.x - n.x, v.z - n.z) < 5.5) {
               const load = nodeLoad.get(n.id) ?? 1;
               if (load >= 2 || n.bottleneckWeight >= 1.4) {
                 localSpeed *= 0.35;

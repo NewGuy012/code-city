@@ -67,6 +67,75 @@ export function EconomyBar({
   const advisorsOpen = openPopover === "advisors";
   const utilitiesOpen = openPopover === "utilities";
 
+  const utilityItems = [
+    {
+      testId: "open-health-btn",
+      icon: <Award className="h-3.5 w-3.5 text-amber-300" />,
+      label: "City Report & Export",
+      right: (
+        <span className="rounded bg-white/10 px-1.5 py-0.5 font-mono text-[10px] font-bold text-amber-300">
+          {grade}
+        </span>
+      ),
+      onClick: () => {
+        onClosePopover();
+        onOpenHealthModal();
+      },
+    },
+    {
+      testId: "start-tour-btn",
+      icon: <Compass className="h-3.5 w-3.5 text-emerald-300" />,
+      label: "Mayor's Guided Tour",
+      right: tourActive ? (
+        <span className="rounded bg-emerald-500/20 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-300">
+          Active
+        </span>
+      ) : null,
+      onClick: () => {
+        onClosePopover();
+        onStartTour();
+      },
+    },
+    {
+      testId: "toggle-sound-btn",
+      icon: soundEnabled ? (
+        <Volume2 className="h-3.5 w-3.5 text-emerald-300" />
+      ) : (
+        <VolumeX className="h-3.5 w-3.5 text-slate-400" />
+      ),
+      label: "City Audio SFX",
+      right: <span className="text-[11px] text-slate-400">{soundEnabled ? "On" : "Muted"}</span>,
+      onClick: onToggleSound,
+    },
+    {
+      icon: <Map className="h-3.5 w-3.5 text-sky-300" />,
+      label: radarOpen ? "Hide Radar" : "Show Radar",
+      right: (
+        <kbd className="rounded bg-white/[0.07] px-1.5 py-0.5 font-mono text-[10px] text-slate-400">
+          M
+        </kbd>
+      ),
+      onClick: () => {
+        onClosePopover();
+        onToggleRadar();
+      },
+    },
+    {
+      testId: "toggle-zen-btn",
+      icon: <EyeOff className="h-3.5 w-3.5 text-slate-300" />,
+      label: "Zen Mode (Hide UI)",
+      right: (
+        <kbd className="rounded bg-white/[0.07] px-1.5 py-0.5 font-mono text-[10px] text-slate-400">
+          H
+        </kbd>
+      ),
+      onClick: () => {
+        onClosePopover();
+        onToggleZenMode();
+      },
+    },
+  ];
+
   return (
     <div
       data-testid="economy-bar"
@@ -298,95 +367,21 @@ export function EconomyBar({
             data-testid="utilities-popover"
             className="sim-popover sim-scrollbar absolute top-full right-0 z-40 mt-2 max-h-[calc(var(--hud-vh,100vh)-5rem)] w-[min(16rem,calc(var(--hud-vw,100vw)-1.5rem))] overflow-y-auto rounded-2xl p-2 text-xs"
           >
-            <button
-              type="button"
-              data-testid="open-health-btn"
-              onClick={() => {
-                onClosePopover();
-                onOpenHealthModal();
-              }}
-              className="flex w-full items-center justify-between rounded-xl px-2.5 py-2 text-left text-slate-200 transition hover:bg-white/[0.07] hover:text-white"
-            >
-              <span className="flex items-center gap-2">
-                <Award className="h-3.5 w-3.5 text-amber-300" />
-                <span>City Report &amp; Export</span>
-              </span>
-              <span className="rounded bg-white/10 px-1.5 py-0.5 font-mono text-[10px] font-bold text-amber-300">
-                {grade}
-              </span>
-            </button>
-
-            <button
-              type="button"
-              data-testid="start-tour-btn"
-              onClick={() => {
-                onClosePopover();
-                onStartTour();
-              }}
-              className="flex w-full items-center justify-between rounded-xl px-2.5 py-2 text-left text-slate-200 transition hover:bg-white/[0.07] hover:text-white"
-            >
-              <span className="flex items-center gap-2">
-                <Compass className="h-3.5 w-3.5 text-emerald-300" />
-                <span>Mayor&apos;s Guided Tour</span>
-              </span>
-              {tourActive && (
-                <span className="rounded bg-emerald-500/20 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-300">
-                  Active
+            {utilityItems.map((item) => (
+              <button
+                key={item.label}
+                type="button"
+                data-testid={item.testId}
+                onClick={item.onClick}
+                className="flex w-full items-center justify-between rounded-xl px-2.5 py-2 text-left text-slate-200 transition hover:bg-white/[0.07] hover:text-white"
+              >
+                <span className="flex items-center gap-2">
+                  {item.icon}
+                  <span>{item.label}</span>
                 </span>
-              )}
-            </button>
-
-            <button
-              type="button"
-              data-testid="toggle-sound-btn"
-              onClick={onToggleSound}
-              className="flex w-full items-center justify-between rounded-xl px-2.5 py-2 text-left text-slate-200 transition hover:bg-white/[0.07] hover:text-white"
-            >
-              <span className="flex items-center gap-2">
-                {soundEnabled ? (
-                  <Volume2 className="h-3.5 w-3.5 text-emerald-300" />
-                ) : (
-                  <VolumeX className="h-3.5 w-3.5 text-slate-400" />
-                )}
-                <span>City Audio SFX</span>
-              </span>
-              <span className="text-[11px] text-slate-400">{soundEnabled ? "On" : "Muted"}</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => {
-                onClosePopover();
-                onToggleRadar();
-              }}
-              className="flex w-full items-center justify-between rounded-xl px-2.5 py-2 text-left text-slate-200 transition hover:bg-white/[0.07] hover:text-white"
-            >
-              <span className="flex items-center gap-2">
-                <Map className="h-3.5 w-3.5 text-sky-300" />
-                <span>{radarOpen ? "Hide Radar" : "Show Radar"}</span>
-              </span>
-              <kbd className="rounded bg-white/[0.07] px-1.5 py-0.5 font-mono text-[10px] text-slate-400">
-                M
-              </kbd>
-            </button>
-
-            <button
-              type="button"
-              data-testid="toggle-zen-btn"
-              onClick={() => {
-                onClosePopover();
-                onToggleZenMode();
-              }}
-              className="flex w-full items-center justify-between rounded-xl px-2.5 py-2 text-left text-slate-200 transition hover:bg-white/[0.07] hover:text-white"
-            >
-              <span className="flex items-center gap-2">
-                <EyeOff className="h-3.5 w-3.5 text-slate-300" />
-                <span>Zen Mode (Hide UI)</span>
-              </span>
-              <kbd className="rounded bg-white/[0.07] px-1.5 py-0.5 font-mono text-[10px] text-slate-400">
-                H
-              </kbd>
-            </button>
+                {item.right}
+              </button>
+            ))}
 
             <div className="mt-1.5 border-t border-white/10 px-2 pt-2 pb-1">
               <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-slate-500">

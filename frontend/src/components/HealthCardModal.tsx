@@ -51,6 +51,7 @@ export function HealthCardModal({
   const [changes, setChanges] = useState<AnnotationChangeEvent[]>([]);
   const [copied, copyText] = useCopyFeedback();
   const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
   const [exportOut, setExportOut] = useState<{
     output_dir: string;
     badge_url: string;
@@ -58,13 +59,26 @@ export function HealthCardModal({
   } | null>(null);
 
   useEffect(() => {
+    setExportOut(null);
+    setExportError(null);
+  }, [open, report?.owner, report?.repo]);
+
+  useEffect(() => {
     if (!open || isStaticMode) return;
+    let cancelled = false;
     void onFetchQuackSnippet()
-      .then(setQuackInfo)
+      .then((info) => {
+        if (!cancelled) setQuackInfo(info);
+      })
       .catch(() => {});
     void onFetchAnnotationChanges()
-      .then(setChanges)
+      .then((list) => {
+        if (!cancelled) setChanges(list);
+      })
       .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
   }, [isStaticMode, onFetchAnnotationChanges, onFetchQuackSnippet, open]);
 
   if (!open || !report) return null;
@@ -77,13 +91,59 @@ export function HealthCardModal({
 
   async function handleExport() {
     setExporting(true);
+    setExportError(null);
     try {
       const res = await onTriggerExport();
       setExportOut(res);
+    } catch (err) {
+      setExportError(err instanceof Error ? err.message : "Export failed");
     } finally {
       setExporting(false);
     }
   }
+
+  const summaryCards = [
+    {
+      label: "Health Score",
+      value: `${report.health_score.toFixed(1)}/100`,
+      tone: "text-emerald-300",
+    },
+    { label: "Greenbelt Tests", value: `${report.greenbelt_pct}%`, tone: "text-green-300" },
+    { label: "Lint Debt", value: String(report.total_lint_issues), tone: "text-purple-300" },
+    { label: "Bus Factor = 1", value: `${report.lone_keeper_files} hubs`, tone: "text-rose-300" },
+  ];
+
+  const tabs: Array<{
+    id: "report" | "quack" | "changelog";
+    label: string;
+    icon: typeof Award;
+    activeClass: string;
+    testId?: string;
+    liveOnly?: boolean;
+  }> = [
+    {
+      id: "report",
+      label: "City Postcard & Export",
+      icon: Award,
+      activeClass: "bg-amber-500/20 text-amber-300",
+    },
+    {
+      id: "quack",
+      label: "Attach via DuckDB CLI",
+      icon: Database,
+      activeClass: "bg-sky-500/20 text-sky-300",
+      testId: "tab-quack-cli",
+      liveOnly: true,
+    },
+    {
+      id: "changelog",
+      label: `Mayor Feed (${changes.length || annotations.length})`,
+      icon: History,
+      activeClass: "bg-emerald-500/20 text-emerald-300",
+      testId: "tab-table-changes",
+      liveOnly: true,
+    },
+  ];
 
   return (
     <ModalShell
@@ -100,78 +160,39 @@ export function HealthCardModal({
       onClose={onClose}
     >
       <div className="flex items-center gap-2 border-b border-slate-800 px-6 py-2 text-xs">
-        <button
-          type="button"
-          onClick={() => setTab("report")}
-          className={`flex items-center gap-1.5 rounded-xl px-3 py-1.5 font-semibold transition ${
-            tab === "report"
-              ? "bg-amber-500/20 text-amber-300"
-              : "text-slate-400 hover:bg-slate-800 hover:text-white"
-          }`}
-        >
-          <Award className="h-3.5 w-3.5" />
-          <span>City Postcard &amp; Export</span>
-        </button>
-        {!isStaticMode && (
-          <>
-            <button
-              type="button"
-              data-testid="tab-quack-cli"
-              onClick={() => setTab("quack")}
-              className={`flex items-center gap-1.5 rounded-xl px-3 py-1.5 font-semibold transition ${
-                tab === "quack"
-                  ? "bg-sky-500/20 text-sky-300"
-                  : "text-slate-400 hover:bg-slate-800 hover:text-white"
-              }`}
-            >
-              <Database className="h-3.5 w-3.5" />
-              <span>Attach via DuckDB CLI</span>
-            </button>
-            <button
-              type="button"
-              data-testid="tab-table-changes"
-              onClick={() => setTab("changelog")}
-              className={`flex items-center gap-1.5 rounded-xl px-3 py-1.5 font-semibold transition ${
-                tab === "changelog"
-                  ? "bg-emerald-500/20 text-emerald-300"
-                  : "text-slate-400 hover:bg-slate-800 hover:text-white"
-              }`}
-            >
-              <History className="h-3.5 w-3.5" />
-              <span>Mayor Feed ({changes.length || annotations.length})</span>
-            </button>
-          </>
-        )}
+        {tabs
+          .filter((t) => !t.liveOnly || !isStaticMode)
+          .map((t) => {
+            const Icon = t.icon;
+            return (
+              <button
+                key={t.id}
+                type="button"
+                data-testid={t.testId}
+                onClick={() => setTab(t.id)}
+                className={`flex items-center gap-1.5 rounded-xl px-3 py-1.5 font-semibold transition ${
+                  tab === t.id
+                    ? t.activeClass
+                    : "text-slate-400 hover:bg-slate-800 hover:text-white"
+                }`}
+              >
+                <Icon className="h-3.5 w-3.5" />
+                <span>{t.label}</span>
+              </button>
+            );
+          })}
       </div>
 
       <div className="flex-1 space-y-4 overflow-y-auto px-6 py-4 text-xs">
         {tab === "report" && (
           <>
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-              <div className="rounded-2xl bg-slate-900/90 p-3">
-                <div className="text-[10px] uppercase text-slate-400">Health Score</div>
-                <div className="mt-0.5 font-mono text-lg font-bold text-emerald-300">
-                  {report.health_score.toFixed(1)}/100
+              {summaryCards.map((c) => (
+                <div key={c.label} className="rounded-2xl bg-slate-900/90 p-3">
+                  <div className="text-[10px] uppercase text-slate-400">{c.label}</div>
+                  <div className={`mt-0.5 font-mono text-lg font-bold ${c.tone}`}>{c.value}</div>
                 </div>
-              </div>
-              <div className="rounded-2xl bg-slate-900/90 p-3">
-                <div className="text-[10px] uppercase text-slate-400">Greenbelt Tests</div>
-                <div className="mt-0.5 font-mono text-lg font-bold text-green-300">
-                  {report.greenbelt_pct}%
-                </div>
-              </div>
-              <div className="rounded-2xl bg-slate-900/90 p-3">
-                <div className="text-[10px] uppercase text-slate-400">Lint Debt</div>
-                <div className="mt-0.5 font-mono text-lg font-bold text-purple-300">
-                  {report.total_lint_issues}
-                </div>
-              </div>
-              <div className="rounded-2xl bg-slate-900/90 p-3">
-                <div className="text-[10px] uppercase text-slate-400">Bus Factor = 1</div>
-                <div className="mt-0.5 font-mono text-lg font-bold text-rose-300">
-                  {report.lone_keeper_files} hubs
-                </div>
-              </div>
+              ))}
             </div>
 
             {/* Language Zoning Breakdown */}
@@ -241,6 +262,12 @@ export function HealthCardModal({
                     <span>{exporting ? "Exporting..." : "Export Static + Postcard"}</span>
                   </button>
                 </div>
+
+                {exportError && (
+                  <div className="mt-3 rounded-xl border border-rose-500/35 bg-rose-950/40 px-3 py-2 text-[11px] text-rose-200">
+                    {exportError}
+                  </div>
+                )}
 
                 {exportOut && (
                   <div className="mt-3 space-y-2 rounded-xl bg-slate-950/80 p-3">
