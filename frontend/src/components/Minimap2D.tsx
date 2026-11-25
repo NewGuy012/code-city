@@ -1,17 +1,20 @@
 import { X } from "lucide-react";
-import { useEffect, useRef } from "react";
+import { memo, useCallback, useEffect, useRef } from "react";
 
 import { cameraStore, useCameraStore } from "../city/cameraStore";
 import { ZONE_PALETTES } from "../city/cityTheme";
 import type { SimVehicleRender } from "../city/isoRenderer2D";
+import type { CitySimulationEngine } from "../game/simEngine";
 import type { District, FileMetric } from "../types/city";
 
 interface Minimap2DProps {
   districts: District[];
   files: FileMetric[];
+  sim?: CitySimulationEngine;
+  showTraffic?: boolean;
   vehicles?: SimVehicleRender[];
-  fireFiles?: Set<string>;
-  blackoutFiles?: Set<string>;
+  fireFiles?: ReadonlySet<string>;
+  blackoutFiles?: ReadonlySet<string>;
   onClose?: () => void;
 }
 
@@ -22,9 +25,15 @@ const WORLD_D = 112;
 const WORLD_X0 = -4;
 const WORLD_Z0 = -4;
 
-export function Minimap2D({
+function isAmbientVehicle(type: SimVehicleRender["type"]): boolean {
+  return type === "request_car" || type === "cycle_car" || type === "cargo_ship";
+}
+
+export const Minimap2D = memo(function Minimap2D({
   districts,
   files,
+  sim,
+  showTraffic = false,
   vehicles = [],
   fireFiles,
   blackoutFiles,
@@ -34,11 +43,39 @@ export function Minimap2D({
   const draggingRef = useRef(false);
   const cam = useCameraStore();
 
-  useEffect(() => {
+  const latestRef = useRef({
+    districts,
+    files,
+    sim,
+    showTraffic,
+    vehicles,
+    fireFiles,
+    blackoutFiles,
+    cam,
+  });
+  latestRef.current = {
+    districts,
+    files,
+    sim,
+    showTraffic,
+    vehicles,
+    fireFiles,
+    blackoutFiles,
+    cam,
+  };
+
+  const drawRadar = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
+
+    const cur = latestRef.current;
+    const frame = cur.sim?.getRenderFrame();
+    const activeVehicles = frame ? frame.vehicles : cur.vehicles;
+    const activeFires = frame ? frame.fireFiles : cur.fireFiles;
+    const activeBlackouts = frame ? frame.blackoutFiles : cur.blackoutFiles;
+    const curCam = cur.cam;
 
     const sx = (wx: number) => ((wx - WORLD_X0) / WORLD_W) * MAP_W;
     const sy = (wz: number) => ((wz - WORLD_Z0) / WORLD_D) * MAP_H;
@@ -74,7 +111,7 @@ export function Minimap2D({
     ctx.stroke();
 
     // Districts
-    for (const d of districts) {
+    for (const d of cur.districts) {
       const zStyle = ZONE_PALETTES[d.zone_type];
       const col = zStyle?.border ?? "#94a3b8";
       ctx.fillStyle = zStyle ? `${zStyle.ground}cc` : `${col}33`;
@@ -89,11 +126,11 @@ export function Minimap2D({
     }
 
     // Buildings & disaster pings
-    for (const f of files) {
+    for (const f of cur.files) {
       const bx = sx(f.layout_x + f.layout_w * 0.5);
       const by = sy(f.layout_z + f.layout_d * 0.5);
-      const isFire = fireFiles?.has(f.file_path);
-      const isBlackout = blackoutFiles?.has(f.file_path);
+      const isFire = activeFires?.has(f.file_path);
+      const isBlackout = activeBlackouts?.has(f.file_path);
       if (isFire || isBlackout) {
         ctx.beginPath();
         ctx.arc(bx, by, 4.5, 0, Math.PI * 2);
@@ -112,16 +149,19 @@ export function Minimap2D({
     }
 
     // Vehicles
-    for (const v of vehicles.slice(0, 60)) {
+    let drawn = 0;
+    for (const v of activeVehicles) {
+      if (!cur.showTraffic && isAmbientVehicle(v.type)) continue;
       ctx.fillStyle = v.jammed ? "#ef4444" : "#38bdf8";
       ctx.fillRect(sx(v.x) - 0.8, sy(v.z) - 0.8, 1.8, 1.8);
+      if (++drawn >= 60) break;
     }
 
     // Camera viewport box
-    const viewSpanW = Math.min(WORLD_W, 95 / Math.max(0.35, cam.zoom));
-    const viewSpanD = Math.min(WORLD_D, 66 / Math.max(0.35, cam.zoom));
-    const vx = sx(cam.targetX - viewSpanW * 0.5);
-    const vy = sy(cam.targetZ - viewSpanD * 0.5);
+    const viewSpanW = Math.min(WORLD_W, 95 / Math.max(0.35, curCam.zoom));
+    const viewSpanD = Math.min(WORLD_D, 66 / Math.max(0.35, curCam.zoom));
+    const vx = sx(curCam.targetX - viewSpanW * 0.5);
+    const vy = sy(curCam.targetZ - viewSpanD * 0.5);
     const vw = (viewSpanW / WORLD_W) * MAP_W;
     const vh = (viewSpanD / WORLD_D) * MAP_H;
     ctx.strokeStyle = "#fde047";
@@ -129,15 +169,24 @@ export function Minimap2D({
     ctx.strokeRect(vx, vy, vw, vh);
 
     // Compass heading arrow at target center
-    const cx = sx(cam.targetX);
-    const cy = sy(cam.targetZ);
+    const cx = sx(curCam.targetX);
+    const cy = sy(curCam.targetZ);
     ctx.beginPath();
     ctx.moveTo(cx, cy);
-    ctx.lineTo(cx - Math.sin(cam.yaw) * 8, cy - Math.cos(cam.yaw) * 8);
+    ctx.lineTo(cx - Math.sin(curCam.yaw) * 8, cy - Math.cos(curCam.yaw) * 8);
     ctx.strokeStyle = "#38bdf8";
     ctx.lineWidth = 1.5;
     ctx.stroke();
-  }, [blackoutFiles, cam, districts, files, fireFiles, vehicles]);
+  }, []);
+
+  useEffect(() => {
+    drawRadar();
+  }, [blackoutFiles, cam, districts, drawRadar, files, fireFiles, showTraffic, vehicles]);
+
+  useEffect(() => {
+    if (!sim) return;
+    return sim.subscribeRender(drawRadar);
+  }, [drawRadar, sim]);
 
   function jumpToClientPos(clientX: number, clientY: number) {
     const canvas = canvasRef.current;
@@ -196,4 +245,4 @@ export function Minimap2D({
       />
     </div>
   );
-}
+});

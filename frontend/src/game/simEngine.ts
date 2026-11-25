@@ -55,6 +55,13 @@ export interface SimVehicle extends SimVehicleRender {
   targetFile?: string;
 }
 
+export interface SimRenderFrame {
+  vehicles: readonly SimVehicleRender[];
+  fireFiles: ReadonlySet<string>;
+  blackoutFiles: ReadonlySet<string>;
+  floatingPopups: readonly FloatingStatPopup[];
+}
+
 export interface SimStateSnapshot {
   tick: number;
   speed: SimSpeed;
@@ -120,20 +127,81 @@ export class CitySimulationEngine {
   private floatingPopups: FloatingStatPopup[] = [];
   private nextId = 1;
 
+  private hudVersion = 0;
+  private fireSnapVersion = 0;
+  private cachedFireSnapVersion = -1;
+  private cachedFireSnap = new Set<string>();
+  private blackoutSnapVersion = 0;
+  private cachedBlackoutSnapVersion = -1;
+  private cachedBlackoutSnap = new Set<string>();
+  private renderListeners = new Set<() => void>();
+
+  subscribeRender(fn: () => void): () => void {
+    this.renderListeners.add(fn);
+    return () => {
+      this.renderListeners.delete(fn);
+    };
+  }
+
+  private emitRender(): void {
+    for (const fn of this.renderListeners) {
+      fn();
+    }
+  }
+
+  private getStableFireFiles(): Set<string> {
+    if (this.cachedFireSnapVersion !== this.fireSnapVersion) {
+      this.cachedFireSnap = new Set(this.fireFiles);
+      this.cachedFireSnapVersion = this.fireSnapVersion;
+    }
+    return this.cachedFireSnap;
+  }
+
+  private getStableBlackoutFiles(): Set<string> {
+    if (this.cachedBlackoutSnapVersion !== this.blackoutSnapVersion) {
+      this.cachedBlackoutSnap = new Set<string>([...this.blackoutFiles, ...this.brownoutFiles]);
+      this.cachedBlackoutSnapVersion = this.blackoutSnapVersion;
+    }
+    return this.cachedBlackoutSnap;
+  }
+
+  getHudVersion(): number {
+    return this.hudVersion;
+  }
+
+  getRenderFrame(): SimRenderFrame {
+    return {
+      vehicles: this.vehicles,
+      fireFiles: this.getStableFireFiles(),
+      blackoutFiles: this.getStableBlackoutFiles(),
+      floatingPopups: this.floatingPopups,
+    };
+  }
+
   getSpeed(): SimSpeed {
     return this.speed;
   }
 
   setSpeed(speed: SimSpeed): void {
-    this.speed = speed;
+    if (this.speed !== speed) {
+      this.speed = speed;
+      this.hudVersion += 1;
+    }
   }
 
   clearMilestoneEvent(): void {
-    this.milestoneEvent = null;
+    if (this.milestoneEvent !== null) {
+      this.milestoneEvent = null;
+      this.hudVersion += 1;
+    }
   }
 
   addVelocity(amount: number): void {
-    this.velocityTreasury = Math.max(0, Math.round(this.velocityTreasury + amount));
+    const next = Math.max(0, Math.round(this.velocityTreasury + amount));
+    if (next !== this.velocityTreasury) {
+      this.velocityTreasury = next;
+      this.hudVersion += 1;
+    }
   }
 
   spawnFloatingPopup(x: number, z: number, text: string, color = "#4ade80"): void {
@@ -145,6 +213,7 @@ export class CitySimulationEngine {
       color,
       progress: 0,
     });
+    this.emitRender();
   }
 
   private ensureGraph(bundle: CitySnapshotBundle): void {
@@ -185,12 +254,17 @@ export class CitySimulationEngine {
 
   reset(): void {
     this.clearDisaster();
-    this.brownoutFiles.clear();
+    if (this.brownoutFiles.size > 0) {
+      this.brownoutFiles.clear();
+      this.blackoutSnapVersion += 1;
+    }
     this.floatingPopups = [];
     this.vehicles = [];
     this.graph = null;
     this.bottleneckNodes = [];
     this.lastBundle = null;
+    this.hudVersion += 1;
+    this.emitRender();
   }
 
   private seedTraffic(bundle: CitySnapshotBundle): void {
@@ -333,6 +407,7 @@ export class CitySimulationEngine {
       loop: false,
       targetFile: targetFile.file_path,
     });
+    this.emitRender();
   }
 
   triggerPowerOutage(
@@ -347,6 +422,7 @@ export class CitySimulationEngine {
         this.blackoutFiles.add(fp);
       }
     }
+    this.blackoutSnapVersion += 1;
     this.activeDisaster = {
       kind: "power_outage",
       title: "Cascading Power Outage",
@@ -355,10 +431,13 @@ export class CitySimulationEngine {
       startedTick: this.tickCount,
       resolved: false,
     };
+    this.hudVersion += 1;
+    this.emitRender();
   }
 
   triggerBusFactorVacation(authorLabel: string, affectedFiles: string[]): void {
     this.blackoutFiles = new Set(affectedFiles);
+    this.blackoutSnapVersion += 1;
     this.activeDisaster = {
       kind: "bus_factor_vacation",
       title: `Bus Factor Vacation: ${authorLabel}`,
@@ -367,6 +446,8 @@ export class CitySimulationEngine {
       startedTick: this.tickCount,
       resolved: affectedFiles.length === 0,
     };
+    this.hudVersion += 1;
+    this.emitRender();
   }
 
   triggerCrunchStorm(bundle: CitySnapshotBundle): void {
@@ -386,6 +467,7 @@ export class CitySimulationEngine {
         this.dispatchServiceUnit("fire_truck", f, bundle);
       }
     }
+    this.fireSnapVersion += 1;
     this.activeDisaster = {
       kind: "crunch_storm",
       title: "Release Crunch Storm",
@@ -394,6 +476,8 @@ export class CitySimulationEngine {
       startedTick: this.tickCount,
       resolved: this.fireFiles.size === 0,
     };
+    this.hudVersion += 1;
+    this.emitRender();
   }
 
   triggerSupplyDockStorm(depName: string, bundle: CitySnapshotBundle): void {
@@ -406,6 +490,7 @@ export class CitySimulationEngine {
       )
       .slice(0, 6);
     this.blackoutFiles = new Set(harborAndVault.map((f) => f.file_path));
+    this.blackoutSnapVersion += 1;
     this.activeDisaster = {
       kind: "supply_dock_storm",
       title: `Supply Dock Storm: ${depName}`,
@@ -414,16 +499,34 @@ export class CitySimulationEngine {
       startedTick: this.tickCount,
       resolved: false,
     };
+    this.hudVersion += 1;
+    this.emitRender();
   }
 
   clearDisaster(): void {
-    this.fireFiles.clear();
-    this.blackoutFiles.clear();
+    const hadFire = this.fireFiles.size > 0;
+    const hadBlackout = this.blackoutFiles.size > 0;
+    const hadDisaster = this.activeDisaster !== null;
+    if (hadFire) {
+      this.fireFiles.clear();
+      this.fireSnapVersion += 1;
+    }
+    if (hadBlackout) {
+      this.blackoutFiles.clear();
+      this.blackoutSnapVersion += 1;
+    }
     this.activeDisaster = null;
+    if (hadFire || hadBlackout || hadDisaster) {
+      this.hudVersion += 1;
+      this.emitRender();
+    }
   }
 
   clearFloatingPopups(): void {
-    this.floatingPopups = [];
+    if (this.floatingPopups.length > 0) {
+      this.floatingPopups = [];
+      this.emitRender();
+    }
   }
 
   private advanceVehicles(): void {
@@ -474,6 +577,8 @@ export class CitySimulationEngine {
           remainingVehicles.push(v);
         } else if (v.type === "fire_truck" && v.targetFile && this.fireFiles.has(v.targetFile)) {
           this.fireFiles.delete(v.targetFile);
+          this.fireSnapVersion += 1;
+          this.hudVersion += 1;
           this.spawnFloatingPopup(v.x, v.z, "🔥 Fire Contained", "#4ade80");
           if (this.fireFiles.size === 0 && this.activeDisaster?.kind === "crunch_storm") {
             this.activeDisaster = { ...this.activeDisaster, resolved: true };
@@ -489,11 +594,19 @@ export class CitySimulationEngine {
     this.vehicles = remainingVehicles;
   }
 
+  /** Advance ambient traffic without building a full snapshot or bumping HUD state. */
+  stepAmbient(bundle: CitySnapshotBundle): void {
+    this.ensureGraph(bundle);
+    this.advanceVehicles();
+    this.emitRender();
+  }
+
   step(bundle: CitySnapshotBundle, options?: { ambientOnly?: boolean }): SimStateSnapshot {
     this.ensureGraph(bundle);
 
     if (options?.ambientOnly) {
       this.advanceVehicles();
+      this.emitRender();
       return this.getSnapshot();
     }
 
@@ -545,11 +658,23 @@ export class CitySimulationEngine {
       this.happiness = Math.round((this.happiness * 0.85 + targetHappiness * 0.15) * 10) / 10;
 
       // Brownouts when overloaded hubs push happiness below 52
-      this.brownoutFiles.clear();
-      if (this.happiness < 54) {
-        for (const fp of this.graph?.bottleneckFilePaths ?? []) {
-          this.brownoutFiles.add(fp);
+      const nextBrownouts = this.happiness < 54 ? (this.graph?.bottleneckFilePaths ?? null) : null;
+      const nextSize = nextBrownouts ? nextBrownouts.size : 0;
+      let brownoutChanged = nextSize !== this.brownoutFiles.size;
+      if (!brownoutChanged && nextBrownouts) {
+        for (const fp of nextBrownouts) {
+          if (!this.brownoutFiles.has(fp)) {
+            brownoutChanged = true;
+            break;
+          }
         }
+      }
+      if (brownoutChanged) {
+        this.brownoutFiles.clear();
+        if (nextBrownouts) {
+          for (const fp of nextBrownouts) this.brownoutFiles.add(fp);
+        }
+        this.blackoutSnapVersion += 1;
       }
 
       const nextLevel = computeCityMilestone(
@@ -567,6 +692,8 @@ export class CitySimulationEngine {
         this.milestoneEvent = nextLevel;
       }
       this.cityLevel = nextLevel;
+      this.hudVersion += 1;
+      this.emitRender();
     }
 
     return this.getSnapshot();
@@ -583,7 +710,6 @@ export class CitySimulationEngine {
   }
 
   getSnapshot(): SimStateSnapshot {
-    const effectiveBlackout = new Set<string>([...this.blackoutFiles, ...this.brownoutFiles]);
     return {
       tick: this.tickCount,
       speed: this.speed,
@@ -604,8 +730,8 @@ export class CitySimulationEngine {
         heading: v.heading,
         jammed: v.jammed,
       })),
-      fireFiles: new Set(this.fireFiles),
-      blackoutFiles: effectiveBlackout,
+      fireFiles: this.getStableFireFiles(),
+      blackoutFiles: this.getStableBlackoutFiles(),
       activeDisaster: this.activeDisaster,
       floatingPopups: [...this.floatingPopups],
       milestoneEvent: this.milestoneEvent,

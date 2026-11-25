@@ -112,7 +112,7 @@ export function CameraControlsHUD({
     cam.timeOfDay !== "day" ||
     cam.cinematicOrbit ||
     Boolean(cam.followVehicleId) ||
-    !showTraffic ||
+    showTraffic ||
     bookmarks.length > 0;
 
   const rotationAxes = [

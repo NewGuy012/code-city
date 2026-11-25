@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 
+import type { CitySimulationEngine } from "../game/simEngine";
 import type {
   BlastRadiusResult,
   CochangePair,
@@ -34,18 +35,19 @@ interface CityCanvas2DProps {
   addedFiles: Set<string>;
   removedLots: GhostLot[];
   showTraffic: boolean;
-  vehicles?: SimVehicleRender[];
-  fireFiles?: Set<string>;
-  blackoutFiles?: Set<string>;
+  sim?: CitySimulationEngine;
+  vehicles?: readonly SimVehicleRender[];
+  fireFiles?: ReadonlySet<string>;
+  blackoutFiles?: ReadonlySet<string>;
   plazas?: Array<{ x: number; z: number; w: number; d: number; kind: string }>;
   streetLines?: { xLines: number[]; zLines: number[] };
-  floatingPopups?: FloatingStatPopup[];
+  floatingPopups?: readonly FloatingStatPopup[];
   activeTool?: string;
   onSelectFile: (filePath: string | null) => void;
   onToolAction?: (file: FileMetric) => void;
 }
 
-export function CityCanvas2D({
+export const CityCanvas2D = memo(function CityCanvas2D({
   districts,
   files,
   imports,
@@ -57,6 +59,7 @@ export function CityCanvas2D({
   addedFiles,
   removedLots,
   showTraffic,
+  sim,
   vehicles = [],
   fireFiles,
   blackoutFiles,
@@ -128,6 +131,7 @@ export function CityCanvas2D({
     addedFiles,
     removedLots,
     showTraffic,
+    sim,
     vehicles,
     fireFiles,
     blackoutFiles,
@@ -148,6 +152,7 @@ export function CityCanvas2D({
     addedFiles,
     removedLots,
     showTraffic,
+    sim,
     vehicles,
     fireFiles,
     blackoutFiles,
@@ -204,6 +209,7 @@ export function CityCanvas2D({
             ctx.save();
             ctx.scale(dpr, dpr);
             const cur = propsRef.current;
+            const simFrame = cur.sim?.getRenderFrame();
             hitsRef.current = renderCityScene({
               ctx,
               width: w,
@@ -223,12 +229,12 @@ export function CityCanvas2D({
               addedFiles: cur.addedFiles,
               removedLots: cur.removedLots,
               showTraffic: cur.showTraffic,
-              vehicles: cur.vehicles,
-              fireFiles: cur.fireFiles,
-              blackoutFiles: cur.blackoutFiles,
+              vehicles: simFrame ? simFrame.vehicles : cur.vehicles,
+              fireFiles: simFrame ? simFrame.fireFiles : cur.fireFiles,
+              blackoutFiles: simFrame ? simFrame.blackoutFiles : cur.blackoutFiles,
               plazas: cur.plazas,
               streetLines: cur.streetLines,
-              floatingPopups: cur.floatingPopups,
+              floatingPopups: simFrame ? simFrame.floatingPopups : cur.floatingPopups,
             });
             ctx.restore();
           }
@@ -462,4 +468,4 @@ export function CityCanvas2D({
       )}
     </div>
   );
-}
+});

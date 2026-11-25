@@ -1,8 +1,9 @@
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { Sky } from "three/examples/jsm/objects/Sky.js";
 
+import type { CitySimulationEngine } from "../game/simEngine";
 import type {
   BlastRadiusResult,
   CochangePair,
@@ -75,9 +76,11 @@ interface CityCanvas3DProps {
   selectedFile: string | null;
   blastRadius: BlastRadiusResult | null;
   activeTool?: string;
-  vehicles?: SimVehicleRender[];
-  fireFiles?: Set<string>;
-  blackoutFiles?: Set<string>;
+  showTraffic?: boolean;
+  sim?: CitySimulationEngine;
+  vehicles?: readonly SimVehicleRender[];
+  fireFiles?: ReadonlySet<string>;
+  blackoutFiles?: ReadonlySet<string>;
   plazas?: Array<{ x: number; z: number; w: number; d: number; kind: string }>;
   streetLines?: { xLines: number[]; zLines: number[] };
   onSelectFile: (filePath: string | null) => void;
@@ -229,9 +232,10 @@ interface SceneHandle {
   streetlightMat: THREE.MeshStandardMaterial | null;
   applyAtmosphere: (tod: TimeOfDay) => void;
   updateBuildingColors: () => void;
+  updateDynamicActors: () => void;
 }
 
-export default function CityCanvas3D({
+const CityCanvas3D = memo(function CityCanvas3D({
   districts,
   files,
   cochanges,
@@ -240,6 +244,8 @@ export default function CityCanvas3D({
   selectedFile,
   blastRadius,
   activeTool = "inspect",
+  showTraffic = false,
+  sim,
   vehicles = [],
   fireFiles,
   blackoutFiles,
@@ -263,6 +269,10 @@ export default function CityCanvas3D({
     dataMap,
     selectedFile,
     blastRadius,
+    showTraffic,
+    sim,
+    vehicles,
+    fireFiles,
     blackoutFiles,
     activeTool,
     onSelectFile,
@@ -273,6 +283,10 @@ export default function CityCanvas3D({
     dataMap,
     selectedFile,
     blastRadius,
+    showTraffic,
+    sim,
+    vehicles,
+    fireFiles,
     blackoutFiles,
     activeTool,
     onSelectFile,
@@ -499,6 +513,7 @@ export default function CityCanvas3D({
       },
       updateBuildingColors() {
         const cur = latestRef.current;
+        const simBlackouts = cur.sim?.getRenderFrame().blackoutFiles ?? cur.blackoutFiles;
         const impactedHop = buildImpactedHopMap(cur.blastRadius);
         const analytical = isAnalyticalDataMap(cur.dataMap);
         const color = new THREE.Color();
@@ -509,7 +524,7 @@ export default function CityCanvas3D({
             batch.uniforms.uDataMapMix.value = analytical ? 1.0 : 0.0;
           }
           batch.entries.forEach(({ file: f, part }, idx) => {
-            if (cur.blackoutFiles?.has(f.file_path)) {
+            if (simBlackouts?.has(f.file_path)) {
               color.set("#1e293b");
             } else if (part.role === "main" || part.role === "turf") {
               color.set(buildingColor3D(f, cur.dataMap, cur.selectedFile, impactedHop));
@@ -529,6 +544,61 @@ export default function CityCanvas3D({
           ? (cur.files.find((f) => f.file_path === cur.selectedFile) ?? null)
           : null;
         positionHighlightBox(selectedBox, selObj);
+      },
+      updateDynamicActors() {
+        const cur = latestRef.current;
+        const frame = cur.sim?.getRenderFrame();
+        const activeVehicles = frame ? frame.vehicles : cur.vehicles;
+        const activeFires = frame ? frame.fireFiles : cur.fireFiles;
+        const dummy = new THREE.Object3D();
+        const color = new THREE.Color();
+
+        let vCount = 0;
+        for (let i = 0; i < activeVehicles.length && vCount < MAX_VEHICLES; i++) {
+          const v = activeVehicles[i];
+          if (
+            !cur.showTraffic &&
+            (v.type === "request_car" || v.type === "cycle_car" || v.type === "cargo_ship")
+          ) {
+            continue;
+          }
+          const isShip = v.type === "cargo_ship";
+          dummy.position.set(v.x - WORLD_CENTER_X, isShip ? -0.15 : 0.14, v.z - WORLD_CENTER_Z);
+          dummy.rotation.set(0, -v.heading, 0);
+          dummy.scale.set(isShip ? 2.4 : 0.8, isShip ? 0.85 : 0.58, isShip ? 1.25 : 1.35);
+          dummy.updateMatrix();
+          vehiclesMesh.setMatrixAt(vCount, dummy.matrix);
+          const colHex =
+            v.type === "request_car" && !v.jammed
+              ? commuterCarColor(v.id)
+              : vehicleColor(v.type, v.jammed);
+          vehiclesMesh.setColorAt(vCount, color.set(colHex));
+          vCount++;
+        }
+        vehiclesMesh.count = vCount;
+        vehiclesMesh.instanceMatrix.needsUpdate = true;
+        if (vehiclesMesh.instanceColor) vehiclesMesh.instanceColor.needsUpdate = true;
+
+        let fCount = 0;
+        if (activeFires && activeFires.size > 0) {
+          const byPath = new Map(cur.files.map((f) => [f.file_path, f]));
+          for (const fp of activeFires) {
+            if (fCount >= MAX_FIRES) break;
+            const f = byPath.get(fp);
+            if (!f) continue;
+            dummy.position.set(
+              f.layout_x + f.layout_w * 0.5 - WORLD_CENTER_X,
+              buildingHeight3D(f) + 1.0,
+              f.layout_z + f.layout_d * 0.5 - WORLD_CENTER_Z,
+            );
+            dummy.rotation.set(0, 0, 0);
+            dummy.scale.set(1, 1, 1);
+            dummy.updateMatrix();
+            firesMesh.setMatrixAt(fCount++, dummy.matrix);
+          }
+        }
+        firesMesh.count = fCount;
+        firesMesh.instanceMatrix.needsUpdate = true;
       },
     };
     handleRef.current = handle;
@@ -1302,53 +1372,18 @@ export default function CityCanvas3D({
     handleRef.current?.updateBuildingColors();
   }, [blackoutFiles, blastRadius, dataMap, selectedFile]);
 
-  // Live simulation vehicles & fire markers
+  // Live simulation vehicles & fire markers (subscribed directly without App re-renders)
   useEffect(() => {
-    const h = handleRef.current;
-    if (!h) return;
-    const dummy = new THREE.Object3D();
-    const color = new THREE.Color();
+    handleRef.current?.updateDynamicActors();
+  }, [files, fireFiles, showTraffic, vehicles]);
 
-    const vCount = Math.min(MAX_VEHICLES, vehicles.length);
-    h.vehiclesMesh.count = vCount;
-    for (let i = 0; i < vCount; i++) {
-      const v = vehicles[i];
-      const isShip = v.type === "cargo_ship";
-      dummy.position.set(v.x - WORLD_CENTER_X, isShip ? -0.15 : 0.14, v.z - WORLD_CENTER_Z);
-      dummy.rotation.set(0, -v.heading, 0);
-      dummy.scale.set(isShip ? 2.4 : 0.8, isShip ? 0.85 : 0.58, isShip ? 1.25 : 1.35);
-      dummy.updateMatrix();
-      h.vehiclesMesh.setMatrixAt(i, dummy.matrix);
-      const colHex =
-        v.type === "request_car" && !v.jammed
-          ? commuterCarColor(v.id)
-          : vehicleColor(v.type, v.jammed);
-      h.vehiclesMesh.setColorAt(i, color.set(colHex));
-    }
-    h.vehiclesMesh.instanceMatrix.needsUpdate = true;
-    if (h.vehiclesMesh.instanceColor) h.vehiclesMesh.instanceColor.needsUpdate = true;
-
-    let fCount = 0;
-    if (fireFiles && fireFiles.size > 0) {
-      const byPath = new Map(files.map((f) => [f.file_path, f]));
-      for (const fp of fireFiles) {
-        if (fCount >= MAX_FIRES) break;
-        const f = byPath.get(fp);
-        if (!f) continue;
-        dummy.position.set(
-          f.layout_x + f.layout_w * 0.5 - WORLD_CENTER_X,
-          buildingHeight3D(f) + 1.0,
-          f.layout_z + f.layout_d * 0.5 - WORLD_CENTER_Z,
-        );
-        dummy.rotation.set(0, 0, 0);
-        dummy.scale.set(1, 1, 1);
-        dummy.updateMatrix();
-        h.firesMesh.setMatrixAt(fCount++, dummy.matrix);
-      }
-    }
-    h.firesMesh.count = fCount;
-    h.firesMesh.instanceMatrix.needsUpdate = true;
-  }, [files, fireFiles, vehicles]);
+  useEffect(() => {
+    if (!sim) return;
+    handleRef.current?.updateDynamicActors();
+    return sim.subscribeRender(() => {
+      handleRef.current?.updateDynamicActors();
+    });
+  }, [sim]);
 
   // Dashed co-change fault arcs (only when building selected or blast radius active)
   useEffect(() => {
@@ -1399,4 +1434,6 @@ export default function CityCanvas3D({
       )}
     </div>
   );
-}
+});
+
+export default CityCanvas3D;

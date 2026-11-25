@@ -95,12 +95,12 @@ export interface RenderCitySceneArgs {
   addedFiles: Set<string>;
   removedLots: GhostLot[];
   showTraffic: boolean;
-  vehicles?: SimVehicleRender[];
-  fireFiles?: Set<string>;
-  blackoutFiles?: Set<string>;
+  vehicles?: readonly SimVehicleRender[];
+  fireFiles?: ReadonlySet<string>;
+  blackoutFiles?: ReadonlySet<string>;
   plazas?: Array<{ x: number; z: number; w: number; d: number; kind: string }>;
   streetLines?: { xLines: number[]; zLines: number[] };
-  floatingPopups?: FloatingStatPopup[];
+  floatingPopups?: readonly FloatingStatPopup[];
 }
 
 export interface HitBuilding {
@@ -1216,10 +1216,16 @@ export function renderCityScene(args: RenderCitySceneArgs): HitBuilding[] {
     ctx.restore();
   }
 
-  if (showTraffic && vehicles.length > 0) {
+  if (vehicles.length > 0) {
     ctx.save();
     const flash = timeSec % 0.4 >= 0.2;
     for (const v of vehicles) {
+      if (
+        !showTraffic &&
+        (v.type === "request_car" || v.type === "cycle_car" || v.type === "cargo_ship")
+      ) {
+        continue;
+      }
       const p = proj.project(v.x, v.z, 0.35);
       if (atlas.ready && atlas.nature && v.type === "request_car" && zoom >= 0.6 && !v.jammed) {
         const carCol = hashFilePath(v.id) % 4;

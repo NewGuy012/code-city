@@ -72,6 +72,17 @@ export function App() {
   }
   const sim = simRef.current;
   const [simState, setSimState] = useState<SimStateSnapshot>(() => sim.getSnapshot());
+  const hudSimVersionRef = useRef(sim.getHudVersion());
+  const syncSimHud = useCallback(
+    (force = false, snapshot?: SimStateSnapshot) => {
+      const ver = sim.getHudVersion();
+      if (force || ver !== hudSimVersionRef.current) {
+        hudSimVersionRef.current = ver;
+        setSimState(snapshot ?? sim.getSnapshot());
+      }
+    },
+    [sim],
+  );
   const analyzeEsRef = useRef<EventSource | null>(null);
   const loadSeqRef = useRef(0);
 
@@ -86,7 +97,9 @@ export function App() {
   const [dataMap, setDataMap] = useState<DataMapMode>("living");
   const [viewMode, setViewMode] = useState<"2d" | "3d">("2d");
   const [appMode, setAppMode] = useState<AppMode>("explore");
-  const [showTraffic, setShowTraffic] = useState(true);
+  const [showTraffic, setShowTraffic] = useState(false);
+  const showTrafficRef = useRef(showTraffic);
+  showTrafficRef.current = showTraffic;
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
 
   const [activeTool, setActiveTool] = useState<MayorToolId>("inspect");
@@ -147,6 +160,9 @@ export function App() {
 
     const syncLoop = () => {
       const st = cameraStore.getState();
+      if (st.followVehicleId && !showTrafficRef.current) {
+        setShowTraffic(true);
+      }
       if ((st.cinematicOrbit || st.followVehicleId) && raf === 0) {
         last = performance.now();
         raf = requestAnimationFrame(tick);
@@ -161,15 +177,20 @@ export function App() {
     };
   }, [sim]);
 
-  // 10Hz traffic & city-health simulation loop (ambient traffic in Explore, full sim in Play)
+  // 10Hz traffic & city-health simulation loop (zero React re-renders in Explore mode)
   useEffect(() => {
     if (!effectiveBundle) return;
     const ambientOnly = appMode === "explore";
-    setSimState(sim.step(effectiveBundle, { ambientOnly }));
     if (ambientOnly && !showTraffic) return;
+    if (ambientOnly) {
+      sim.stepAmbient(effectiveBundle);
+    } else {
+      syncSimHud(false, sim.step(effectiveBundle));
+    }
     const timer = setInterval(() => {
+      if (typeof document !== "undefined" && document.hidden) return;
       if (ambientOnly) {
-        setSimState(sim.step(effectiveBundle, { ambientOnly: true }));
+        sim.stepAmbient(effectiveBundle);
         return;
       }
       const spd = sim.getSpeed();
@@ -178,10 +199,10 @@ export function App() {
       for (let extra = 1; extra < spd; extra++) {
         next = sim.step(effectiveBundle);
       }
-      setSimState(next);
+      syncSimHud(false, next);
     }, 100);
     return () => clearInterval(timer);
-  }, [appMode, effectiveBundle, showTraffic, sim]);
+  }, [appMode, effectiveBundle, showTraffic, sim, syncSimHud]);
 
   const [blastRadius, setBlastRadius] = useState<BlastRadiusResult | null>(null);
   const [fileDiagnostics, setFileDiagnostics] = useState<LintDiagnostic[]>([]);
@@ -236,11 +257,11 @@ export function App() {
         sim.clearDisaster();
         sim.clearMilestoneEvent();
         sim.clearFloatingPopups();
-        setSimState(sim.getSnapshot());
+        syncSimHud(true);
       }
       setAppMode(nextMode);
     },
-    [appMode, sim],
+    [appMode, sim, syncSimHud],
   );
 
   const handleCanvasSelectFile = useCallback((filePath: string | null) => {
@@ -346,7 +367,7 @@ export function App() {
         if (seq !== loadSeqRef.current) return;
         const latest = snaps[snaps.length - 1]?.snapshot_idx ?? 0;
         sim.reset();
-        setSimState(sim.getSnapshot());
+        syncSimHud(true);
         setSnapshots(snaps);
         setSnapshotIdx(latest);
         setAnnotations(notes);
@@ -368,7 +389,7 @@ export function App() {
         }
       }
     },
-    [client, sim],
+    [client, sim, syncSimHud],
   );
 
   // Boot: detect Static Export vs Live Studio
@@ -440,6 +461,7 @@ export function App() {
   useEffect(() => {
     if (!isPlayingTime || snapshots.length <= 1) return;
     const timer = setInterval(() => {
+      if (typeof document !== "undefined" && document.hidden) return;
       setSnapshotIdx((cur) => {
         const pos = snapshots.findIndex((s) => s.snapshot_idx === cur);
         return snapshots[(pos + 1) % snapshots.length].snapshot_idx;
@@ -629,7 +651,7 @@ export function App() {
       };
       sim.spawnFloatingPopup(cx, cz, badgeMap[tool], tool === "bulldozer" ? "#fda4af" : "#4ade80");
       soundEngine.playTool(tool);
-      setSimState(sim.getSnapshot());
+      syncSimHud(true);
       if (!liveMode) {
         setToastMsg(`${summaryMap[tool]} (Sandbox)`);
       }
@@ -646,6 +668,7 @@ export function App() {
       liveMode,
       pendingTransitStart,
       sim,
+      syncSimHud,
     ],
   );
 
@@ -737,6 +760,7 @@ export function App() {
       return;
     }
     const timer = setInterval(() => {
+      if (typeof document !== "undefined" && document.hidden) return;
       setTourStep((prev) => {
         const next = (prev + 1) % tourStops.length;
         const stop = tourStops[next];
@@ -837,9 +861,9 @@ export function App() {
       if (appMode !== "play") return;
       action();
       soundEngine.playDisaster();
-      setSimState(sim.getSnapshot());
+      syncSimHud(true);
     },
-    [appMode, sim],
+    [appMode, syncSimHud],
   );
 
   const activeToolMeta =
@@ -864,10 +888,9 @@ export function App() {
             addedFiles={addedFiles}
             removedLots={removedLots}
             showTraffic={showTraffic}
-            vehicles={simState.vehicles}
+            sim={sim}
             fireFiles={simState.fireFiles}
             blackoutFiles={simState.blackoutFiles}
-            floatingPopups={simState.floatingPopups}
             plazas={streetGrid.plazas}
             streetLines={streetGrid}
             activeTool={activeTool}
@@ -891,7 +914,8 @@ export function App() {
               dataMap={dataMap}
               selectedFile={selectedFile}
               blastRadius={blastRadius}
-              vehicles={simState.vehicles}
+              showTraffic={showTraffic}
+              sim={sim}
               fireFiles={simState.fireFiles}
               blackoutFiles={simState.blackoutFiles}
               plazas={streetGrid.plazas}
@@ -1002,7 +1026,7 @@ export function App() {
                       onClosePopover={closePopover}
                       onChangeSpeed={(spd: SimSpeed) => {
                         sim.setSpeed(spd);
-                        setSimState(sim.getSnapshot());
+                        syncSimHud(true);
                       }}
                       onOpenAdvisors={() => setAdvisorsOpen(true)}
                       onOpenDisasters={() => {
@@ -1096,7 +1120,7 @@ export function App() {
                         type="button"
                         onClick={() => {
                           sim.clearDisaster();
-                          setSimState(sim.getSnapshot());
+                          syncSimHud(true);
                         }}
                         className="rounded-lg bg-rose-500/30 px-2.5 py-0.5 text-[11px] font-semibold text-white hover:bg-rose-500/50"
                       >
@@ -1245,7 +1269,8 @@ export function App() {
                   <Minimap2D
                     districts={effectiveBundle?.districts ?? bundle.districts}
                     files={effectiveBundle?.files ?? bundle.files}
-                    vehicles={simState.vehicles}
+                    sim={sim}
+                    showTraffic={showTraffic}
                     fireFiles={simState.fireFiles}
                     blackoutFiles={simState.blackoutFiles}
                     onClose={() => setRadarOpen(false)}
@@ -1297,7 +1322,7 @@ export function App() {
             sim.addVelocity(m.rewardVelocity);
             sim.spawnFloatingPopup(70, 52, `+${m.rewardVelocity} Velocity!`, "#fde047");
             soundEngine.playMilestone();
-            setSimState(sim.getSnapshot());
+            syncSimHud(true);
             setToastMsg(`Quest Completed: ${m.title} (+${m.rewardVelocity} Velocity)`);
           }}
           onFocusFile={handleFocusFile}
@@ -1333,7 +1358,7 @@ export function App() {
           }}
           onClearDisasters={() => {
             sim.clearDisaster();
-            setSimState(sim.getSnapshot());
+            syncSimHud(true);
           }}
           onClose={closeDisastersModal}
         />

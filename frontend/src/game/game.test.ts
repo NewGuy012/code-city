@@ -342,4 +342,34 @@ describe("CodeCity simulation & Mayor sandbox", () => {
     expect(latest.sprintNumber).toBe(2);
     expect(latest.velocityTreasury).not.toBe(first.velocityTreasury);
   });
+
+  test("simEngine keeps stable disaster Set refs and notifies render subscribers without HUD churn", () => {
+    const bundle = makeTestBundle();
+    const engine = new CitySimulationEngine();
+    let renderCount = 0;
+    const unsub = engine.subscribeRender(() => {
+      renderCount++;
+    });
+
+    const hudV0 = engine.getHudVersion();
+    engine.stepAmbient(bundle);
+    const frame1 = engine.getRenderFrame();
+    engine.stepAmbient(bundle);
+    const frame2 = engine.getRenderFrame();
+
+    expect(renderCount).toBe(2);
+    expect(engine.getHudVersion()).toBe(hudV0);
+    expect(frame1.fireFiles).toBe(frame2.fireFiles);
+    expect(frame1.blackoutFiles).toBe(frame2.blackoutFiles);
+
+    engine.triggerPowerOutage("core/hub.py", ["api/routes.py"], new Set());
+    const snapA = engine.getSnapshot();
+    const snapB = engine.getSnapshot();
+    expect(snapA.blackoutFiles).toBe(snapB.blackoutFiles);
+    expect(engine.getHudVersion()).toBeGreaterThan(hudV0);
+
+    unsub();
+    engine.stepAmbient(bundle);
+    expect(renderCount).toBe(3);
+  });
 });
