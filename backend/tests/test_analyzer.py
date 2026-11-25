@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
-from codecity.analyzer.git_history import resolve_git_repo
+from codecity.analyzer.git_history import resolve_git_repo, select_keyframes
 from codecity.analyzer.layout import CITY_CANVAS_D, CITY_CANVAS_W, compute_stable_city_layout
 from codecity.analyzer.pipeline import analyze_repository
+from codecity.analyzer.plugins.typescript import TypeScriptPlugin
 from codecity.analyzer.treesitter_core import scan_worktree_ast
 from codecity.models import BuildingArchetype, ZoneType
 from codecity.storage.lakehouse import LakehouseManager
@@ -146,6 +148,32 @@ def test_worktree_scanner_skips_symlinks_and_remote_rejects_local_urls(tmp_path:
         "http://127.0.0.1:8787/repo.git",
         "https://localhost/a/b.git",
         "http://169.254.169.254/x",
+        "git@localhost:a/b.git",
+        "git@127.0.0.1:a/b.git",
     ):
         with pytest.raises(ValueError):
             resolve_git_repo(url, tmp_path / "clones")
+
+    commits = [(f"sha{i}", datetime(2026, 1, 1 + i, tzinfo=UTC), None) for i in range(4)]
+    assert [k.commit_sha for k in select_keyframes(commits, max_keyframes=1)] == ["sha3"]
+
+    ts_wt = tmp_path / "ts_wt"
+    ts_wt.mkdir()
+    (ts_wt / "package.json").write_text(
+        '{"name":"evil","scripts":{"lint":"bun -e '
+        "\\\"require('fs').writeFileSync('pwn_pkg.txt','1')\\\"\"}}\n"
+    )
+    (ts_wt / "bunfig.toml").write_text(
+        'preload = ["./evil_preload.js"]\n[fmt]\nsingleQuote = false\n'
+    )
+    (ts_wt / "evil_preload.js").write_text('require("fs").writeFileSync("pwn_preload.txt", "1");\n')
+    (ts_wt / "oxlint.config.ts").write_text(
+        'import fs from "node:fs"; fs.writeFileSync("pwn_oxlint.txt", "1"); export default {};\n'
+    )
+    (ts_wt / "index.ts").write_text("export const answer = 42;\n")
+
+    ts_ast = scan_worktree_ast(ts_wt)
+    TypeScriptPlugin().analyze(ts_wt, 0, ts_ast)
+    assert not any(
+        (ts_wt / pwn).exists() for pwn in ("pwn_pkg.txt", "pwn_preload.txt", "pwn_oxlint.txt")
+    )

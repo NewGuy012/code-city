@@ -19,7 +19,17 @@ def test_safe_repo_target_rejects_traversal_and_git_paths(tmp_path: Path) -> Non
     repo = tmp_path / "repo"
     repo.mkdir()
     (repo / ".git").mkdir()
-    for bad in ("../secret.txt", "/etc/passwd", ".git/config", "sub/../../outside", "bad\npath.py"):
+    outside = tmp_path / "outside.py"
+    outside.write_text("SECRET = 1\n")
+    (repo / "link.py").symlink_to(outside)
+    for bad in (
+        "../secret.txt",
+        "/etc/passwd",
+        ".git/config",
+        "sub/../../outside",
+        "bad\npath.py",
+        "link.py",
+    ):
         with pytest.raises(ValueError):
             safe_repo_target(repo, bad)
     assert safe_repo_target(repo, "src/app.py") == (repo / "src" / "app.py").resolve()
@@ -135,6 +145,9 @@ def test_control_plane_mayor_export_quack_and_security(tmp_path: Path) -> None:
         missing = client.get("/api/repos/ghost/nope/parquet/snapshots.parquet")
         assert missing.status_code == 404
         assert "metadata.ducklake" not in missing.text and str(tmp_path) not in missing.text
+        ghost_exp = client.post("/api/repos/ghost/nope/export", json={"with_postcard": False})
+        assert ghost_exp.status_code == 404
+        assert not (lake.data_dir / "exports" / "ghost_nope").exists()
 
         exp = client.post("/api/repos/acme/poly_city/export", json={"with_postcard": True})
         assert exp.status_code == 200
@@ -149,7 +162,21 @@ def test_control_plane_mayor_export_quack_and_security(tmp_path: Path) -> None:
         postcard = client.get(exp_data["postcard_url"])
         assert postcard.status_code == 200 and len(postcard.content) > 15_000
 
-        # Live Mayor branch execution + server-side fan-in guard
+        # CSRF guard + Live Mayor branch execution + server-side fan-in guard
+        assert (
+            client.post(
+                "/api/repos/acme/poly_city/mayor/session",
+                headers={"Origin": "https://evil.example"},
+            ).status_code
+            == 403
+        )
+        assert (
+            client.post(
+                "/api/repos/acme/poly_city/mayor/session",
+                headers={"Sec-Fetch-Site": "cross-site"},
+            ).status_code
+            == 403
+        )
         authors = client.get("/api/repos/acme/poly_city/authors").json()
         assert len(authors) >= 1
 
@@ -198,6 +225,20 @@ def test_control_plane_mayor_export_quack_and_security(tmp_path: Path) -> None:
         assert not (repo_dir / "core" / "dead_module.py").exists()
 
         # Co-Op Sandbox actions CRUD + action_id validation
+        assert (
+            client.post(
+                "/api/repos/acme/poly_city/sandbox-actions",
+                json={
+                    "action_id": "bad'id",
+                    "tool": "sweeper",
+                    "target_path": "api/routes.py",
+                    "district_path": "api",
+                    "summary": "bad id",
+                    "velocity_cost": 10,
+                },
+            ).status_code
+            == 400
+        )
         sbx = client.post(
             "/api/repos/acme/poly_city/sandbox-actions",
             json={

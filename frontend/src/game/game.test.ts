@@ -9,7 +9,7 @@ import {
   generateRefactorBlueprintMarkdown,
   validateToolOnFile,
 } from "./sandboxOverlay";
-import { CitySimulationEngine } from "./simEngine";
+import { CitySimulationEngine, computeImpactedFiles } from "./simEngine";
 import { soundEngine } from "./soundEngine";
 
 function makeFile(
@@ -257,6 +257,12 @@ describe("CodeCity simulation & Mayor sandbox", () => {
     engine.dispatchServiceUnit("sweeper", bundle.files[1], bundle);
     expect(engine.getSnapshot().vehicles.some((v) => v.type === "sweeper")).toBe(true);
 
+    expect(computeImpactedFiles("db/store.py", bundle.imports).sort()).toEqual([
+      "api/routes.py",
+      "core/hub.py",
+      "core/worker.py",
+    ]);
+
     engine.triggerPowerOutage("core/hub.py", ["api/routes.py"], new Set());
     expect(engine.getSnapshot().blackoutFiles.has("api/routes.py")).toBe(true);
     engine.triggerCrunchStorm(bundle);
@@ -267,6 +273,19 @@ describe("CodeCity simulation & Mayor sandbox", () => {
     expect(engine.getSnapshot().activeDisaster?.kind).toBe("supply_dock_storm");
     engine.clearDisaster();
     expect(engine.getSnapshot().activeDisaster).toBeNull();
+
+    // Passing a new bundle reference with identical file count recomputes cached graph stats
+    const cleanBundle: CitySnapshotBundle = {
+      ...bundle,
+      imports: [],
+      files: bundle.files.map((f) => ({
+        ...f,
+        lint_issue_count: 0,
+        max_complexity: 2,
+      })),
+    };
+    expect(later.upkeepPerSprint).toBeGreaterThan(0);
+    expect(engine.step(cleanBundle).upkeepPerSprint).toBe(0);
 
     const dummyClient = { runReadSql: async () => [] } as unknown as CityDataClient;
     const missions = await evaluateAdvisorMissions(dummyClient, bundle);
