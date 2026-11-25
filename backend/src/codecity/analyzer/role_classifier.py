@@ -159,7 +159,7 @@ def classify_building_archetype(
             {"reasons": [reason], "fan_in": fan_in, "fan_out": fan_out, "pagerank": pagerank},
         )
 
-    if sig.get("is_test") or info.file_path.endswith("_test.go"):
+    if sig.get("is_test"):
         return _match(
             BuildingArchetype.PARK_STADIUM,
             ZoneType.GREENBELT_PARKS,
@@ -199,6 +199,7 @@ def classify_building_archetype(
             "quack",
             "database",
             "db.",
+            "db/",
             "repo",
             "migration",
             "sql",

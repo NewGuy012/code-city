@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
-from codecity.analyzer.treesitter_core import SKIP_DIRS, AstFileInfo
+from codecity.analyzer.treesitter_core import MAX_ANALYZED_FILE_BYTES, SKIP_DIRS, AstFileInfo
 from codecity.models import ExternalDep, FileImport, FixDiffResult, LintDiagnostic
 
 TS_EXTS = (".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs")
@@ -50,6 +50,17 @@ class LanguagePlugin(Protocol):
     def apply_fix(self, repo_root: Path, file_path: str) -> bool: ...
 
 
+def _walk_no_symlink(root_res: Path, rel: Path) -> Path:
+    cur = root_res
+    for part in rel.parts:
+        if part in ("", "."):
+            continue
+        cur = cur.parent if part == ".." else cur / part
+        if cur.is_symlink():
+            raise ValueError(f"Refusing symlink target path: {rel}")
+    return cur.resolve()
+
+
 def safe_repo_target(repo_root: Path, rel_path: str) -> Path:
     """Validate that `rel_path` stays inside `repo_root`, has no symlinks, and avoids `.git`."""
     if not rel_path or any(ch in rel_path for ch in ("\x00", "\n", "\r")):
@@ -58,19 +69,36 @@ def safe_repo_target(repo_root: Path, rel_path: str) -> Path:
     if rel.is_absolute():
         raise ValueError(f"Absolute target path is not allowed: {rel_path}")
     root = repo_root.resolve()
-    cur = root
-    for part in rel.parts:
-        if part in ("", "."):
-            continue
-        cur = cur.parent if part == ".." else cur / part
-        if cur.is_symlink():
-            raise ValueError(f"Refusing symlink target path: {rel_path}")
-    cand = (root / rel).resolve()
+    cand = _walk_no_symlink(root, rel)
     if cand == root or not cand.is_relative_to(root):
         raise ValueError(f"Unsafe target path outside repo root: {rel_path}")
     if ".git" in cand.relative_to(root).parts:
         raise ValueError(f"Refusing path inside .git: {rel_path}")
     return cand
+
+
+def resolve_fix_target(
+    repo_root: Path,
+    file_path: str,
+    exts: tuple[str, ...],
+) -> tuple[Path, str] | None:
+    """Validate and resolve a fixable file matching `exts`."""
+    if not file_path.endswith(exts):
+        return None
+    target = safe_repo_target(repo_root, file_path)
+    if not target.is_file():
+        return None
+    return target, target.relative_to(repo_root.resolve()).as_posix()
+
+
+class NoFixPlugin:
+    """Mixin for language plugins without automated lint/format fixes."""
+
+    def preview_fix(self, repo_root: Path, file_path: str) -> FixDiffResult | None:
+        return None
+
+    def apply_fix(self, repo_root: Path, file_path: str) -> bool:
+        return False
 
 
 def resolve_rel_path(root: Path, raw_path: str, *, base_dir: Path | None = None) -> str:
@@ -138,17 +166,31 @@ def extract_bun_fmt_config(raw: str) -> str | None:
     return "\n".join(lines) + "\n" if len(lines) > 1 else None
 
 
-def safe_read_text(root: Path, path: Path) -> str | None:
+def safe_read_text(
+    root: Path,
+    path: Path,
+    *,
+    max_bytes: int = MAX_ANALYZED_FILE_BYTES,
+) -> str | None:
     """Read UTF-8 text only if `path` is a non-symlink file inside `root`."""
     try:
-        if path.is_symlink():
-            return None
         root_res = root.resolve()
-        resolved = path.resolve()
+        if path.is_absolute():
+            if path.is_relative_to(root):
+                rel = path.relative_to(root)
+            elif path.is_relative_to(root_res):
+                rel = path.relative_to(root_res)
+            else:
+                return None
+        else:
+            rel = path
+        resolved = _walk_no_symlink(root_res, rel)
         if not resolved.is_relative_to(root_res) or not resolved.is_file():
             return None
+        if resolved.stat().st_size > max_bytes:
+            return None
         return resolved.read_text(encoding="utf-8", errors="ignore")
-    except OSError:
+    except (OSError, ValueError):
         return None
 
 
@@ -218,6 +260,18 @@ def safe_bun_lint_prefix(bun_bin: str) -> Iterator[list[str]]:
             str(cfg),
             "--disable-nested-config",
         ]
+
+
+@contextmanager
+def safe_bun_fmt_prefix(bun_bin: str, fmt_toml: str | None = None) -> Iterator[list[str]]:
+    """Yield a `bun fmt` prefix using only a sanitized `[fmt]` config or `/dev/null`."""
+    if not fmt_toml:
+        yield [bun_bin, f"--config={os.devnull}", "fmt", "--no-script"]
+        return
+    with tempfile.TemporaryDirectory(prefix="codecity_bunfmt_") as td:
+        cfg = Path(td) / "bunfig.toml"
+        cfg.write_text(fmt_toml, encoding="utf-8")
+        yield [bun_bin, f"--config={cfg}", "fmt", "--no-script"]
 
 
 def parse_toml_lockfile(worktree_root: Path, filename: str, deps: DepCollector) -> None:

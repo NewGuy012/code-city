@@ -7,6 +7,7 @@ from pathlib import Path
 
 from codecity.analyzer.plugins.base import (
     DepCollector,
+    NoFixPlugin,
     PluginResult,
     edges_to_imports,
     iter_repo_files,
@@ -15,7 +16,7 @@ from codecity.analyzer.plugins.base import (
     structural_diagnostics_to_lint,
 )
 from codecity.analyzer.treesitter_core import AstFileInfo
-from codecity.models import ExternalDep, FixDiffResult
+from codecity.models import ExternalDep
 
 
 def _parse_cargo_deps(worktree_root: Path, snapshot_idx: int) -> list[ExternalDep]:
@@ -53,7 +54,7 @@ def _build_rust_module_map(rs_paths: list[str]) -> dict[str, str]:
     return mod_map
 
 
-class RustPlugin:
+class RustPlugin(NoFixPlugin):
     """Analyzes Rust crates using `Cargo.toml`/`Cargo.lock` and Tree-sitter AST heuristics."""
 
     name = "rust"
@@ -107,9 +108,3 @@ class RustPlugin:
             ),
             external_deps=deps,
         )
-
-    def preview_fix(self, repo_root: Path, file_path: str) -> FixDiffResult | None:
-        return None
-
-    def apply_fix(self, repo_root: Path, file_path: str) -> bool:
-        return False

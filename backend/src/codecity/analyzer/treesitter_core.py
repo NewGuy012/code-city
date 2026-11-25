@@ -350,10 +350,29 @@ def _compute_function_complexity(func_node: Node, source_bytes: bytes) -> int:
     return complexity
 
 
-_STRING_LITERAL_RE = re.compile(
-    r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|`(?:\\.|[^`\\])*`',
-    re.S,
+_PY_SURFACE_RE = re.compile(
+    r'"""[\s\S]*?"""|\'\'\'[\s\S]*?\'\'\'|"(?:\\.|[^"\\\n])*"|\'(?:\\.|[^\'\\\n])*\'|#[^\n]*'
 )
+_RUST_SURFACE_RE = re.compile(
+    r'"(?:\\.|[^"\\\n])*"|\'(?:\\.|[^\'\\\n]{1,4})\'|/\*[\s\S]*?\*/|//[^\n]*'
+)
+_CLIKE_SURFACE_RE = re.compile(
+    r'"(?:\\.|[^"\\\n])*"|\'(?:\\.|[^\'\\\n])*\'|`[^`]*`|/\*[\s\S]*?\*/|//[^\n]*'
+)
+_SQL_SURFACE_RE = re.compile(r"'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\"|--[^\n]*|/\*[\s\S]*?\*/")
+
+
+def _code_surface(text: str, language: str) -> str:
+    """Strip string literals and comments in one pass while preserving line boundaries."""
+    if language == "python":
+        pat = _PY_SURFACE_RE
+    elif language == "rust":
+        pat = _RUST_SURFACE_RE
+    elif language == "sql":
+        pat = _SQL_SURFACE_RE
+    else:
+        pat = _CLIKE_SURFACE_RE
+    return pat.sub(lambda m: " " + "\n" * m.group(0).count("\n"), text)
 
 
 def _collect_node_imports(
@@ -383,7 +402,7 @@ def _collect_node_imports(
                 imports.append(prefix)
             elif mod_node is not None:
                 imports.append(_node_text(mod_node, source_bytes).strip())
-    elif grammar_key in {"typescript", "tsx", "javascript"}:
+    elif grammar_key in {"typescript", "tsx"}:
         if ntype in {"import_statement", "export_statement"}:
             src_node = node.child_by_field_name("source")
             if src_node is not None:
@@ -425,10 +444,7 @@ def analyze_file_ast(rel_path: str, text: str) -> AstFileInfo:
     """Parse one source file with Tree-sitter (or line fallback) and return structural metrics."""
     language, grammar_key = detect_language(rel_path)
     sloc, comment_lines = _count_sloc_and_comments(text, language)
-    code_surface = _STRING_LITERAL_RE.sub(
-        lambda m: "\n" * m.group(0).count("\n"),
-        text,
-    )
+    code_surface = _code_surface(text, language)
 
     if grammar_key is None:
         return AstFileInfo(
@@ -487,7 +503,7 @@ def analyze_file_ast(rel_path: str, text: str) -> AstFileInfo:
             comp = _compute_function_complexity(node, source_bytes)
             if comp > max_complexity:
                 max_complexity = comp
-            if comp > 22 and grammar_key in {"go", "rust", "typescript", "tsx", "javascript"}:
+            if comp > 22 and grammar_key in {"go", "rust", "typescript", "tsx"}:
                 row, col = node.start_point
                 structural_diags.append(
                     StructuralDiagnostic(
@@ -522,9 +538,27 @@ def analyze_file_ast(rel_path: str, text: str) -> AstFileInfo:
             jsx_nodes += 1
 
         if ntype in {"except_clause", "catch_clause"}:
-            body = node.child_by_field_name("body") or node
-            body_txt = _node_text(body, source_bytes).strip()
-            if body_txt in {"{}", "pass"} or body_txt.endswith(":\n    pass"):
+            block = (
+                next((c for c in node.children if c.type == "block"), None)
+                if ntype == "except_clause"
+                else node.child_by_field_name("body")
+            )
+            stmts = (
+                [c for c in block.named_children if c.type not in _COMMENT_NODE_TYPES]
+                if block is not None
+                else []
+            )
+            is_empty = block is not None and (
+                not stmts
+                or (
+                    len(stmts) == 1
+                    and (
+                        stmts[0].type == "pass_statement"
+                        or _node_text(stmts[0], source_bytes).strip() == "..."
+                    )
+                )
+            )
+            if is_empty:
                 row, col = node.start_point
                 structural_diags.append(
                     StructuralDiagnostic(
@@ -538,7 +572,7 @@ def analyze_file_ast(rel_path: str, text: str) -> AstFileInfo:
 
         stack.extend(node.children)
 
-    if sloc > 750 and grammar_key in {"go", "rust", "typescript", "tsx", "javascript"}:
+    if sloc > 750 and grammar_key in {"go", "rust", "typescript", "tsx"}:
         structural_diags.append(
             StructuralDiagnostic(
                 line=1,
@@ -552,12 +586,12 @@ def analyze_file_ast(rel_path: str, text: str) -> AstFileInfo:
     is_test = _is_test_path(rel_path) or ast_test_symbol
     if grammar_key == "rust" and not is_test:
         for idx, line_txt in enumerate(code_surface.splitlines(), start=1):
-            code_part = line_txt.split("//", 1)[0]
-            if ".unwrap()" in code_part or "panic!(" in code_part:
+            positions = [p for tok in (".unwrap()", "panic!(") if (p := line_txt.find(tok)) >= 0]
+            if positions:
                 structural_diags.append(
                     StructuralDiagnostic(
                         line=idx,
-                        col=max(1, code_part.find(".unwrap()") + 1),
+                        col=min(positions) + 1,
                         rule_code="RS001",
                         category="safety",
                         message="Unchecked `.unwrap()` / `panic!` in non-test Rust code.",
@@ -569,9 +603,7 @@ def analyze_file_ast(rel_path: str, text: str) -> AstFileInfo:
     raw_imports = list(dict.fromkeys(imp for imp in raw_imports_all if imp))
     symbol_count = func_count + type_def_count
     denom = max(1, symbol_count + 2)
-    doc_signal = min(
-        1.0, (typed_nodes * 0.25 + comment_lines * 0.4 + docstring_nodes * 0.4) / denom
-    )
+    doc_signal = min(1.0, (typed_nodes * 0.25 + max(comment_lines, docstring_nodes) * 0.4) / denom)
 
     has_py_main = 'if __name__ == "__main__"' in text or "if __name__ == '__main__'" in text
     signals = {

@@ -7,13 +7,14 @@ from pathlib import Path
 
 from codecity.analyzer.plugins.base import (
     DepCollector,
+    NoFixPlugin,
     PluginResult,
     edges_to_imports,
     safe_read_text,
     structural_diagnostics_to_lint,
 )
 from codecity.analyzer.treesitter_core import AstFileInfo
-from codecity.models import ExternalDep, FixDiffResult
+from codecity.models import ExternalDep
 
 _MOD_LINE_RE = re.compile(r"^module\s+(\S+)")
 _REQ_LINE_RE = re.compile(r"^([^\s/]+(?:\.[^\s/]+)+/\S+)\s+(v[^\s]+)")
@@ -51,7 +52,7 @@ def _parse_go_mod(worktree_root: Path, snapshot_idx: int) -> tuple[str | None, l
     return module_prefix, deps.items
 
 
-class GoPlugin:
+class GoPlugin(NoFixPlugin):
     """Analyzes Go repositories using `go.mod` and Tree-sitter AST graphs."""
 
     name = "go"
@@ -77,7 +78,7 @@ class GoPlugin:
         if module_prefix:
             for rel in go_paths:
                 for imp in ast_files[rel].raw_imports:
-                    if not imp.startswith(module_prefix):
+                    if imp != module_prefix and not imp.startswith(f"{module_prefix}/"):
                         continue
                     sub_pkg = imp[len(module_prefix) :].lstrip("/") or "."
                     for target_file in pkg_dir_files.get(sub_pkg, []):
@@ -91,9 +92,3 @@ class GoPlugin:
             ),
             external_deps=deps,
         )
-
-    def preview_fix(self, repo_root: Path, file_path: str) -> FixDiffResult | None:
-        return None
-
-    def apply_fix(self, repo_root: Path, file_path: str) -> bool:
-        return False

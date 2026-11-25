@@ -12,12 +12,12 @@ from codecity.analyzer.plugins.base import (
     edges_to_imports,
     iter_repo_files,
     parse_toml_lockfile,
+    resolve_fix_target,
     resolve_rel_path,
     ruff_cmd,
     run_batched_tool,
     run_tool,
     safe_read_text,
-    safe_repo_target,
 )
 from codecity.analyzer.treesitter_core import AstFileInfo
 from codecity.models import ExternalDep, FileImport, FixDiffResult, LintDiagnostic
@@ -204,12 +204,10 @@ class PythonPlugin:
         )
 
     def preview_fix(self, repo_root: Path, file_path: str) -> FixDiffResult | None:
-        if not file_path.endswith((".py", ".pyi")):
+        resolved = resolve_fix_target(repo_root, file_path, (".py", ".pyi"))
+        if resolved is None:
             return None
-        target = safe_repo_target(repo_root, file_path)
-        if not target.is_file():
-            return None
-        rel = target.relative_to(repo_root.resolve()).as_posix()
+        _, rel = resolved
         diff_proc = run_tool(
             [*ruff_cmd(), "check", "--no-cache", "--fix", "--diff", "--", rel],
             repo_root,
@@ -227,12 +225,10 @@ class PythonPlugin:
         )
 
     def apply_fix(self, repo_root: Path, file_path: str) -> bool:
-        if not file_path.endswith((".py", ".pyi")):
+        resolved = resolve_fix_target(repo_root, file_path, (".py", ".pyi"))
+        if resolved is None:
             return False
-        target = safe_repo_target(repo_root, file_path)
-        if not target.is_file():
-            return False
-        rel = target.relative_to(repo_root.resolve()).as_posix()
+        _, rel = resolved
         ruff = ruff_cmd()
         run_tool([*ruff, "check", "--no-cache", "--fix", "--", rel], repo_root, timeout=15)
         run_tool([*ruff, "format", "--no-cache", "--", rel], repo_root, timeout=15)

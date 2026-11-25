@@ -17,12 +17,13 @@ from codecity.analyzer.plugins.base import (
     extract_bun_fmt_config,
     find_bun,
     iter_repo_files,
+    resolve_fix_target,
     resolve_rel_path,
     run_batched_tool,
     run_tool,
+    safe_bun_fmt_prefix,
     safe_bun_lint_prefix,
     safe_read_text,
-    safe_repo_target,
     structural_diagnostics_to_lint,
 )
 from codecity.analyzer.treesitter_core import AstFileInfo
@@ -47,10 +48,21 @@ def _find_nearest_bun_cfg_dir(root: Path, target: Path) -> Path:
     return root_res
 
 
-def _run_ts_fixes(target: Path, cwd: Path, bun_bin: str) -> str:
-    with safe_bun_lint_prefix(bun_bin) as prefix:
-        run_tool([*prefix, "--fix", "--", str(target)], cwd, timeout=15)
-    run_tool([bun_bin, "fmt", "--no-script", "--", str(target)], cwd, timeout=15)
+def _safe_fmt_for_dir(repo_root: Path, cfg_dir: Path) -> str | None:
+    raw = safe_read_text(repo_root, cfg_dir / "bunfig.toml")
+    return extract_bun_fmt_config(raw) if raw is not None else None
+
+
+def _run_ts_fixes(
+    target: Path,
+    cwd: Path,
+    bun_bin: str,
+    safe_fmt: str | None = None,
+) -> str:
+    with safe_bun_lint_prefix(bun_bin) as lint_prefix:
+        run_tool([*lint_prefix, "--fix", "--", str(target)], cwd, timeout=15)
+    with safe_bun_fmt_prefix(bun_bin, safe_fmt) as fmt_prefix:
+        run_tool([*fmt_prefix, "--", str(target)], cwd, timeout=15)
     return "bun lint --fix + bun fmt"
 
 
@@ -111,6 +123,7 @@ def _parse_npm_deps(worktree_root: Path, snapshot_idx: int) -> list[ExternalDep]
 
 
 def _load_tsconfig_aliases(worktree_root: Path) -> list[tuple[str, str, Path]]:
+    root_res = worktree_root.resolve()
     aliases: list[tuple[str, str, Path]] = []
     for cfg in iter_repo_files(worktree_root, prefixes=("tsconfig",), suffixes=(".json",)):
         raw = safe_read_text(worktree_root, cfg)
@@ -124,6 +137,8 @@ def _load_tsconfig_aliases(worktree_root: Path) -> list[tuple[str, str, Path]]:
         if not isinstance(co, dict):
             continue
         base_dir = (cfg.parent / str(co.get("baseUrl", "."))).resolve()
+        if not base_dir.is_relative_to(root_res):
+            continue
         paths = co.get("paths", {})
         if isinstance(paths, dict):
             for pat, targets in paths.items():
@@ -322,12 +337,15 @@ class TypeScriptPlugin:
 
             for cfg_dir, sub_paths in by_cfg_dir.items():
                 try:
-                    for fmt_proc in run_batched_tool(
-                        [bun_bin, "fmt", "--no-script", "--check", "--"],
-                        sub_paths,
-                        cfg_dir,
-                        timeout=20,
-                    ):
+                    safe_fmt = _safe_fmt_for_dir(wt_res, cfg_dir)
+                    with safe_bun_fmt_prefix(bun_bin, safe_fmt) as fmt_prefix:
+                        procs = run_batched_tool(
+                            [*fmt_prefix, "--check", "--"],
+                            sub_paths,
+                            cfg_dir,
+                            timeout=20,
+                        )
+                    for fmt_proc in procs:
                         if fmt_proc.returncode == 0:
                             continue
                         for raw_line in fmt_proc.stdout.splitlines():
@@ -345,11 +363,10 @@ class TypeScriptPlugin:
         )
 
     def preview_fix(self, repo_root: Path, file_path: str) -> FixDiffResult | None:
-        if not file_path.endswith(TS_EXTS):
+        resolved = resolve_fix_target(repo_root, file_path, TS_EXTS)
+        if resolved is None:
             return None
-        target = safe_repo_target(repo_root, file_path)
-        if not target.is_file():
-            return None
+        target, rel = resolved
         bun_bin = find_bun()
         if not bun_bin:
             return FixDiffResult(
@@ -360,18 +377,13 @@ class TypeScriptPlugin:
                 message="Bun binary not found in PATH.",
             )
 
-        rel = target.relative_to(repo_root.resolve()).as_posix()
         original = target.read_text(encoding="utf-8", errors="replace")
-        cfg_dir = _find_nearest_bun_cfg_dir(repo_root, target)
-        bunfig_raw = safe_read_text(repo_root, cfg_dir / "bunfig.toml")
-        safe_fmt = extract_bun_fmt_config(bunfig_raw) if bunfig_raw is not None else None
+        safe_fmt = _safe_fmt_for_dir(repo_root, _find_nearest_bun_cfg_dir(repo_root, target))
         with tempfile.TemporaryDirectory() as td:
             td_path = Path(td)
-            if safe_fmt is not None:
-                (td_path / "bunfig.toml").write_text(safe_fmt, encoding="utf-8")
             tmp_file = td_path / target.name
             tmp_file.write_text(original, encoding="utf-8")
-            linter_label = _run_ts_fixes(tmp_file, td_path, bun_bin)
+            linter_label = _run_ts_fixes(tmp_file, td_path, bun_bin, safe_fmt)
             fixed = tmp_file.read_text(encoding="utf-8", errors="replace")
 
         diff_txt = "".join(
@@ -391,13 +403,13 @@ class TypeScriptPlugin:
         )
 
     def apply_fix(self, repo_root: Path, file_path: str) -> bool:
-        if not file_path.endswith(TS_EXTS):
+        resolved = resolve_fix_target(repo_root, file_path, TS_EXTS)
+        if resolved is None:
             return False
-        target = safe_repo_target(repo_root, file_path)
-        if not target.is_file():
-            return False
+        target, _ = resolved
         bun_bin = find_bun()
         if not bun_bin:
             return False
-        _run_ts_fixes(target, _find_nearest_bun_cfg_dir(repo_root, target), bun_bin)
+        cfg_dir = _find_nearest_bun_cfg_dir(repo_root, target)
+        _run_ts_fixes(target, cfg_dir, bun_bin, _safe_fmt_for_dir(repo_root, cfg_dir))
         return True

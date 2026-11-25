@@ -37,7 +37,10 @@ _SAFE_GIT_FLAGS = (
     "http.followRedirects=false",
     "-c",
     "credential.helper=",
+    "-c",
+    "core.sshCommand=ssh -F /dev/null -o BatchMode=yes",
 )
+_HOST_RE = re.compile(r"^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -187,16 +190,21 @@ def _validate_remote_url(url: str) -> None:
             raise ValueError(f"Refusing non-public remote IP: {url}")
         return
 
+    if host.startswith("-") or not _HOST_RE.fullmatch(host):
+        raise ValueError(f"Invalid remote host: {url}")
+
     try:
         infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
-    except OSError:
-        return
+    except OSError as exc:
+        raise ValueError(f"Cannot resolve remote host: {url}") from exc
+    if not infos:
+        raise ValueError(f"Cannot resolve remote host: {url}")
     for info in infos:
         addr = info[4][0].split("%", 1)[0]
         try:
             resolved_ip = ipaddress.ip_address(addr)
-        except ValueError:
-            continue
+        except ValueError as exc:
+            raise ValueError(f"Invalid resolved remote address: {url}") from exc
         if not resolved_ip.is_global:
             raise ValueError(f"Refusing non-public resolved remote IP: {url}")
 
