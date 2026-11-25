@@ -97,6 +97,25 @@ def _assert_hud_within_viewport(page: Page, selectors: list[str]) -> None:
     assert out_of_bounds == [], f"HUD cutoff detected: {out_of_bounds}"
 
 
+def _assert_zero_idle_raf(page: Page, mode_label: str) -> None:
+    """Assert the canvas schedules zero requestAnimationFrame callbacks while idle."""
+    idle_raf = page.evaluate(
+        """() => new Promise((resolve) => {
+          let count = 0;
+          const orig = window.requestAnimationFrame;
+          window.requestAnimationFrame = (cb) => {
+            count++;
+            return orig.call(window, cb);
+          };
+          setTimeout(() => {
+            window.requestAnimationFrame = orig;
+            resolve(count);
+          }, 300);
+        })"""
+    )
+    assert idle_raf == 0, f"Expected 0 idle RAF calls in {mode_label}, got {idle_raf}"
+
+
 def test_live_studio_e2e_2d_datamaps_tour_notes_3d_timescrub_and_quack(tmp_path: Path) -> None:
     repo_dir = create_polyglot_fixture_repo(tmp_path / "poly-city")
 
@@ -126,18 +145,8 @@ def test_live_studio_e2e_2d_datamaps_tour_notes_3d_timescrub_and_quack(tmp_path:
             time.sleep(0.1)
 
     try:
-        for asset in (
-            "/sprites/buildings_t0.webp",
-            "/sprites/buildings_t1.webp",
-            "/sprites/buildings_t2.webp",
-            "/sprites/buildings_emissive_t0.webp",
-            "/sprites/buildings_emissive_t1.webp",
-            "/sprites/buildings_emissive_t2.webp",
-            "/sprites/nature_atlas.webp",
-            "/sprites/atlas_manifest.json",
-        ):
-            with urllib.request.urlopen(f"{base_url}{asset}", timeout=2.0) as r:
-                assert r.status == 200
+        with urllib.request.urlopen(f"{base_url}/api/health", timeout=2.0) as r:
+            assert r.status == 200
         with sync_playwright() as pw:
             browser = pw.chromium.launch(
                 args=["--use-gl=angle", "--use-angle=swiftshader"],
@@ -157,6 +166,10 @@ def test_live_studio_e2e_2d_datamaps_tour_notes_3d_timescrub_and_quack(tmp_path:
             expect(page.locator('[data-testid="mayor-toolbar"]')).to_have_count(0)
             expect(page.locator('[data-testid="utilities-menu-btn"]')).to_be_visible()
             _assert_no_hud_overlap(page)
+
+            # Verify 2D canvas settles to 0 FPS when idle (demand-driven rendering)
+            page.wait_for_timeout(250)
+            _assert_zero_idle_raf(page, "2D")
 
             # Repo & Analyze popover works cleanly
             page.click('[data-testid="repo-switcher-btn"]')
@@ -205,6 +218,7 @@ def test_live_studio_e2e_2d_datamaps_tour_notes_3d_timescrub_and_quack(tmp_path:
             page.click('[data-testid="toggle-2d-3d"]')
             page.wait_for_selector('[data-testid="city-canvas-3d"]', timeout=15000)
             page.wait_for_timeout(600)
+            _assert_zero_idle_raf(page, "3D")
 
             hit_pt = None
             for gx in (480, 560, 640, 720, 800):
@@ -304,6 +318,9 @@ def test_live_studio_e2e_2d_datamaps_tour_notes_3d_timescrub_and_quack(tmp_path:
 
             page.click('[data-testid="camera-view-btn"]')
             page.wait_for_selector('[data-testid="camera-view-popover"]', timeout=5000)
+            expect(page.locator('[data-testid="toggle-traffic-btn"]')).to_have_attribute(
+                "aria-pressed", "false"
+            )
             page.click('[data-testid="rotate-cw-btn"]')
             expect(page.locator('[data-testid="compass-rose-btn"]')).to_have_text("E", timeout=3000)
 

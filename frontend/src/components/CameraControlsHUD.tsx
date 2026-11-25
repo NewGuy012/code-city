@@ -482,6 +482,8 @@ export function CameraControlsHUD({
               <div className="flex flex-wrap items-center gap-1.5">
                 <button
                   type="button"
+                  data-testid="toggle-traffic-btn"
+                  aria-pressed={showTraffic}
                   onClick={onToggleTraffic}
                   className={`flex flex-1 items-center justify-center gap-1 rounded-lg px-2 py-1 text-[11px] font-medium transition ${
                     showTraffic
