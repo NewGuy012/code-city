@@ -56,6 +56,7 @@ _TABLE_SCHEMAS: dict[str, list[_ColumnSpec]] = {
         ("health_grade", "VARCHAR"),
         ("city_archetype_title", "VARCHAR"),
         ("advisor_alerts", "VARIANT"),
+        ("city_briefing", "VARIANT"),
     ],
     "districts": [
         ("snapshot_idx", "INTEGER"),
@@ -321,6 +322,12 @@ class LakehouseManager:
         for tbl, cols in _TABLE_SCHEMAS.items():
             cols_sql = ", ".join(f"{name} {dtype}" for name, dtype in cols)
             con.execute(f"CREATE TABLE IF NOT EXISTS {pfx}.{tbl} ({cols_sql});")
+            existing_cols = {
+                str(row[0]).lower() for row in con.execute(f"DESCRIBE {pfx}.{tbl};").fetchall()
+            }
+            for col_name, col_dtype in cols:
+                if col_name.lower() not in existing_cols:
+                    con.execute(f"ALTER TABLE {pfx}.{tbl} ADD COLUMN {col_name} {col_dtype};")
 
         now = datetime.now(UTC).replace(tzinfo=None)
         existing = con.execute(
@@ -390,8 +397,14 @@ class LakehouseManager:
 
         def _cell(val: Any, dtype: str) -> Any:
             if dtype == "VARIANT":
-                if isinstance(val, list):
-                    val = [x.model_dump() if isinstance(x, BaseModel) else x for x in val]
+                if val is None:
+                    return None
+                if isinstance(val, BaseModel):
+                    val = val.model_dump(mode="json")
+                elif isinstance(val, list):
+                    val = [
+                        x.model_dump(mode="json") if isinstance(x, BaseModel) else x for x in val
+                    ]
                 return json.dumps(val)
             if isinstance(val, Enum):
                 return val.value
@@ -631,8 +644,17 @@ class LakehouseManager:
         dest.parent.mkdir(parents=True, exist_ok=True)
         pfx = self.schema_prefix(owner, repo)
         cols = _TABLE_SCHEMAS[table_name]
+        existing_cols = {
+            str(row[0]).lower() for row in con.execute(f"DESCRIBE {pfx}.{table_name};").fetchall()
+        }
         cols_expr = ", ".join(
-            f"to_json({col})::VARCHAR AS {col}" if dtype == "VARIANT" else col
+            (
+                f"NULL::VARCHAR AS {col}"
+                if col.lower() not in existing_cols
+                else f"to_json({col})::VARCHAR AS {col}"
+                if dtype == "VARIANT"
+                else col
+            )
             for col, dtype in cols
         )
         dest_esc = escape_sql_literal(str(dest))

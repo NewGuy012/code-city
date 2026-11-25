@@ -45,7 +45,16 @@ def _build_parser() -> argparse.ArgumentParser:
         "--workers", type=_bounded_int(1, 16), default=4, help="Parallel worktree workers"
     )
     p_analyze.add_argument(
-        "--semantic", action="store_true", help="Enable optional README/doc enrichment"
+        "--semantic",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable README/doc enrichment (default: enabled)",
+    )
+    p_analyze.add_argument(
+        "--llm",
+        choices=("auto", "head", "lazy", "off"),
+        default="auto",
+        help="LLM summary mode (local llama.cpp -> Gemini fallback): auto, head, lazy, or off",
     )
 
     sub.add_parser("list", help="List analyzed repositories in the DuckLake catalog")
@@ -80,6 +89,7 @@ def main(argv: list[str] | None = None) -> int:
             max_keyframes=args.max_keyframes,
             workers=args.workers,
             semantic=args.semantic,
+            llm_mode=args.llm,
             on_progress=on_prog,
         )
         print(

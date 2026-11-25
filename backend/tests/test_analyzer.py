@@ -2,19 +2,25 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
+from codecity.analyzer import llm_summarizer
+from codecity.analyzer.briefing import build_city_briefing
+from codecity.analyzer.describer import build_file_description
 from codecity.analyzer.git_history import resolve_git_repo, select_keyframes
 from codecity.analyzer.layout import CITY_CANVAS_D, CITY_CANVAS_W, compute_stable_city_layout
 from codecity.analyzer.pipeline import analyze_repository
 from codecity.analyzer.plugins.go import GoPlugin
 from codecity.analyzer.plugins.typescript import TypeScriptPlugin
+from codecity.analyzer.semantic import RepoDocsContext
 from codecity.analyzer.treesitter_core import analyze_file_ast, scan_worktree_ast
-from codecity.models import BuildingArchetype, ZoneType
+from codecity.models import BuildingArchetype, ExternalDep, ZoneType
 from codecity.storage.lakehouse import LakehouseManager
+from codecity.storage.llm_cache import LlmSummaryCache
 from tests.conftest import create_polyglot_fixture_repo
 
 
@@ -111,6 +117,25 @@ def test_polyglot_pipeline_analyzes_all_four_languages_and_writes_ducklake(tmp_p
         ).fetchone()
         assert api_blurb and "routes incoming HTTP requests" in api_blurb[0]
 
+        briefing_row = con.execute(
+            f"SELECT to_json(city_briefing)::VARCHAR FROM {pfx}.snapshots "
+            f"WHERE snapshot_idx = {latest_idx};"
+        ).fetchone()
+        assert briefing_row and briefing_row[0]
+        briefing_json = json.loads(briefing_row[0])
+        assert "Welcome" in briefing_json["mayor_welcome"]
+        assert briefing_json["recommended_starts"]
+        assert briefing_json["district_guides"]
+
+        route_sig_row = con.execute(
+            f"SELECT to_json(role_signals)::VARCHAR FROM {pfx}.file_metrics "
+            f"WHERE snapshot_idx = {latest_idx} AND file_path = 'api/routes.py';"
+        ).fetchone()
+        assert route_sig_row and route_sig_row[0]
+        route_desc = json.loads(route_sig_row[0])["description"]
+        assert route_desc["short_summary"]
+        assert any(sym["name"] == "handle_get" for sym in route_desc["key_symbols"])
+
 
 def test_quantized_parcels_non_overlapping_and_within_canvas() -> None:
     weights = {f"core/mod_{i}.py": float(40 + (i * 75) % 600) for i in range(18)}
@@ -202,3 +227,189 @@ def test_worktree_scanner_skips_symlinks_and_remote_rejects_local_urls(tmp_path:
         (ts_wt / pwn).exists()
         for pwn in ("pwn_pkg.txt", "pwn_preload.txt", "pwn_oxlint.txt", "pwn_eslint.txt")
     )
+
+
+def test_ast_symbols_describer_and_llm_priority_chain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    py_info = analyze_file_ast(
+        "api/items.py",
+        '"""Manage item endpoints."""\n'
+        "from fastapi import APIRouter\n"
+        "@router.get('/items')\n"
+        "def list_items():\n"
+        '    """Fetch active items."""\n'
+        "    return []\n",
+    )
+    assert py_info.module_doc == "Manage item endpoints."
+    assert py_info.endpoints == ["GET /items"]
+    assert py_info.symbols[0].name == "list_items"
+    assert py_info.symbols[0].doc == "Fetch active items."
+
+    tsx_info = analyze_file_ast(
+        "web/Card.tsx",
+        "/** Renders a summary card. */\n"
+        "import React from 'react';\n"
+        "export function Card() { return <div>Hi</div>; }\n"
+        "export const useCardState = () => 1;\n",
+    )
+    assert "summary card" in tsx_info.module_doc
+    assert [(s.name, s.kind) for s in tsx_info.symbols] == [
+        ("Card", "component"),
+        ("useCardState", "hook"),
+    ]
+
+    rs_info = analyze_file_ast(
+        "crates/store.rs",
+        "//! Storage module.\n"
+        "pub struct RepoStore { count: usize }\n"
+        "impl RepoStore {\n"
+        "    pub fn save(&self) {}\n"
+        "}\n",
+    )
+    assert rs_info.module_doc == "Storage module."
+    assert rs_info.symbols[0].methods == ("save",)
+
+    go_info = analyze_file_ast(
+        "pkg/worker.go",
+        "// Package worker handles jobs.\npackage worker\nfunc Run() int { return 1 }\n",
+    )
+    assert go_info.module_doc == "Package worker handles jobs."
+    assert go_info.symbols[0].name == "Run" and go_info.symbols[0].exported is True
+
+    desc = build_file_description(
+        py_info,
+        archetype=BuildingArchetype.GRAND_TERMINAL,
+        zone=ZoneType.HARBOR_GATES,
+        fan_in=2,
+        fan_out=1,
+        internal_targets=["core/db.py"],
+        external_deps=[ExternalDep(snapshot_idx=0, ecosystem="python", package_name="fastapi")],
+    )
+    assert desc.external_packages == ["fastapi"]
+    assert "GET /items" in desc.endpoints
+
+    # Test LLM priority chain: 1) llama.cpp first -> 2) Gemini fallback -> 3) AST fallback
+    cache = LlmSummaryCache(tmp_path / "llm_cache.sqlite")
+    docs_ctx = RepoDocsContext(title="Demo", overview="Demo helps teammates.")
+    calls: list[str] = []
+
+    def fake_llama_ok(url, *, method="GET", payload=None, headers=None, timeout=10.0):
+        calls.append(url)
+        if url.endswith("/health"):
+            return 200, {"status": "ok"}
+        if url.endswith("/v1/models"):
+            return 200, {"data": [{"id": "qwen2.5-coder"}]}
+        if url.endswith("/v1/chat/completions"):
+            return 200, {
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {
+                                    "short_summary": "Handles item listing requests from users.",
+                                    "detailed_overview": (
+                                        "This API file routes incoming /items requests "
+                                        "and returns item records for the UI."
+                                    ),
+                                    "responsibilities": ["Serves GET /items"],
+                                }
+                            )
+                        }
+                    }
+                ]
+            }
+        raise AssertionError(f"Unexpected fallback call when llama.cpp succeeded: {url}")
+
+    monkeypatch.setenv("CODECITY_LLM_PROVIDER", "auto")
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.setattr(llm_summarizer, "_http_json", fake_llama_ok)
+    llm_summarizer.reset_probe_cache()
+
+    res_llama = llm_summarizer.enhance_building_description_with_llm(
+        desc,
+        file_path="api/items.py",
+        source_text="def list_items(): return []\n",
+        repo_name="acme/demo",
+        docs_ctx=docs_ctx,
+        repo_slug="acme/demo",
+        cache=cache,
+    )
+    assert res_llama.source == "llamacpp"
+    assert res_llama.model == "qwen2.5-coder"
+    assert "Handles item listing" in res_llama.short_summary
+
+    # Verify cache hit skips HTTP calls
+    calls.clear()
+    res_cached = llm_summarizer.enhance_building_description_with_llm(
+        desc,
+        file_path="api/items.py",
+        source_text="def list_items(): return []\n",
+        repo_name="acme/demo",
+        docs_ctx=docs_ctx,
+        repo_slug="acme/demo",
+        cache=cache,
+    )
+    assert res_cached.source == "llamacpp"
+    assert not any(c.endswith("/chat/completions") for c in calls)
+
+    # When llama.cpp is unreachable, fall back to Gemini
+    def fake_gemini_fallback(url, *, method="GET", payload=None, headers=None, timeout=10.0):
+        calls.append(url)
+        if "127.0.0.1:8080" in url:
+            return 0, None
+        if "generativelanguage.googleapis.com" in url:
+            return 200, {
+                "candidates": [
+                    {
+                        "content": {
+                            "parts": [
+                                {
+                                    "text": json.dumps(
+                                        {
+                                            "short_summary": "Gemini plain-English module summary.",
+                                            "detailed_overview": (
+                                                "Explains how this module handles core logic."
+                                            ),
+                                            "responsibilities": ["Processes domain updates"],
+                                        }
+                                    )
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        return 0, None
+
+    monkeypatch.setattr(llm_summarizer, "_http_json", fake_gemini_fallback)
+    llm_summarizer.reset_probe_cache()
+    res_gemini = llm_summarizer.enhance_building_description_with_llm(
+        desc,
+        file_path="core/worker.py",
+        source_text="def work(): return 42\n",
+        repo_name="acme/demo",
+        docs_ctx=docs_ctx,
+        repo_slug="acme/demo",
+        cache=cache,
+    )
+    assert res_gemini.source == "gemini"
+    assert "Gemini plain-English" in res_gemini.short_summary
+
+    # Sensitive files never get sent to cloud Gemini
+    calls.clear()
+    res_secret = llm_summarizer.enhance_building_description_with_llm(
+        desc,
+        file_path=".env.production",
+        source_text="API_KEY=supersecret\n",
+        repo_name="acme/demo",
+        docs_ctx=docs_ctx,
+        repo_slug="acme/demo",
+        cache=cache,
+    )
+    assert res_secret.source == desc.source
+    assert not any("generativelanguage.googleapis.com" in c for c in calls)
+
+    # Briefing synthesis smoke check
+    briefing = build_city_briefing("acme/demo", docs_ctx, [], [], [])
+    assert "Demo" in briefing.mayor_welcome

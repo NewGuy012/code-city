@@ -6,6 +6,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
+from codecity.analyzer.describer import build_file_description
 from codecity.analyzer.git_history import FileHistoryStats, KeyframeSpec
 from codecity.analyzer.plugins.base import PluginResult
 from codecity.analyzer.treesitter_core import AstFileInfo
@@ -310,6 +311,10 @@ def build_snapshot_metrics(
     file_paths = sorted(ast_files.keys())
     fan_in, fan_out, pagerank = compute_import_centrality(file_paths, plugin_result.imports)
 
+    internal_targets_by_file: dict[str, list[str]] = defaultdict(list)
+    for edge in plugin_result.imports:
+        internal_targets_by_file[edge.source_file].append(edge.target_file)
+
     diags_by_file: dict[str, Counter[str]] = defaultdict(Counter)
     diag_totals: dict[str, int] = defaultdict(int)
     for d in plugin_result.diagnostics:
@@ -346,6 +351,19 @@ def build_snapshot_metrics(
         h = history_stats.get(
             rel, FileHistoryStats(churn_90d=0, bugfix_commits_90d=0, distinct_authors_90d=1)
         )
+        desc = build_file_description(
+            info,
+            archetype=archetype,
+            zone=zone,
+            fan_in=fan_in.get(rel, 0),
+            fan_out=fan_out.get(rel, 0),
+            internal_targets=internal_targets_by_file.get(rel, []),
+            external_deps=plugin_result.external_deps,
+            churn_90d=h.churn_90d,
+            bugfix_commits_90d=h.bugfix_commits_90d,
+            distinct_authors_90d=h.distinct_authors_90d,
+        )
+        role_signals["description"] = desc.model_dump(mode="json")
         lint_count = diag_totals.get(rel, 0)
         fmt_drift = rel in plugin_result.format_drift_files
 

@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import functools
+import json
 import os
 import re
 import threading
+import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -147,6 +149,20 @@ class StructuralDiagnostic:
     fixable: bool = False
 
 
+@dataclass(frozen=True)
+class AstSymbolInfo:
+    """Extracted top-level or exported symbol summary from a source file."""
+
+    name: str
+    kind: str
+    exported: bool
+    doc: str = ""
+    complexity: int = 1
+    start_line: int = 1
+    end_line: int = 1
+    methods: tuple[str, ...] = ()
+
+
 @dataclass
 class AstFileInfo:
     """Extracted polyglot structural metrics and hints for one repository file."""
@@ -160,6 +176,10 @@ class AstFileInfo:
     raw_imports: list[str] = field(default_factory=list)
     signals: dict[str, Any] = field(default_factory=dict)
     structural_diagnostics: list[StructuralDiagnostic] = field(default_factory=list)
+    module_doc: str = ""
+    symbols: list[AstSymbolInfo] = field(default_factory=list)
+    endpoints: list[str] = field(default_factory=list)
+    most_complex_symbol: tuple[str, int] | None = None
 
 
 _FUNC_NODE_TYPES = frozenset(
@@ -440,6 +460,689 @@ def _collect_node_imports(
                 imports.append(raw)
 
 
+_BOILERPLATE_COMMENT_RE = re.compile(
+    r"^(?:#!|SPDX-License-Identifier|Copyright\b|eslint-|prettier-ignore|@ts-|ruff:|type:\s*ignore|noqa\b|pylint:|fmt:\s*(?:off|on))",
+    re.I,
+)
+_HTTP_DECORATOR_RE = re.compile(
+    r"""(?:@(?:app|router|bp|api)|\b(?:app|router|api))\.(get|post|put|delete|patch|route)\(\s*["'`]([^"'`\n]{1,80})["'`]""",
+    re.I,
+)
+_API_ROUTE_RE = re.compile(
+    r"""(?:@(?:app|router|api)|\b(?:app|router|api))\.(?:api_route|HandleFunc|Handle)\(\s*["'`]([^"'`\n]{1,80})["'`]"""
+)
+_CLI_SUBCMD_RE = re.compile(
+    r"""(?:\.add_parser\(\s*["']([A-Za-z0-9_.:-]{1,40})["']|Use:\s*"([A-Za-z0-9_.:-]{1,40})")"""
+)
+
+
+def _clean_doc_text(raw: str, *, max_chars: int = 320) -> str:
+    """Normalize a docstring or comment block into clean plain-text sentences."""
+    if not raw:
+        return ""
+    txt = raw.strip()
+    for q in ('"""', "'''", '"', "'"):
+        if txt.startswith(q) and txt.endswith(q) and len(txt) >= 2 * len(q):
+            txt = txt[len(q) : -len(q)]
+            break
+    if txt.startswith(("/**", "/*!")):
+        txt = txt[3:]
+    elif txt.startswith("/*"):
+        txt = txt[2:]
+    if txt.endswith("*/"):
+        txt = txt[:-2]
+
+    kept_lines: list[str] = []
+    for line in txt.splitlines():
+        stripped = line.strip()
+        for prefix in ("///", "//!", "//", "#", "--", "*"):
+            if stripped.startswith(prefix):
+                stripped = stripped[len(prefix) :].strip()
+                break
+        if not stripped or _BOILERPLATE_COMMENT_RE.match(stripped):
+            continue
+        if stripped.startswith("@param") or stripped.startswith("@returns"):
+            break
+        kept_lines.append(stripped)
+
+    collapsed = re.sub(r"\s+", " ", " ".join(kept_lines)).strip()
+    if len(collapsed) <= max_chars:
+        return collapsed
+    cut = collapsed[:max_chars].rsplit(" ", 1)[0].rstrip(",;:")
+    return f"{cut}..." if cut else collapsed[:max_chars]
+
+
+def _extract_endpoints(text: str) -> list[str]:
+    """Extract bounded HTTP route paths and CLI subcommands from source text."""
+    found: list[str] = []
+    seen: set[str] = set()
+
+    def _add(item: str) -> None:
+        if item not in seen and len(found) < 20:
+            seen.add(item)
+            found.append(item)
+
+    for m in _HTTP_DECORATOR_RE.finditer(text):
+        method = m.group(1).upper()
+        path = m.group(2).strip()
+        label = f"{method} {path}" if method != "ROUTE" else f"ROUTE {path}"
+        _add(label)
+    for m in _API_ROUTE_RE.finditer(text):
+        _add(f"ROUTE {m.group(1).strip()}")
+    for m in _CLI_SUBCMD_RE.finditer(text):
+        cmd = (m.group(1) or m.group(2) or "").strip()
+        if cmd:
+            _add(f"cli {cmd}")
+    return found
+
+
+def _has_jsx_descendant(node: Node) -> bool:
+    stack = [node]
+    while stack:
+        cur = stack.pop()
+        if cur.type in _JSX_NODE_TYPES:
+            return True
+        stack.extend(cur.children)
+    return False
+
+
+def _py_block_docstring(body_node: Node | None, source_bytes: bytes) -> str:
+    if body_node is None:
+        return ""
+    for child in body_node.named_children:
+        if child.type in _COMMENT_NODE_TYPES:
+            continue
+        if child.type == "expression_statement" and child.named_children:
+            first = child.named_children[0]
+            if first.type == "string":
+                return _clean_doc_text(_node_text(first, source_bytes), max_chars=200)
+        break
+    return ""
+
+
+def _py_class_methods(body_node: Node | None, source_bytes: bytes) -> tuple[str, ...]:
+    if body_node is None:
+        return ()
+    methods: list[str] = []
+    for child in body_node.named_children:
+        fn = child
+        if child.type == "decorated_definition":
+            fn = next((c for c in child.children if c.type == "function_definition"), child)
+        if fn.type == "function_definition":
+            n = fn.child_by_field_name("name")
+            if n is not None:
+                mname = _node_text(n, source_bytes).strip()
+                if not mname.startswith("_"):
+                    methods.append(mname)
+                    if len(methods) >= 8:
+                        break
+    return tuple(methods)
+
+
+def _ts_class_methods(body_node: Node | None, source_bytes: bytes) -> tuple[str, ...]:
+    if body_node is None:
+        return ()
+    methods: list[str] = []
+    for child in body_node.named_children:
+        if child.type == "method_definition":
+            n = child.child_by_field_name("name")
+            if n is not None:
+                mname = _node_text(n, source_bytes).strip()
+                if not mname.startswith("_") and mname != "constructor":
+                    methods.append(mname)
+                    if len(methods) >= 8:
+                        break
+    return tuple(methods)
+
+
+def _extract_non_ast_summary(
+    rel_path: str, language: str, text: str
+) -> tuple[str, list[AstSymbolInfo], list[str]]:
+    """Extract module overview and key entries from Markdown, SQL, CSS, and config files."""
+    symbols: list[AstSymbolInfo] = []
+    module_doc = ""
+    fname = Path(rel_path).name.lower()
+
+    if language == "markdown":
+        title = ""
+        para_lines: list[str] = []
+        para_done = False
+        in_code = False
+        for idx, raw in enumerate(text.splitlines(), start=1):
+            s = raw.strip()
+            if s.startswith("```"):
+                in_code = not in_code
+                continue
+            if in_code:
+                continue
+            if s.startswith("# ") and not title:
+                title = s[2:].strip()
+            elif s.startswith("## "):
+                sec = s[3:].strip()
+                if sec and len(symbols) < 12:
+                    symbols.append(
+                        AstSymbolInfo(
+                            name=sec, kind="section", exported=True, start_line=idx, end_line=idx
+                        )
+                    )
+            elif (
+                not para_done
+                and s
+                and not s.startswith(("<", "!", "[", "|", "-", "*", "#"))
+                and len(para_lines) < 3
+            ):
+                para_lines.append(re.sub(r"[`*_]+", "", s))
+            elif para_lines and not s:
+                para_done = True
+        combined = (
+            f"{title}: {' '.join(para_lines)}"
+            if title and para_lines
+            else (title or " ".join(para_lines))
+        )
+        module_doc = _clean_doc_text(combined, max_chars=260)
+        return module_doc, symbols, []
+
+    if language == "sql":
+        comments: list[str] = []
+        for idx, raw in enumerate(text.splitlines(), start=1):
+            s = raw.strip()
+            if idx <= 10 and s.startswith("--"):
+                comments.append(s)
+            m = re.match(
+                r"(?i)CREATE\s+(?:OR\s+REPLACE\s+)?(TABLE|VIEW|INDEX)\s+(?:IF\s+NOT\s+EXISTS\s+)?([A-Za-z0-9_.]+)",
+                s,
+            )
+            if m and len(symbols) < 12:
+                symbols.append(
+                    AstSymbolInfo(
+                        name=m.group(2),
+                        kind=m.group(1).lower(),
+                        exported=True,
+                        start_line=idx,
+                        end_line=idx,
+                    )
+                )
+        module_doc = _clean_doc_text("\n".join(comments), max_chars=240)
+        return module_doc, symbols, []
+
+    if language == "config":
+        if fname.endswith(".json"):
+            try:
+                data = json.loads(text)
+            except Exception:
+                data = None
+            if isinstance(data, dict):
+                desc = str(data.get("description") or "").strip()
+                name = str(data.get("name") or "").strip()
+                if desc:
+                    module_doc = f"{name}: {desc}" if name else desc
+                elif name:
+                    module_doc = f"JSON configuration for `{name}`."
+                scripts = data.get("scripts")
+                if isinstance(scripts, dict):
+                    for sk in list(scripts.keys())[:10]:
+                        symbols.append(AstSymbolInfo(name=str(sk), kind="script", exported=True))
+                else:
+                    for key in list(data.keys())[:10]:
+                        symbols.append(AstSymbolInfo(name=str(key), kind="config", exported=True))
+                return module_doc[:260], symbols, []
+        if fname.endswith(".toml"):
+            try:
+                data = tomllib.loads(text)
+            except Exception:
+                data = None
+            if isinstance(data, dict):
+                proj = (
+                    data.get("project")
+                    if isinstance(data.get("project"), dict)
+                    else data.get("package")
+                )
+                if isinstance(proj, dict):
+                    desc = str(proj.get("description") or "").strip()
+                    name = str(proj.get("name") or "").strip()
+                    if desc:
+                        module_doc = f"{name}: {desc}" if name else desc
+                for key in list(data.keys())[:10]:
+                    symbols.append(AstSymbolInfo(name=str(key), kind="config", exported=True))
+                if module_doc:
+                    return module_doc[:260], symbols, []
+
+        lead = [ln for ln in text.splitlines()[:10] if ln.strip().startswith("#")]
+        module_doc = _clean_doc_text("\n".join(lead), max_chars=220)
+        return module_doc, symbols, []
+
+    if language == "css":
+        lead = []
+        for ln in text.splitlines()[:10]:
+            s = ln.strip()
+            if s.startswith(("/*", "*", "//")):
+                lead.append(s)
+            elif s:
+                break
+        module_doc = _clean_doc_text("\n".join(lead), max_chars=220)
+        classes = re.findall(r"^\.([A-Za-z0-9_-]+)\s*\{", text, re.M)
+        for cls in list(dict.fromkeys(classes))[:10]:
+            symbols.append(AstSymbolInfo(name=f".{cls}", kind="style", exported=True))
+        return module_doc, symbols, []
+
+    return "", [], []
+
+
+def _extract_ast_metadata(
+    root: Node,
+    source_bytes: bytes,
+    grammar_key: str,
+    func_complexities: dict[int, int],
+) -> tuple[str, list[AstSymbolInfo]]:
+    """Extract leading module doc and top-level/exported symbols in source order."""
+    children = root.children
+    module_doc = ""
+    symbols: list[AstSymbolInfo] = []
+    rust_impl_methods: dict[str, list[str]] = {}
+    go_receiver_methods: dict[str, list[str]] = {}
+
+    if grammar_key == "python":
+        lead_comments: list[str] = []
+        for child in children:
+            if child.type in _COMMENT_NODE_TYPES:
+                lead_comments.append(_node_text(child, source_bytes))
+                continue
+            if child.type == "expression_statement" and child.named_children:
+                first = child.named_children[0]
+                if first.type == "string":
+                    module_doc = _clean_doc_text(_node_text(first, source_bytes), max_chars=320)
+                    break
+            break
+        if not module_doc and lead_comments:
+            module_doc = _clean_doc_text("\n".join(lead_comments), max_chars=280)
+
+        for child in children:
+            target = child
+            if child.type == "decorated_definition":
+                target = next(
+                    (
+                        c
+                        for c in child.children
+                        if c.type in {"function_definition", "class_definition"}
+                    ),
+                    child,
+                )
+            if target.type == "function_definition":
+                name_node = target.child_by_field_name("name")
+                if name_node is None:
+                    continue
+                name = _node_text(name_node, source_bytes).strip()
+                doc = _py_block_docstring(target.child_by_field_name("body"), source_bytes)
+                symbols.append(
+                    AstSymbolInfo(
+                        name=name,
+                        kind="fn",
+                        exported=not name.startswith("_"),
+                        doc=doc,
+                        complexity=func_complexities.get(target.id, 1),
+                        start_line=child.start_point[0] + 1,
+                        end_line=child.end_point[0] + 1,
+                    )
+                )
+            elif target.type == "class_definition":
+                name_node = target.child_by_field_name("name")
+                if name_node is None:
+                    continue
+                name = _node_text(name_node, source_bytes).strip()
+                body = target.child_by_field_name("body")
+                doc = _py_block_docstring(body, source_bytes)
+                symbols.append(
+                    AstSymbolInfo(
+                        name=name,
+                        kind="class",
+                        exported=not name.startswith("_"),
+                        doc=doc,
+                        complexity=1,
+                        start_line=child.start_point[0] + 1,
+                        end_line=child.end_point[0] + 1,
+                        methods=_py_class_methods(body, source_bytes),
+                    )
+                )
+
+    elif grammar_key in {"typescript", "tsx"}:
+        # Leading comment block before imports/code serves as module doc
+        lead_comments: list[str] = []
+        for child in children:
+            if child.type in _COMMENT_NODE_TYPES:
+                lead_comments.append(_node_text(child, source_bytes))
+                continue
+            if child.type == "expression_statement":
+                txt = _node_text(child, source_bytes).strip().strip("\"'`;")
+                if txt in {"use client", "use strict"}:
+                    continue
+            if child.type in {"import_statement", "import_alias"} and lead_comments:
+                module_doc = _clean_doc_text("\n".join(lead_comments), max_chars=320)
+            break
+        if not module_doc and len(lead_comments) > 1:
+            module_doc = _clean_doc_text("\n".join(lead_comments), max_chars=320)
+
+        pending_comments: list[str] = []
+        last_comment_end_row = -10
+        for child in children:
+            if child.type in _COMMENT_NODE_TYPES:
+                if child.start_point[0] - last_comment_end_row > 2:
+                    pending_comments = []
+                pending_comments.append(_node_text(child, source_bytes))
+                last_comment_end_row = child.end_point[0]
+                continue
+
+            doc = (
+                _clean_doc_text("\n".join(pending_comments), max_chars=200)
+                if pending_comments and (child.start_point[0] - last_comment_end_row <= 2)
+                else ""
+            )
+            pending_comments = []
+
+            exported = False
+            decl = child
+            if child.type == "export_statement":
+                exported = True
+                decl = next(
+                    (
+                        c
+                        for c in child.children
+                        if c.type
+                        in {
+                            "function_declaration",
+                            "class_declaration",
+                            "interface_declaration",
+                            "type_alias_declaration",
+                            "enum_declaration",
+                            "lexical_declaration",
+                            "variable_declaration",
+                        }
+                    ),
+                    child,
+                )
+
+            dtype = decl.type
+            sline = child.start_point[0] + 1
+            eline = child.end_point[0] + 1
+            if dtype == "function_declaration":
+                n = decl.child_by_field_name("name")
+                if n is not None:
+                    name = _node_text(n, source_bytes).strip()
+                    kind = (
+                        "component"
+                        if (name[:1].isupper() and _has_jsx_descendant(decl))
+                        else "hook"
+                        if re.match(r"use[A-Z]", name)
+                        else "fn"
+                    )
+                    symbols.append(
+                        AstSymbolInfo(
+                            name=name,
+                            kind=kind,
+                            exported=exported,
+                            doc=doc,
+                            complexity=func_complexities.get(decl.id, 1),
+                            start_line=sline,
+                            end_line=eline,
+                        )
+                    )
+            elif dtype == "class_declaration":
+                n = decl.child_by_field_name("name")
+                if n is not None:
+                    name = _node_text(n, source_bytes).strip()
+                    symbols.append(
+                        AstSymbolInfo(
+                            name=name,
+                            kind="class",
+                            exported=exported,
+                            doc=doc,
+                            start_line=sline,
+                            end_line=eline,
+                            methods=_ts_class_methods(
+                                decl.child_by_field_name("body"), source_bytes
+                            ),
+                        )
+                    )
+            elif dtype in {"interface_declaration", "type_alias_declaration", "enum_declaration"}:
+                n = decl.child_by_field_name("name")
+                if n is not None:
+                    kind = (
+                        "interface"
+                        if dtype == "interface_declaration"
+                        else "enum"
+                        if dtype == "enum_declaration"
+                        else "type"
+                    )
+                    symbols.append(
+                        AstSymbolInfo(
+                            name=_node_text(n, source_bytes).strip(),
+                            kind=kind,
+                            exported=exported,
+                            doc=doc,
+                            start_line=sline,
+                            end_line=eline,
+                        )
+                    )
+            elif dtype in {"lexical_declaration", "variable_declaration"}:
+                for sub in decl.named_children:
+                    if sub.type != "variable_declarator":
+                        continue
+                    n = sub.child_by_field_name("name")
+                    val = sub.child_by_field_name("value")
+                    if n is None:
+                        continue
+                    name = _node_text(n, source_bytes).strip()
+                    if not re.fullmatch(r"[A-Za-z_$][A-Za-z0-9_$]*", name):
+                        continue
+                    if val is not None and val.type in {"arrow_function", "function_expression"}:
+                        kind = (
+                            "component"
+                            if (name[:1].isupper() and _has_jsx_descendant(val))
+                            else "hook"
+                            if re.match(r"use[A-Z]", name)
+                            else "fn"
+                        )
+                        comp = func_complexities.get(val.id, 1)
+                    elif exported:
+                        kind = "const"
+                        comp = 1
+                    else:
+                        continue
+                    symbols.append(
+                        AstSymbolInfo(
+                            name=name,
+                            kind=kind,
+                            exported=exported,
+                            doc=doc,
+                            complexity=comp,
+                            start_line=sline,
+                            end_line=eline,
+                        )
+                    )
+
+    elif grammar_key == "rust":
+        inner_docs: list[str] = []
+        pending_docs: list[str] = []
+        last_doc_row = -10
+        for child in children:
+            if child.type in _COMMENT_NODE_TYPES:
+                txt = _node_text(child, source_bytes)
+                if txt.lstrip().startswith(("//! ", "//!", "/*!")):
+                    inner_docs.append(txt)
+                else:
+                    if child.start_point[0] - last_doc_row > 2:
+                        pending_docs = []
+                    pending_docs.append(txt)
+                    last_doc_row = child.end_point[0]
+                continue
+            if child.type == "attribute_item":
+                continue
+
+            doc = (
+                _clean_doc_text("\n".join(pending_docs), max_chars=200)
+                if pending_docs and (child.start_point[0] - last_doc_row <= 2)
+                else ""
+            )
+            pending_docs = []
+            is_pub = any(c.type == "visibility_modifier" for c in child.children)
+            sline, eline = child.start_point[0] + 1, child.end_point[0] + 1
+
+            if child.type == "function_item":
+                n = child.child_by_field_name("name")
+                if n is not None:
+                    symbols.append(
+                        AstSymbolInfo(
+                            name=_node_text(n, source_bytes).strip(),
+                            kind="fn",
+                            exported=is_pub,
+                            doc=doc,
+                            complexity=func_complexities.get(child.id, 1),
+                            start_line=sline,
+                            end_line=eline,
+                        )
+                    )
+            elif child.type in {"struct_item", "enum_item", "trait_item", "type_item"}:
+                n = child.child_by_field_name("name")
+                if n is not None:
+                    kind = child.type.removesuffix("_item")
+                    symbols.append(
+                        AstSymbolInfo(
+                            name=_node_text(n, source_bytes).strip(),
+                            kind=kind,
+                            exported=is_pub,
+                            doc=doc,
+                            start_line=sline,
+                            end_line=eline,
+                        )
+                    )
+            elif child.type == "impl_item":
+                t_node = child.child_by_field_name("type")
+                body = child.child_by_field_name("body")
+                if t_node is not None and body is not None:
+                    tname = _node_text(t_node, source_bytes).split("<", 1)[0].strip()
+                    for item in body.named_children:
+                        if item.type == "function_item":
+                            mn = item.child_by_field_name("name")
+                            if mn is not None and (
+                                any(c.type == "visibility_modifier" for c in item.children)
+                                or not rust_impl_methods.get(tname)
+                            ):
+                                rust_impl_methods.setdefault(tname, []).append(
+                                    _node_text(mn, source_bytes).strip()
+                                )
+        module_doc = _clean_doc_text("\n".join(inner_docs), max_chars=320)
+        if rust_impl_methods:
+            symbols = [
+                AstSymbolInfo(
+                    name=s.name,
+                    kind=s.kind,
+                    exported=s.exported,
+                    doc=s.doc,
+                    complexity=s.complexity,
+                    start_line=s.start_line,
+                    end_line=s.end_line,
+                    methods=tuple(rust_impl_methods.get(s.name, [])[:8]),
+                )
+                if s.kind in {"struct", "enum", "trait"} and s.name in rust_impl_methods
+                else s
+                for s in symbols
+            ]
+
+    elif grammar_key == "go":
+        pending_comments: list[str] = []
+        last_comment_row = -10
+        for child in children:
+            if child.type in _COMMENT_NODE_TYPES:
+                if child.start_point[0] - last_comment_row > 2:
+                    pending_comments = []
+                pending_comments.append(_node_text(child, source_bytes))
+                last_comment_row = child.end_point[0]
+                continue
+            if child.type == "package_clause":
+                if pending_comments and (child.start_point[0] - last_comment_row <= 2):
+                    module_doc = _clean_doc_text("\n".join(pending_comments), max_chars=320)
+                pending_comments = []
+                continue
+
+            doc = (
+                _clean_doc_text("\n".join(pending_comments), max_chars=200)
+                if pending_comments and (child.start_point[0] - last_comment_row <= 2)
+                else ""
+            )
+            pending_comments = []
+            sline, eline = child.start_point[0] + 1, child.end_point[0] + 1
+
+            if child.type == "function_declaration":
+                n = child.child_by_field_name("name")
+                if n is not None:
+                    name = _node_text(n, source_bytes).strip()
+                    symbols.append(
+                        AstSymbolInfo(
+                            name=name,
+                            kind="fn",
+                            exported=name[:1].isupper(),
+                            doc=doc,
+                            complexity=func_complexities.get(child.id, 1),
+                            start_line=sline,
+                            end_line=eline,
+                        )
+                    )
+            elif child.type == "type_declaration":
+                for spec in child.named_children:
+                    if spec.type != "type_spec":
+                        continue
+                    n = spec.child_by_field_name("name")
+                    t = spec.child_by_field_name("type")
+                    if n is None:
+                        continue
+                    name = _node_text(n, source_bytes).strip()
+                    ttype = t.type if t is not None else ""
+                    kind = (
+                        "struct"
+                        if ttype == "struct_type"
+                        else "interface"
+                        if ttype == "interface_type"
+                        else "type"
+                    )
+                    symbols.append(
+                        AstSymbolInfo(
+                            name=name,
+                            kind=kind,
+                            exported=name[:1].isupper(),
+                            doc=doc,
+                            start_line=sline,
+                            end_line=eline,
+                        )
+                    )
+            elif child.type == "method_declaration":
+                recv = child.child_by_field_name("receiver")
+                mn = child.child_by_field_name("name")
+                if recv is not None and mn is not None:
+                    recv_txt = _node_text(recv, source_bytes)
+                    m = re.search(r"([A-Za-z_][A-Za-z0-9_]*)\s*\)*$", recv_txt.strip())
+                    if m:
+                        go_receiver_methods.setdefault(m.group(1), []).append(
+                            _node_text(mn, source_bytes).strip()
+                        )
+        if go_receiver_methods:
+            symbols = [
+                AstSymbolInfo(
+                    name=s.name,
+                    kind=s.kind,
+                    exported=s.exported,
+                    doc=s.doc,
+                    complexity=s.complexity,
+                    start_line=s.start_line,
+                    end_line=s.end_line,
+                    methods=tuple(go_receiver_methods.get(s.name, [])[:8]),
+                )
+                if s.kind in {"struct", "type"} and s.name in go_receiver_methods
+                else s
+                for s in symbols
+            ]
+
+    return module_doc, symbols[:32]
+
+
 def analyze_file_ast(rel_path: str, text: str) -> AstFileInfo:
     """Parse one source file with Tree-sitter (or line fallback) and return structural metrics."""
     language, grammar_key = detect_language(rel_path)
@@ -447,11 +1150,14 @@ def analyze_file_ast(rel_path: str, text: str) -> AstFileInfo:
     code_surface = _code_surface(text, language)
 
     if grammar_key is None:
+        module_doc, non_ast_symbols, non_ast_endpoints = _extract_non_ast_summary(
+            rel_path, language, text
+        )
         return AstFileInfo(
             file_path=rel_path,
             language=language,
             sloc=sloc,
-            symbol_count=0,
+            symbol_count=len(non_ast_symbols),
             max_complexity=1,
             type_or_doc_ratio=round(comment_lines / max(1, sloc + comment_lines), 3),
             raw_imports=[],
@@ -467,6 +1173,9 @@ def analyze_file_ast(rel_path: str, text: str) -> AstFileInfo:
                 "cli_hints": False,
                 "ui_hints": language in {"css", "html"},
             },
+            module_doc=module_doc,
+            symbols=non_ast_symbols,
+            endpoints=non_ast_endpoints,
         )
 
     source_bytes = text.encode("utf-8", errors="replace")
@@ -479,6 +1188,8 @@ def analyze_file_ast(rel_path: str, text: str) -> AstFileInfo:
     docstring_nodes = 0
     jsx_nodes = 0
     max_complexity = 1
+    most_complex_symbol: tuple[str, int] | None = None
+    func_complexities: dict[int, int] = {}
     ast_test_symbol = False
     ast_main_symbol = False
     structural_diags: list[StructuralDiagnostic] = []
@@ -492,17 +1203,27 @@ def analyze_file_ast(rel_path: str, text: str) -> AstFileInfo:
 
         if ntype in _FUNC_NODE_TYPES:
             func_count += 1
+            fname = ""
             name_node = node.child_by_field_name("name")
             if name_node is not None:
                 fname = _node_text(name_node, source_bytes).strip()
+            elif node.parent is not None and node.parent.type == "variable_declarator":
+                var_name = node.parent.child_by_field_name("name")
+                if var_name is not None:
+                    fname = _node_text(var_name, source_bytes).strip()
+
+            if fname:
                 if fname.startswith("test_") or (grammar_key == "go" and fname.startswith("Test")):
                     ast_test_symbol = True
                 if fname == "main" and grammar_key in {"go", "rust"}:
                     ast_main_symbol = True
 
             comp = _compute_function_complexity(node, source_bytes)
+            func_complexities[node.id] = comp
             if comp > max_complexity:
                 max_complexity = comp
+            if fname and (most_complex_symbol is None or comp > most_complex_symbol[1]):
+                most_complex_symbol = (fname, comp)
             if comp > 22 and grammar_key in {"go", "rust", "typescript", "tsx"}:
                 row, col = node.start_point
                 structural_diags.append(
@@ -604,6 +1325,10 @@ def analyze_file_ast(rel_path: str, text: str) -> AstFileInfo:
     symbol_count = func_count + type_def_count
     denom = max(1, symbol_count + 2)
     doc_signal = min(1.0, (typed_nodes * 0.25 + max(comment_lines, docstring_nodes) * 0.4) / denom)
+    module_doc, ast_symbols = _extract_ast_metadata(
+        root, source_bytes, grammar_key, func_complexities
+    )
+    endpoints = _extract_endpoints(text)
 
     has_py_main = 'if __name__ == "__main__"' in text or "if __name__ == '__main__'" in text
     signals = {
@@ -612,7 +1337,11 @@ def analyze_file_ast(rel_path: str, text: str) -> AstFileInfo:
         "loop_count": loop_count,
         "has_main": ast_main_symbol or has_py_main,
         "is_test": is_test,
-        "route_hints": bool(_ROUTE_RE.search(code_surface)),
+        "route_hints": bool(_ROUTE_RE.search(code_surface))
+        or any(
+            ep.startswith(("GET ", "POST ", "PUT ", "DELETE ", "PATCH ", "ROUTE "))
+            for ep in endpoints
+        ),
         "db_hints": bool(_DB_RE.search(code_surface)),
         "auth_hints": bool(_AUTH_RE.search(code_surface)),
         "cli_hints": bool(_CLI_RE.search(code_surface)),
@@ -630,6 +1359,10 @@ def analyze_file_ast(rel_path: str, text: str) -> AstFileInfo:
         raw_imports=raw_imports,
         signals=signals,
         structural_diagnostics=structural_diags,
+        module_doc=module_doc,
+        symbols=ast_symbols,
+        endpoints=endpoints,
+        most_complex_symbol=most_complex_symbol,
     )
 
 

@@ -37,6 +37,71 @@ class BuildingArchetype(StrEnum):
     PARK_STADIUM = "park_stadium"
 
 
+class SymbolSummary(BaseModel):
+    """Compact summary of an exported or top-level code symbol."""
+
+    name: str
+    kind: str
+    exported: bool = True
+    doc: str = ""
+    complexity: int = 1
+    start_line: int = 1
+    end_line: int = 1
+    methods: list[str] = Field(default_factory=list)
+
+
+class BuildingDescription(BaseModel):
+    """Human-friendly + technical description for a single file/building."""
+
+    short_summary: str
+    detailed_overview: str
+    responsibilities: list[str] = Field(default_factory=list)
+    key_symbols: list[SymbolSummary] = Field(default_factory=list)
+    endpoints: list[str] = Field(default_factory=list)
+    endpoints_total: int = 0
+    external_packages: list[str] = Field(default_factory=list)
+    most_complex_symbol: dict[str, Any] | None = None
+    health_notes: list[str] = Field(default_factory=list)
+    readme_context: str | None = None
+    source: str = "ast"
+    model: str | None = None
+
+
+class DistrictGuide(BaseModel):
+    """Plain-English guide card for one neighborhood district."""
+
+    district_path: str
+    display_name: str
+    zone_type: ZoneType
+    plain_label: str
+    summary: str
+    file_count: int = 0
+
+
+class RecommendedStart(BaseModel):
+    """Curated starting building for onboarding a new teammate."""
+
+    file_path: str
+    title: str
+    reason: str
+    archetype: BuildingArchetype
+
+
+class CityBriefing(BaseModel):
+    """High-level Mayor's welcome briefing explaining what the codebase does."""
+
+    repo_name: str
+    headline: str
+    mayor_welcome: str
+    overview: str
+    architecture_summary: str = ""
+    district_guides: list[DistrictGuide] = Field(default_factory=list)
+    recommended_starts: list[RecommendedStart] = Field(default_factory=list)
+    readme_excerpt: str | None = None
+    source: str = "ast"
+    model: str | None = None
+
+
 class AdvisorAlert(BaseModel):
     severity: str = Field(description="info | warn | critical")
     icon: str
@@ -58,6 +123,7 @@ class Snapshot(BaseModel):
     health_grade: str = "A"
     city_archetype_title: str = "Sunlit Civic Metropolis"
     advisor_alerts: list[AdvisorAlert] = Field(default_factory=list)
+    city_briefing: CityBriefing | None = None
 
 
 class District(BaseModel):
@@ -170,7 +236,8 @@ class AnalyzeRequest(BaseModel):
     owner: str | None = None
     repo: str | None = None
     max_keyframes: int = Field(default=16, ge=1, le=120)
-    semantic: bool = False
+    semantic: bool = True
+    llm_mode: str = Field(default="auto", pattern=r"^(auto|head|lazy|off)$")
     workers: int = Field(default=4, ge=1, le=16)
 
 

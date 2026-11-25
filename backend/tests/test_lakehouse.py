@@ -155,3 +155,52 @@ def test_ducklake_nested_schema_quack_multiwriter_and_parquet_export(tmp_path: P
                 f"FROM read_parquet('{exported['snapshots']}')"
             ).fetchone()
             assert cnt is not None and cnt[0] == 4 and '"python":1' in cnt[1]
+
+
+def test_lakehouse_migrates_legacy_snapshots_without_city_briefing(tmp_path: Path) -> None:
+    lake = LakehouseManager(data_dir=tmp_path / "legacy_lake")
+    with lake.session() as con:
+        cat = lake.catalog_name
+        con.execute(f"CREATE SCHEMA IF NOT EXISTS {cat}.repos;")
+        con.execute(f"CREATE SCHEMA IF NOT EXISTS {cat}.repos.legacy;")
+        con.execute(f"CREATE SCHEMA IF NOT EXISTS {cat}.repos.legacy.app;")
+        pfx = lake.schema_prefix("legacy", "app")
+        con.execute(
+            f"""
+            CREATE TABLE {pfx}.snapshots (
+                snapshot_idx INTEGER,
+                commit_sha VARCHAR,
+                committed_at TIMESTAMP,
+                git_tag VARCHAR,
+                total_files INTEGER,
+                total_sloc INTEGER,
+                total_lint_issues INTEGER,
+                language_breakdown VARIANT,
+                health_score DOUBLE,
+                health_grade VARCHAR,
+                city_archetype_title VARCHAR,
+                advisor_alerts VARIANT
+            );
+            """
+        )
+        con.execute(
+            f"INSERT INTO {pfx}.snapshots VALUES "
+            "(0, 'abc1234', TIMESTAMP '2026-01-01 00:00:00', NULL, 1, 20, 0, "
+            "'{\"python\": 1}'::JSON::VARIANT, 95.0, 'A', 'Sunlit Civic Metropolis', "
+            "'[]'::JSON::VARIANT);"
+        )
+
+        # Even before migration, export_table_parquet safely emits NULL city_briefing
+        pre_pq = lake.export_table_parquet(
+            con, "legacy", "app", "snapshots", tmp_path / "pre_snapshots.parquet"
+        )
+        with duckdb.connect() as plain:
+            row = plain.execute(
+                f"SELECT snapshot_idx, city_briefing FROM read_parquet('{pre_pq}')"
+            ).fetchone()
+            assert row == (0, None)
+
+        # ensure_repo_schema migrates missing column cleanly
+        lake.ensure_repo_schema(con, "legacy", "app", "/tmp/legacy")
+        cols = [str(r[0]) for r in con.execute(f"DESCRIBE {pfx}.snapshots;").fetchall()]
+        assert "city_briefing" in cols
