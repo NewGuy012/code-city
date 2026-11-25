@@ -18,6 +18,10 @@
     <a href="#development">Development</a>
   </p>
 
+  <p>
+    <img src="assets/screenshot.png" alt="CodeCity Studio UI showing the 2D isometric codebase city with districts, waterfront supply docks, data maps, and time-lapse controls" width="100%" />
+  </p>
+
 </div>
 
 ---
@@ -66,6 +70,19 @@ python3 -m http.server 8080 --bind 127.0.0.1 --directory ./export-dist
 - **Time Travel & Blast Radius** — Scrub historical keyframes, inspect transitive import cascades directly in-browser via recursive SQL, preview `--fix` diffs, and run chaos disaster simulations (Cascading Power Outage, Bus Factor Vacation, Release Crunch Storm, Supply Dock Storm).
 - **Safe Mayor Mode & Co-Op Notes** — Test architectural refactors in sandbox mode, collaborate via persistent Mayor Notes, or apply real automated changes on an isolated `codecity/mayor-session` branch.
 - **Zero-Backend Static Reports** — Share an entire navigable city backed solely by static Parquet files, `DuckDB-Wasm`, an SVG health badge, and a City Postcard PNG.
+
+<table>
+  <tr>
+    <td align="center" width="50%">
+      <img src="assets/screenshot-inspector.png" alt="Building Inspector Drawer with coupling arcs, AST metrics, and Skyline History" width="100%" /><br />
+      <sub><strong>Building Inspector &amp; Coupling Arcs</strong> — Inspect AST metrics, summaries, source code, and Skyline History.</sub>
+    </td>
+    <td align="center" width="50%">
+      <img src="assets/screenshot-3d.png" alt="CodeCity 3D Three.js skyline view in Golden Hour lighting" width="100%" /><br />
+      <sub><strong>3D City View</strong> — Hardware-accelerated Three.js skyline with Day, Golden Hour, and Night lighting.</sub>
+    </td>
+  </tr>
+</table>
 
 ---
 
