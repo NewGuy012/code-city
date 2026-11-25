@@ -296,4 +296,50 @@ describe("CodeCity simulation & Mayor sandbox", () => {
     soundEngine.playMilestone();
     soundEngine.playDisaster();
   });
+
+  test("ambientOnly stepping moves vehicles while freezing gameplay economy and sprints", () => {
+    const bundle = makeTestBundle();
+    const engine = new CitySimulationEngine();
+
+    const first = engine.step(bundle, { ambientOnly: true });
+    expect(first.vehicles.length).toBeGreaterThan(0);
+    expect(first.tick).toBe(0);
+    expect(first.sprintNumber).toBe(1);
+    expect(first.sprintProgress).toBe(0);
+
+    const initialPositions = first.vehicles.map(
+      (v) => `${v.id}:${v.x.toFixed(3)},${v.z.toFixed(3)}`,
+    );
+
+    let latest = first;
+    for (let i = 0; i < 45; i++) {
+      latest = engine.step(bundle, { ambientOnly: true });
+    }
+    const afterPositions = latest.vehicles.map(
+      (v) => `${v.id}:${v.x.toFixed(3)},${v.z.toFixed(3)}`,
+    );
+    expect(afterPositions).not.toEqual(initialPositions);
+    expect(latest.tick).toBe(0);
+    expect(latest.sprintNumber).toBe(1);
+    expect(latest.sprintProgress).toBe(0);
+    expect(latest.velocityTreasury).toBe(first.velocityTreasury);
+    expect(latest.incomePerSprint).toBe(first.incomePerSprint);
+    expect(latest.upkeepPerSprint).toBe(first.upkeepPerSprint);
+    expect(latest.happiness).toBe(first.happiness);
+    expect(latest.cityLevel).toBe(first.cityLevel);
+    expect(latest.milestoneEvent).toBeNull();
+
+    engine.spawnFloatingPopup(10, 10, "test");
+    expect(engine.getSnapshot().floatingPopups.length).toBe(1);
+    engine.clearFloatingPopups();
+    expect(engine.getSnapshot().floatingPopups.length).toBe(0);
+
+    // Switching to full Play stepping resumes sprint & economy progression
+    for (let i = 0; i < 45; i++) {
+      latest = engine.step(bundle);
+    }
+    expect(latest.tick).toBe(45);
+    expect(latest.sprintNumber).toBe(2);
+    expect(latest.velocityTreasury).not.toBe(first.velocityTreasury);
+  });
 });

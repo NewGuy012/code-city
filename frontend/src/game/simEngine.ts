@@ -422,8 +422,80 @@ export class CitySimulationEngine {
     this.activeDisaster = null;
   }
 
-  step(bundle: CitySnapshotBundle): SimStateSnapshot {
+  clearFloatingPopups(): void {
+    this.floatingPopups = [];
+  }
+
+  private advanceVehicles(): void {
+    const nodeLoad = new Map<string, number>();
+    if (this.graph) {
+      for (const v of this.vehicles) {
+        if (v.type === "cargo_ship") continue;
+        for (const n of this.graph.nodes) {
+          if (Math.hypot(v.x - n.x, v.z - n.z) < 4.5) {
+            nodeLoad.set(n.id, (nodeLoad.get(n.id) ?? 0) + 1);
+          }
+        }
+      }
+    }
+
+    const remainingVehicles: SimVehicle[] = [];
+    for (const v of this.vehicles) {
+      const tgt = v.waypoints[v.wpIdx];
+      if (!tgt) continue;
+
+      let localSpeed = v.speed;
+      let isJammed = false;
+      if (this.bottleneckNodes.length > 0 && v.type !== "cargo_ship" && v.type !== "fire_truck") {
+        for (const n of this.bottleneckNodes) {
+          if (Math.hypot(v.x - n.x, v.z - n.z) < 5.5) {
+            const load = nodeLoad.get(n.id) ?? 1;
+            if (load >= 2 || n.bottleneckWeight >= 1.4) {
+              localSpeed *= 0.35;
+              isJammed = true;
+              break;
+            }
+          }
+        }
+      }
+      v.jammed = isJammed;
+
+      const dx = tgt.x - v.x;
+      const dz = tgt.z - v.z;
+      const dist = Math.hypot(dx, dz);
+      if (dist <= localSpeed) {
+        v.x = tgt.x;
+        v.z = tgt.z;
+        if (v.wpIdx + 1 < v.waypoints.length) {
+          v.wpIdx += 1;
+          remainingVehicles.push(v);
+        } else if (v.loop) {
+          v.wpIdx = 0;
+          remainingVehicles.push(v);
+        } else if (v.type === "fire_truck" && v.targetFile && this.fireFiles.has(v.targetFile)) {
+          this.fireFiles.delete(v.targetFile);
+          this.spawnFloatingPopup(v.x, v.z, "🔥 Fire Contained", "#4ade80");
+          if (this.fireFiles.size === 0 && this.activeDisaster?.kind === "crunch_storm") {
+            this.activeDisaster = { ...this.activeDisaster, resolved: true };
+          }
+        }
+      } else {
+        v.x += (dx / dist) * localSpeed;
+        v.z += (dz / dist) * localSpeed;
+        v.heading = Math.atan2(dx, dz);
+        remainingVehicles.push(v);
+      }
+    }
+    this.vehicles = remainingVehicles;
+  }
+
+  step(bundle: CitySnapshotBundle, options?: { ambientOnly?: boolean }): SimStateSnapshot {
     this.ensureGraph(bundle);
+
+    if (options?.ambientOnly) {
+      this.advanceVehicles();
+      return this.getSnapshot();
+    }
 
     if (this.speed > 0) {
       this.tickCount += 1;
@@ -454,69 +526,7 @@ export class CitySimulationEngine {
         this.velocityTreasury = Math.max(0, this.velocityTreasury + (income - upkeep));
       }
 
-      // Advance vehicles along A* street waypoints
-      const nodeLoad = new Map<string, number>();
-      if (this.graph) {
-        for (const v of this.vehicles) {
-          if (v.type === "cargo_ship") continue;
-          for (const n of this.graph.nodes) {
-            if (Math.hypot(v.x - n.x, v.z - n.z) < 4.5) {
-              nodeLoad.set(n.id, (nodeLoad.get(n.id) ?? 0) + 1);
-            }
-          }
-        }
-      }
-
-      const remainingVehicles: SimVehicle[] = [];
-      for (const v of this.vehicles) {
-        const tgt = v.waypoints[v.wpIdx];
-        if (!tgt) continue;
-
-        let localSpeed = v.speed;
-        let isJammed = false;
-        if (this.bottleneckNodes.length > 0 && v.type !== "cargo_ship" && v.type !== "fire_truck") {
-          for (const n of this.bottleneckNodes) {
-            if (Math.hypot(v.x - n.x, v.z - n.z) < 5.5) {
-              const load = nodeLoad.get(n.id) ?? 1;
-              if (load >= 2 || n.bottleneckWeight >= 1.4) {
-                localSpeed *= 0.35;
-                isJammed = true;
-                break;
-              }
-            }
-          }
-        }
-        v.jammed = isJammed;
-
-        const dx = tgt.x - v.x;
-        const dz = tgt.z - v.z;
-        const dist = Math.hypot(dx, dz);
-        if (dist <= localSpeed) {
-          v.x = tgt.x;
-          v.z = tgt.z;
-          if (v.wpIdx + 1 < v.waypoints.length) {
-            v.wpIdx += 1;
-            remainingVehicles.push(v);
-          } else if (v.loop) {
-            v.wpIdx = 0;
-            remainingVehicles.push(v);
-          } else {
-            if (v.type === "fire_truck" && v.targetFile && this.fireFiles.has(v.targetFile)) {
-              this.fireFiles.delete(v.targetFile);
-              this.spawnFloatingPopup(v.x, v.z, "🔥 Fire Contained", "#4ade80");
-              if (this.fireFiles.size === 0 && this.activeDisaster?.kind === "crunch_storm") {
-                this.activeDisaster = { ...this.activeDisaster, resolved: true };
-              }
-            }
-          }
-        } else {
-          v.x += (dx / dist) * localSpeed;
-          v.z += (dz / dist) * localSpeed;
-          v.heading = Math.atan2(dx, dz);
-          remainingVehicles.push(v);
-        }
-      }
-      this.vehicles = remainingVehicles;
+      this.advanceVehicles();
 
       const jammedCount = this.vehicles.filter((v) => v.jammed).length;
       const targetHappiness = Math.max(
