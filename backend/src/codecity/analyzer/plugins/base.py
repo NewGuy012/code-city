@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import re
@@ -215,21 +216,49 @@ def find_local_oxlint() -> str | None:
     return shutil.which("oxlint")
 
 
+@functools.lru_cache(maxsize=4)
+def bun_supports_native_lint(bun_bin: str) -> bool:
+    """Return True when `bun` exposes a built-in `lint` subcommand (probed in an empty dir)."""
+    try:
+        with tempfile.TemporaryDirectory(prefix="codecity_bunlint_") as td:
+            proc = run_tool(
+                [bun_bin, f"--config={os.devnull}", "lint", "--no-script", "--help"],
+                Path(td),
+                timeout=5,
+            )
+        return proc.returncode == 0 and "--no-config" in proc.stdout
+    except Exception:
+        return False
+
+
 @contextmanager
-def safe_oxlint_prefix(bun_bin: str, oxlint_bin: str) -> Iterator[list[str]]:
-    """Build an oxlint invocation isolated from target-repo bunfig preload and JS/TS configs."""
+def safe_js_lint_prefix(bun_bin: str) -> Iterator[tuple[str, list[str]] | None]:
+    """Yield `(linter_name, cmd_prefix)` isolated from repo scripts, preloads, and lint configs."""
+    if bun_supports_native_lint(bun_bin):
+        yield (
+            "bun-lint",
+            [bun_bin, f"--config={os.devnull}", "lint", "--no-script", "--no-config"],
+        )
+        return
+    oxlint_bin = find_local_oxlint()
+    if not oxlint_bin:
+        yield None
+        return
     with tempfile.TemporaryDirectory(prefix="codecity_ox_") as td:
         cfg = Path(td) / "oxlintrc.json"
         cfg.write_text("{}", encoding="utf-8")
-        yield [
-            bun_bin,
-            f"--config={os.devnull}",
-            "run",
-            oxlint_bin,
-            "-c",
-            str(cfg),
-            "--disable-nested-config",
-        ]
+        yield (
+            "bun-oxlint",
+            [
+                bun_bin,
+                f"--config={os.devnull}",
+                "run",
+                oxlint_bin,
+                "-c",
+                str(cfg),
+                "--disable-nested-config",
+            ],
+        )
 
 
 def parse_toml_lockfile(worktree_root: Path, filename: str, deps: DepCollector) -> None:

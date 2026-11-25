@@ -75,7 +75,7 @@ Catalog data defaults to `.codecity/` (override with `codecity --data-dir <path>
 
 | Layer | Stack | Role |
 | :--- | :--- | :--- |
-| **Analyzer** | `Tree-sitter`, `ruff`, `bun` / `oxlint`, `git worktree` | Multi-worker keyframe AST, complexity, lint, churn, and dependency extraction with symlink/SSRF validation, isolated `oxlint`/`bun` execution, and hook-disabled Git execution |
+| **Analyzer** | `Tree-sitter`, `ruff`, `bun` / `oxlint`, `git worktree` | Multi-worker keyframe AST, complexity, lint, churn, and dependency extraction with symlink/SSRF validation, isolated `bun lint`/`oxlint` execution, and hook-disabled Git execution |
 | **Lakehouse** | `DuckDB 2.0`, `DuckLake 1.1`, `Quack` | Concurrent nested schemas (`repos.<owner>.<repo>`), `VARIANT` metrics, Parquet export, and audit feeds |
 | **Control Plane** | `FastAPI`, `uvicorn`, stdlib HTTP, SSE | Thin local server with bounded per-repo jobs, CSRF origin checks, validated payloads, SSE progress, Parquet serving, localhost Quack proxy, sandboxed SVG badges, and Mayor Git actions |
 | **Studio UI** | `React`, `DuckDB-Wasm`, `Canvas 2D`, bare `Three.js` | Client-side Parquet SQL analytics (snapshots, blast radius, city tours, health reports) and instanced 2D/3D rendering across Live and Static modes |

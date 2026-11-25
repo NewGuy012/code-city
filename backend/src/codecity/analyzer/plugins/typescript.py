@@ -16,12 +16,11 @@ from codecity.analyzer.plugins.base import (
     edges_to_imports,
     extract_bun_fmt_config,
     find_bun,
-    find_local_oxlint,
     iter_repo_files,
     resolve_rel_path,
     run_batched_tool,
     run_tool,
-    safe_oxlint_prefix,
+    safe_js_lint_prefix,
     safe_read_text,
     safe_repo_target,
     structural_diagnostics_to_lint,
@@ -49,11 +48,15 @@ def _find_nearest_bun_cfg_dir(root: Path, target: Path) -> Path:
 
 
 def _run_ts_fixes(target: Path, cwd: Path, bun_bin: str) -> str:
-    oxlint_bin = find_local_oxlint()
     linter_label = "bun fmt"
-    if oxlint_bin:
-        linter_label = "oxlint --fix + bun fmt"
-        with safe_oxlint_prefix(bun_bin, oxlint_bin) as prefix:
+    with safe_js_lint_prefix(bun_bin) as lint_spec:
+        if lint_spec is not None:
+            linter_name, prefix = lint_spec
+            linter_label = (
+                "bun lint --fix + bun fmt"
+                if linter_name == "bun-lint"
+                else "oxlint --fix + bun fmt"
+            )
             run_tool([*prefix, "--fix", "--", str(target)], cwd, timeout=15)
     run_tool([bun_bin, "fmt", "--no-script", "--", str(target)], cwd, timeout=15)
     return linter_label
@@ -279,20 +282,24 @@ class TypeScriptPlugin:
         bun_bin = find_bun()
 
         ran_external_linter = False
-        oxlint_bin = find_local_oxlint() if bun_bin else None
-        if bun_bin and oxlint_bin:
+        if bun_bin:
             try:
-                with safe_oxlint_prefix(bun_bin, oxlint_bin) as prefix:
-                    procs = run_batched_tool(
-                        [*prefix, "-f", "json", "--"], ts_paths, worktree_root, timeout=30
-                    )
-                for proc in procs:
-                    diagnostics.extend(
-                        _parse_lint_json(
-                            proc.stdout, worktree_root, snapshot_idx, ast_files, "bun-oxlint"
+                with safe_js_lint_prefix(bun_bin) as lint_spec:
+                    if lint_spec is not None:
+                        linter_name, prefix = lint_spec
+                        procs = run_batched_tool(
+                            [*prefix, "--format", "json", "--"],
+                            ts_paths,
+                            worktree_root,
+                            timeout=30,
                         )
-                    )
-                ran_external_linter = True
+                        for proc in procs:
+                            diagnostics.extend(
+                                _parse_lint_json(
+                                    proc.stdout, worktree_root, snapshot_idx, ast_files, linter_name
+                                )
+                            )
+                        ran_external_linter = True
             except Exception:
                 pass
 
