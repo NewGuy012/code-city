@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { computeHudMetrics, getHudShellStyle } from "../components/hudPopover";
-import type { District, FileMetric } from "../types/city";
+import type { BuildingArchetype, FileMetric } from "../types/city";
 import {
   DEFAULT_PITCH,
   DEFAULT_YAW,
@@ -17,12 +17,12 @@ import {
   isAnalyticalDataMap,
   selectFaultLines,
 } from "./cityTheme";
-import { computeSliceHeights, getPartGeometry, lotOrientation } from "./geometries3D";
 import {
-  computeNatureAndStreetPlacements,
-  islandElevation,
-  islandSignedDist,
-} from "./islandLayout";
+  computeBlockPartTransform,
+  getBlockPartsForFile,
+  getPrimitiveGeometry,
+  lotOrientation,
+} from "./geometries3D";
 import {
   cameraFromTarget,
   renderStaticCityLayer,
@@ -165,44 +165,7 @@ describe("isoRenderer2D projection", () => {
     expect(selectFaultLines(cochanges, "a.py", null).length).toBe(1);
   });
 
-  test("islandLayout heightfield, harbor quay, and nature scatter placement", () => {
-    // Urban plateau stays level at -0.04; distant ocean sits well below sea level
-    expect(islandElevation(0, 0)).toBeCloseTo(-0.04, 6);
-    expect(islandElevation(10, 52.8)).toBeCloseTo(-0.04, 6);
-    expect(islandSignedDist(0, 0)).toBeLessThan(0);
-    expect(islandSignedDist(0, 120)).toBeGreaterThan(0);
-    expect(islandElevation(0, 120)).toBeLessThan(-2.0);
-
-    const districts = [
-      {
-        district_path: "parks",
-        zone_type: "greenbelt_parks",
-        bounds_x: 20,
-        bounds_z: 20,
-        bounds_w: 24,
-        bounds_d: 24,
-      },
-    ] as District[];
-    const files = [
-      {
-        file_path: "park_file.py",
-        layout_x: 28,
-        layout_z: 28,
-        layout_w: 4,
-        layout_d: 4,
-      },
-    ] as FileMetric[];
-    const scatter = computeNatureAndStreetPlacements(districts, files, [], {
-      xLines: [20, 40, 60],
-      zLines: [20, 40, 60],
-    });
-    expect(scatter.trees.length).toBeGreaterThan(30);
-    expect(scatter.rocks.length).toBeGreaterThan(5);
-    expect(scatter.sailboats.length).toBeGreaterThan(2);
-    expect(scatter.streetlights.length).toBe(5);
-  });
-
-  test("2D static block renderer builds hit boxes for distinct archetypes and 3D slice/part cache", () => {
+  test("2D static block renderer and 3D primitive block kits keep all archetypes distinct", () => {
     const sample = { file_path: "src/app/tower.tsx", building_archetype: "office_tower" as const };
     const fullFile = {
       ...sample,
@@ -291,12 +254,28 @@ describe("isoRenderer2D projection", () => {
     const tallOri = lotOrientation(fullFile, 3, 6);
     expect(tallOri.localW).toBeGreaterThanOrEqual(tallOri.localD);
 
-    const slices = computeSliceHeights("office_tower", 12.0);
-    expect(slices.baseH + slices.shaftH + slices.crownH).toBeCloseTo(12.0, 5);
-    expect(slices.shaftH).toBeGreaterThan(slices.baseH);
+    const archetypes: BuildingArchetype[] = [
+      "grand_terminal",
+      "city_hall",
+      "archive_vault",
+      "twin_silos",
+      "factory",
+      "office_tower",
+      "glass_pavilion",
+      "watchtower",
+      "civic_kiosk",
+      "park_stadium",
+    ];
+    for (const arch of archetypes) {
+      const parts = getBlockPartsForFile({ ...fullFile, building_archetype: arch });
+      expect(parts.length).toBeGreaterThanOrEqual(2);
+      const t = computeBlockPartTransform(parts[0], 5, 5, 10, 0.12, 0, 0, 0);
+      expect(t.sy).toBeGreaterThan(0);
+    }
 
-    const geom = getPartGeometry("box");
-    expect(geom.getAttribute("position").count).toBeGreaterThan(0);
-    expect(getPartGeometry("box")).toBe(geom);
+    const box = getPrimitiveGeometry("box");
+    expect(box.getAttribute("position").count).toBeGreaterThan(0);
+    expect(getPrimitiveGeometry("box")).toBe(box);
+    expect(getPrimitiveGeometry("dome").getAttribute("position").count).toBeGreaterThan(0);
   });
 });
