@@ -281,7 +281,12 @@ export function selectFaultLines(
   return [];
 }
 
-export function canvasCursorClass(activeTool: string, hasHover: boolean): string {
+export function canvasCursorClass(
+  activeTool: string,
+  hasHover: boolean,
+  yawRotateMode = false,
+): string {
+  if (yawRotateMode) return "cursor-ew-resize";
   if (activeTool !== "inspect") return "cursor-crosshair";
   return hasHover ? "cursor-pointer" : "cursor-grab active:cursor-grabbing";
 }

@@ -19,6 +19,8 @@ import {
   WORLD_CENTER_X,
   WORLD_CENTER_Z,
   cameraStore,
+  computeMouseYaw,
+  useAltKeyHeld,
 } from "./cameraStore";
 import {
   buildImpactedHopMap,
@@ -248,6 +250,8 @@ export default function CityCanvas3D({
 }: CityCanvas3DProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const handleRef = useRef<SceneHandle | null>(null);
+  const altHeld = useAltKeyHeld();
+  const [yawDragging, setYawDragging] = useState(false);
   const [hoveredHit, setHoveredHit] = useState<{
     file: FileMetric;
     x: number;
@@ -574,10 +578,10 @@ export default function CityCanvas3D({
         activeCamera.zoom = 1;
         activeCamera.updateProjectionMatrix();
       }
+      const prevDamping = controls.enableDamping;
+      controls.enableDamping = false;
       controls.update();
-      if (camState.roll !== 0) {
-        activeCamera.rotateZ((camState.roll * Math.PI) / 180);
-      }
+      controls.enableDamping = prevDamping;
       activeCamera.updateMatrixWorld();
       syncingFromStore = false;
     };
@@ -619,6 +623,8 @@ export default function CityCanvas3D({
     const raycaster = new THREE.Raycaster();
     const ndc = new THREE.Vector2();
     let downPt: { x: number; y: number } | null = null;
+    let yawDrag: { active: boolean; pointerId: number; startX: number; origYaw: number } | null =
+      null;
 
     const pickBuilding = (clientX: number, clientY: number): FileMetric | null => {
       const rect = renderer.domElement.getBoundingClientRect();
@@ -638,14 +644,48 @@ export default function CityCanvas3D({
       return batch?.entries[hit.instanceId]?.file ?? null;
     };
 
+    const dom = renderer.domElement;
+
     const onPointerDown = (e: PointerEvent) => {
+      if (e.altKey && e.button === 0) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        controls.enabled = false;
+        yawDrag = {
+          active: true,
+          pointerId: e.pointerId,
+          startX: e.clientX,
+          origYaw: cameraStore.getState().yaw,
+        };
+        setYawDragging(true);
+        downPt = null;
+        positionHighlightBox(hoveredBox, null);
+        setHoveredHit(null);
+        cameraStore.setState({ followVehicleId: null, cinematicOrbit: false });
+        dom.setPointerCapture(e.pointerId);
+        return;
+      }
       downPt = { x: e.clientX, y: e.clientY };
     };
     const onPointerMove = (e: PointerEvent) => {
+      if (yawDrag?.active) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        cameraStore.setState({
+          yaw: computeMouseYaw(yawDrag.origYaw, e.clientX - yawDrag.startX, viewportH),
+          cinematicOrbit: false,
+        });
+        return;
+      }
       if (userInteracting) return;
+      if (e.altKey) {
+        positionHighlightBox(hoveredBox, null);
+        setHoveredHit(null);
+        return;
+      }
       const file = pickBuilding(e.clientX, e.clientY);
       if (file) {
-        const rect = renderer.domElement.getBoundingClientRect();
+        const rect = dom.getBoundingClientRect();
         positionHighlightBox(
           hoveredBox,
           file.file_path !== latestRef.current.selectedFile ? file : null,
@@ -656,7 +696,20 @@ export default function CityCanvas3D({
         setHoveredHit(null);
       }
     };
+    const endYawDrag = (e: PointerEvent): boolean => {
+      if (!yawDrag?.active || e.pointerId !== yawDrag.pointerId) return false;
+      yawDrag = null;
+      controls.enabled = true;
+      setYawDragging(false);
+      downPt = null;
+      if (dom.hasPointerCapture(e.pointerId)) {
+        dom.releasePointerCapture(e.pointerId);
+      }
+      e.stopImmediatePropagation();
+      return true;
+    };
     const onPointerUp = (e: PointerEvent) => {
+      if (endYawDrag(e)) return;
       if (!downPt) return;
       const moved = Math.hypot(e.clientX - downPt.x, e.clientY - downPt.y);
       downPt = null;
@@ -670,15 +723,18 @@ export default function CityCanvas3D({
         cur.onSelectFile(null);
       }
     };
+    const onPointerCancel = (e: PointerEvent) => {
+      endYawDrag(e);
+    };
     const onPointerLeave = () => {
       positionHighlightBox(hoveredBox, null);
       setHoveredHit(null);
     };
 
-    const dom = renderer.domElement;
-    dom.addEventListener("pointerdown", onPointerDown);
-    dom.addEventListener("pointermove", onPointerMove);
-    dom.addEventListener("pointerup", onPointerUp);
+    dom.addEventListener("pointerdown", onPointerDown, true);
+    dom.addEventListener("pointermove", onPointerMove, true);
+    dom.addEventListener("pointerup", onPointerUp, true);
+    dom.addEventListener("pointercancel", onPointerCancel, true);
     dom.addEventListener("pointerleave", onPointerLeave);
 
     const onResize = () => {
@@ -708,12 +764,7 @@ export default function CityCanvas3D({
         child.rotation.z = Math.sin(t * 1.3 + idx) * 0.04;
       });
       if (activeCamera.position.y < 1.8) activeCamera.position.y = 1.8;
-      controls.update();
-      const rollDeg = cameraStore.getState().roll;
-      if (rollDeg !== 0) {
-        activeCamera.rotateZ((rollDeg * Math.PI) / 180);
-        activeCamera.updateMatrixWorld();
-      }
+      if (!yawDrag?.active) controls.update();
       renderer.render(scene, activeCamera);
       raf = requestAnimationFrame(animate);
     };
@@ -723,9 +774,10 @@ export default function CityCanvas3D({
       cancelAnimationFrame(raf);
       unsubCam();
       ro.disconnect();
-      dom.removeEventListener("pointerdown", onPointerDown);
-      dom.removeEventListener("pointermove", onPointerMove);
-      dom.removeEventListener("pointerup", onPointerUp);
+      dom.removeEventListener("pointerdown", onPointerDown, true);
+      dom.removeEventListener("pointermove", onPointerMove, true);
+      dom.removeEventListener("pointerup", onPointerUp, true);
+      dom.removeEventListener("pointercancel", onPointerCancel, true);
       dom.removeEventListener("pointerleave", onPointerLeave);
       controls.dispose();
       clearGroup(districtsGroup);
@@ -1334,7 +1386,7 @@ export default function CityCanvas3D({
     <div
       ref={containerRef}
       data-testid="city-canvas-3d"
-      className={`relative h-full w-full overflow-hidden bg-sky-950 ${canvasCursorClass(activeTool, Boolean(hoveredHit))}`}
+      className={`relative h-full w-full overflow-hidden bg-sky-950 ${canvasCursorClass(activeTool, Boolean(hoveredHit), altHeld || yawDragging)}`}
     >
       {hoveredHit && (
         <BuildingTooltip

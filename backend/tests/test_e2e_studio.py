@@ -307,34 +307,23 @@ def test_live_studio_e2e_2d_datamaps_tour_notes_3d_timescrub_and_quack(tmp_path:
             page.click('[data-testid="rotate-cw-btn"]')
             expect(page.locator('[data-testid="compass-rose-btn"]')).to_have_text("E", timeout=3000)
 
-            # Orientation Yaw, Pitch & Roll sliders + quick axis options + shortcuts
+            # Orientation Yaw & Pitch sliders (Roll removed) + quick axis options + shortcuts
+            expect(page.locator('[data-testid="roll-slider"]')).to_have_count(0)
+            expect(page.locator('[data-testid="roll-reset-btn"]')).to_have_count(0)
+            expect(page.locator('[data-testid="orient-opt-level"]')).to_have_count(0)
+            expect(page.locator('[data-testid="yaw-drag-hint"]')).to_have_text("Alt / Opt + Drag")
+
             page.locator('[data-testid="yaw-slider"]').fill("225")
             page.locator('[data-testid="yaw-slider"]').dispatch_event("change")
             expect(page.locator('[data-testid="compass-rose-btn"]')).to_have_text("S", timeout=3000)
-
-            page.locator('[data-testid="roll-slider"]').fill("24")
-            page.locator('[data-testid="roll-slider"]').dispatch_event("change")
-            expect(page.locator('[data-testid="roll-reset-btn"]')).to_have_text("24°", timeout=3000)
 
             page.click('[data-testid="orient-opt-top"]')
             expect(page.locator('[data-testid="pitch-reset-btn"]')).to_have_text(
                 "85°", timeout=3000
             )
-            expect(page.locator('[data-testid="roll-reset-btn"]')).to_have_text("0°", timeout=3000)
 
             # Keyboard shortcuts for rotation axes:
-            # C rolls Z-axis, X levels, N snaps North, T toggles Top, Shift+X resets
-            page.keyboard.down("c")
-            try:
-                expect(page.locator('[data-testid="roll-reset-btn"]')).not_to_have_text(
-                    "0°", timeout=2000
-                )
-            finally:
-                page.keyboard.up("c")
-
-            page.keyboard.press("x")
-            expect(page.locator('[data-testid="roll-reset-btn"]')).to_have_text("0°", timeout=3000)
-
+            # N snaps North, T toggles Top, X / Shift+X resets orientation
             page.keyboard.press("n")
             expect(page.locator('[data-testid="compass-rose-btn"]')).to_have_text("N", timeout=3000)
 
@@ -348,13 +337,65 @@ def test_live_studio_e2e_2d_datamaps_tour_notes_3d_timescrub_and_quack(tmp_path:
                 "15°", timeout=3000
             )
 
+            page.keyboard.press("x")
+            expect(page.locator('[data-testid="yaw-reset-btn"]')).to_have_text("45°", timeout=3000)
+            expect(page.locator('[data-testid="pitch-reset-btn"]')).to_have_text(
+                "35°", timeout=3000
+            )
+
+            # Hold Alt + Left-drag horizontally rotates yaw in 2D without changing pitch
+            page.keyboard.press("Escape")
+            page.keyboard.down("Alt")
+            try:
+                page.mouse.move(680, 420)
+                page.mouse.down()
+                page.mouse.move(840, 460, steps=6)
+                page.mouse.up()
+            finally:
+                page.keyboard.up("Alt")
+
+            page.click('[data-testid="camera-view-btn"]')
+            page.wait_for_selector('[data-testid="camera-view-popover"]', timeout=5000)
+            expect(page.locator('[data-testid="yaw-reset-btn"]')).not_to_have_text(
+                "45°", timeout=3000
+            )
+            expect(page.locator('[data-testid="pitch-reset-btn"]')).to_have_text(
+                "35°", timeout=3000
+            )
+            page.keyboard.press("x")
+            expect(page.locator('[data-testid="yaw-reset-btn"]')).to_have_text("45°", timeout=3000)
+
+            # Hold Alt + Left-drag rotates only yaw in 3D (locking OrbitControls pitch)
+            page.keyboard.press("Escape")
+            page.click('[data-testid="toggle-2d-3d"]')
+            page.wait_for_selector('[data-testid="city-canvas-3d"]', timeout=10000)
+            page.keyboard.down("Alt")
+            try:
+                page.mouse.move(680, 420)
+                page.mouse.down()
+                page.mouse.move(520, 500, steps=6)
+                page.mouse.up()
+            finally:
+                page.keyboard.up("Alt")
+
+            page.click('[data-testid="camera-view-btn"]')
+            page.wait_for_selector('[data-testid="camera-view-popover"]', timeout=5000)
+            expect(page.locator('[data-testid="yaw-reset-btn"]')).not_to_have_text(
+                "45°", timeout=3000
+            )
+            expect(page.locator('[data-testid="pitch-reset-btn"]')).to_have_text(
+                "35°", timeout=3000
+            )
             page.keyboard.press("Shift+X")
             expect(page.locator('[data-testid="yaw-reset-btn"]')).to_have_text("45°", timeout=3000)
             expect(page.locator('[data-testid="pitch-reset-btn"]')).to_have_text(
                 "35°", timeout=3000
             )
-            expect(page.locator('[data-testid="roll-reset-btn"]')).to_have_text("0°", timeout=3000)
+            page.click('[data-testid="toggle-2d-3d"]')
+            page.wait_for_selector('[data-testid="city-canvas-2d"]', timeout=5000)
 
+            page.click('[data-testid="camera-view-btn"]')
+            page.wait_for_selector('[data-testid="camera-view-popover"]', timeout=5000)
             page.click('[data-testid="time-of-day-golden"]')
             page.click('[data-testid="cam-preset-4"]')
             page.keyboard.press("Escape")

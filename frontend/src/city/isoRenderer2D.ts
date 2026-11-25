@@ -48,7 +48,6 @@ export interface Camera2D {
   zoom: number;
   yaw?: number;
   pitch?: number;
-  roll?: number;
 }
 
 export interface GhostLot {
@@ -263,34 +262,15 @@ function makeProjector(width: number, height: number, camera: Camera2D): IsoProj
   };
 }
 
-function rotatePoint2D(
-  x: number,
-  y: number,
-  cx: number,
-  cy: number,
-  rad: number,
-): { x: number; y: number } {
-  if (rad === 0) return { x, y };
-  const dx = x - cx;
-  const dy = y - cy;
-  const cosR = Math.cos(rad);
-  const sinR = Math.sin(rad);
-  return {
-    x: cx + dx * cosR - dy * sinR,
-    y: cy + dx * sinR + dy * cosR,
-  };
-}
-
 export function cameraFromTarget(
   targetX: number,
   targetZ: number,
   zoom: number,
   yaw = DEFAULT_YAW,
   pitch = DEFAULT_PITCH,
-  roll = 0,
 ): Camera2D {
   const iso = worldToIso(targetX, targetZ, 0, yaw, pitch);
-  return { panX: -iso.x * zoom, panY: -iso.y * zoom, zoom, yaw, pitch, roll };
+  return { panX: -iso.x * zoom, panY: -iso.y * zoom, zoom, yaw, pitch };
 }
 
 export function worldToIso(
@@ -314,10 +294,10 @@ export function worldToScreen(
   camera: Camera2D,
 ): { x: number; y: number } {
   const iso = worldToIso(wx, wz, wy, camera.yaw ?? DEFAULT_YAW, camera.pitch ?? DEFAULT_PITCH);
-  const sx = width * 0.5 + camera.panX + iso.x * camera.zoom;
-  const sy = height * 0.52 + camera.panY + iso.y * camera.zoom;
-  const rollRad = ((camera.roll ?? 0) * Math.PI) / 180;
-  return rotatePoint2D(sx, sy, width * 0.5, height * 0.52, rollRad);
+  return {
+    x: width * 0.5 + camera.panX + iso.x * camera.zoom,
+    y: height * 0.52 + camera.panY + iso.y * camera.zoom,
+  };
 }
 
 export function screenToWorldGround(
@@ -327,12 +307,10 @@ export function screenToWorldGround(
   height: number,
   camera: Camera2D,
 ): { x: number; z: number } {
-  const rollRad = ((camera.roll ?? 0) * Math.PI) / 180;
-  const unrolled = rotatePoint2D(sx, sy, width * 0.5, height * 0.52, -rollRad);
   const yaw = camera.yaw ?? DEFAULT_YAW;
   const { isoYScale } = getTiltFactors(camera.pitch ?? DEFAULT_PITCH);
-  const isoX = (unrolled.x - width * 0.5 - camera.panX) / camera.zoom;
-  const isoY = (unrolled.y - height * 0.52 - camera.panY) / camera.zoom;
+  const isoX = (sx - width * 0.5 - camera.panX) / camera.zoom;
+  const isoY = (sy - height * 0.52 - camera.panY) / camera.zoom;
   const isoYEff = ISO_Y * isoYScale;
   const rx = 0.5 * (isoX / ISO_X + isoY / isoYEff);
   const rz = 0.5 * (isoY / isoYEff - isoX / ISO_X);
@@ -860,9 +838,6 @@ export function renderCityScene(args: RenderCitySceneArgs): HitBuilding[] {
 
   const proj = makeProjector(width, height, camera);
   const zoom = proj.zoom;
-  const rollRad = ((camera.roll ?? 0) * Math.PI) / 180;
-  const pivotX = width * 0.5;
-  const pivotY = height * 0.52;
   const analytical = isAnalyticalDataMap(dataMap);
 
   ctx.clearRect(0, 0, width, height);
@@ -907,13 +882,6 @@ export function renderCityScene(args: RenderCitySceneArgs): HitBuilding[] {
     ctx.stroke();
   }
   ctx.restore();
-
-  if (rollRad !== 0) {
-    ctx.save();
-    ctx.translate(pivotX, pivotY);
-    ctx.rotate(rollRad);
-    ctx.translate(-pivotX, -pivotY);
-  }
 
   // 2. Organic coastal island: turquoise shallows, surf foam, sandy shore, green meadows & harbor quay
   const shallowFill =
@@ -1415,8 +1383,7 @@ export function renderCityScene(args: RenderCitySceneArgs): HitBuilding[] {
     let maxX = -Infinity;
     let minY = Infinity;
     let maxY = -Infinity;
-    for (const c of corners) {
-      const pt = rollRad !== 0 ? rotatePoint2D(c.x, c.y, pivotX, pivotY, rollRad) : c;
+    for (const pt of corners) {
       if (pt.x < minX) minX = pt.x;
       if (pt.x > maxX) maxX = pt.x;
       if (pt.y < minY) minY = pt.y;
@@ -1508,10 +1475,6 @@ export function renderCityScene(args: RenderCitySceneArgs): HitBuilding[] {
       ctx.fillStyle = pop.color;
       ctx.fillText(pop.text, p.x, p.y - 24 * pop.progress);
     }
-    ctx.restore();
-  }
-
-  if (rollRad !== 0) {
     ctx.restore();
   }
 

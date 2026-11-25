@@ -75,9 +75,9 @@ export type HudPopoverId =
 export const HUD_SHORTCUTS: Array<{ keys: string; label: string }> = [
   { keys: "WASD / Arrows", label: "Pan city" },
   { keys: "Q / E", label: "Yaw (Y-axis)" },
+  { keys: "Alt / Opt + Drag", label: "Mouse yaw rotate" },
   { keys: "R / F", label: "Pitch (X-axis)" },
-  { keys: "Z / C", label: "Roll (Z-axis)" },
-  { keys: "X / Shift+X", label: "Level / Reset orient" },
+  { keys: "X", label: "Reset orientation" },
   { keys: "N / T", label: "North / Top-down" },
   { keys: "1 – 5", label: "Camera presets" },
   { keys: "M", label: "Toggle Radar" },

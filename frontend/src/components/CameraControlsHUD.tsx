@@ -22,19 +22,17 @@ import {
   type CameraBookmark,
   type CameraPresetId,
   DEFAULT_PITCH,
-  DEFAULT_ROLL,
   DEFAULT_YAW,
   MAX_PITCH,
-  MAX_ROLL,
   MAX_ZOOM,
   MIN_PITCH,
-  MIN_ROLL,
   MIN_ZOOM,
   type TimeOfDay,
   cameraStore,
   deleteRepoBookmark,
   loadRepoBookmarks,
   saveRepoBookmark,
+  useAltKeyHeld,
   useCameraStore,
 } from "../city/cameraStore";
 
@@ -65,6 +63,26 @@ const LIGHTING_MODES: Array<{ id: TimeOfDay; label: string; icon: typeof Sun }> 
   { id: "night", label: "Night", icon: Moon },
 ];
 
+function YawShortcutHint() {
+  const altHeld = useAltKeyHeld();
+  return (
+    <div className="flex items-center justify-between pt-0.5 text-[10px] text-slate-400">
+      <span>Mouse yaw</span>
+      <kbd
+        data-testid="yaw-drag-hint"
+        title="Hold Alt (or Option on Mac) and drag horizontally with the left mouse button to rotate yaw"
+        className={`rounded px-1.5 py-0.5 font-mono text-[9px] transition ${
+          altHeld
+            ? "bg-sky-500/25 text-sky-300 ring-1 ring-sky-400/35"
+            : "bg-white/[0.06] text-slate-300"
+        }`}
+      >
+        Alt / Opt + Drag
+      </kbd>
+    </div>
+  );
+}
+
 export function CameraControlsHUD({
   viewMode,
   onToggleViewMode,
@@ -89,13 +107,11 @@ export function CameraControlsHUD({
   const compassLabel = cameraStore.getCompassLabel();
   const yawDeg = ((Math.round((cam.yaw * 180) / Math.PI) % 360) + 360) % 360 || 0;
   const pitchDeg = Math.round(cam.pitch) || 0;
-  const rollDeg = Math.round(cam.roll) || 0;
   const defaultYawDeg = Math.round((DEFAULT_YAW * 180) / Math.PI);
   const hasCustomView =
     cam.timeOfDay !== "day" ||
     cam.cinematicOrbit ||
     Boolean(cam.followVehicleId) ||
-    Math.abs(cam.roll) >= 0.5 ||
     !showTraffic ||
     bookmarks.length > 0;
 
@@ -104,7 +120,7 @@ export function CameraControlsHUD({
       id: "yaw",
       label: "Yaw",
       keys: "Q/E",
-      hint: "Yaw around Y-axis: Q / E (Shift+Q/E toggles 90° snap vs smooth · N for North)",
+      hint: "Yaw around Y-axis: Q / E or hold Alt/Option + Left-drag (Shift+Q/E toggles 90° snap vs smooth · N for North)",
       testId: "yaw-slider",
       resetTestId: "yaw-reset-btn",
       resetTitle: `Reset Yaw to ${defaultYawDeg}° North (N)`,
@@ -130,21 +146,6 @@ export function CameraControlsHUD({
       isDefault: pitchDeg === DEFAULT_PITCH,
       onChange: (val: number) => cameraStore.setState({ pitch: val }),
       onReset: () => cameraStore.flyTo({ pitch: DEFAULT_PITCH, durationMs: 280 }),
-    },
-    {
-      id: "roll",
-      label: "Roll",
-      keys: "Z/C",
-      hint: "Roll around view Z-axis: Z / C (X to level horizon)",
-      testId: "roll-slider",
-      resetTestId: "roll-reset-btn",
-      resetTitle: "Level Roll to 0° (X)",
-      min: MIN_ROLL,
-      max: MAX_ROLL,
-      value: rollDeg,
-      isDefault: rollDeg === DEFAULT_ROLL,
-      onChange: (val: number) => cameraStore.setState({ roll: val }),
-      onReset: () => cameraStore.flyTo({ roll: DEFAULT_ROLL, durationMs: 280 }),
     },
   ];
 
@@ -328,7 +329,7 @@ export function CameraControlsHUD({
                     type="button"
                     data-testid="reset-orientation-btn"
                     onClick={() => cameraStore.resetOrientation()}
-                    title="Reset Orientation — Yaw 45°, Pitch 35°, Roll 0° (Shift+X)"
+                    title="Reset Orientation — Yaw 45°, Pitch 35° (X)"
                     className="rounded-lg bg-white/[0.06] px-1.5 py-1 text-[10px] font-medium text-slate-300 hover:bg-white/[0.12] hover:text-white"
                   >
                     Reset
@@ -375,9 +376,10 @@ export function CameraControlsHUD({
                     </button>
                   </div>
                 ))}
+                <YawShortcutHint />
               </div>
 
-              {/* Compass Heading & Elevation / Roll Quick Options */}
+              {/* Compass Heading & Pitch Quick Options */}
               <div className="grid grid-cols-4 gap-1 pt-0.5">
                 {(
                   [
@@ -410,7 +412,7 @@ export function CameraControlsHUD({
                 })}
               </div>
 
-              <div className="grid grid-cols-4 gap-1">
+              <div className="grid grid-cols-3 gap-1">
                 {[
                   {
                     id: "low",
@@ -431,15 +433,7 @@ export function CameraControlsHUD({
                     label: "Top (T)",
                     active: cam.pitch >= 82,
                     title: "Top-down pitch (85° · T)",
-                    onClick: () =>
-                      cameraStore.flyTo({ pitch: MAX_PITCH, roll: DEFAULT_ROLL, durationMs: 320 }),
-                  },
-                  {
-                    id: "level",
-                    label: "Level (X)",
-                    active: Math.abs(cam.roll) < 0.5,
-                    title: "Level roll horizon (0° · X)",
-                    onClick: () => cameraStore.flyTo({ roll: DEFAULT_ROLL, durationMs: 280 }),
+                    onClick: () => cameraStore.flyTo({ pitch: MAX_PITCH, durationMs: 320 }),
                   },
                 ].map((opt) => (
                   <button
@@ -576,7 +570,6 @@ export function CameraControlsHUD({
                             zoom: bm.zoom,
                             yaw: bm.yaw,
                             pitch: bm.pitch,
-                            roll: bm.roll ?? DEFAULT_ROLL,
                           });
                         }}
                         className="truncate text-left text-[11px] text-slate-200 hover:text-amber-300"

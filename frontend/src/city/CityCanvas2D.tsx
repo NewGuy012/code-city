@@ -9,7 +9,7 @@ import type {
   FileImport,
   FileMetric,
 } from "../types/city";
-import { MAX_ZOOM, MIN_ZOOM, cameraStore } from "./cameraStore";
+import { MAX_ZOOM, MIN_ZOOM, cameraStore, computeMouseYaw, useAltKeyHeld } from "./cameraStore";
 import { BuildingTooltip } from "./BuildingTooltip";
 import { canvasCursorClass } from "./cityTheme";
 import {
@@ -71,24 +71,28 @@ export function CityCanvas2D({
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const hitsRef = useRef<HitBuilding[]>([]);
   const hasAutoFitRef = useRef(false);
+  const altHeld = useAltKeyHeld();
+  const [yawDragging, setYawDragging] = useState(false);
 
   const dragRef = useRef<{
     active: boolean;
+    mode: "pan" | "paint" | "yaw";
     moved: boolean;
     startX: number;
     startY: number;
     origTargetX: number;
     origTargetZ: number;
-    paintMode: boolean;
+    origYaw: number;
     paintedFiles: Set<string>;
   }>({
     active: false,
+    mode: "pan",
     moved: false,
     startX: 0,
     startY: 0,
     origTargetX: 70,
     origTargetZ: 52,
-    paintMode: false,
+    origYaw: Math.PI * 0.25,
     paintedFiles: new Set(),
   });
 
@@ -193,7 +197,6 @@ export function CityCanvas2D({
             latestCam.zoom,
             latestCam.yaw,
             latestCam.pitch,
-            latestCam.roll,
           );
 
           const ctx = canvas.getContext("2d");
@@ -260,28 +263,14 @@ export function CityCanvas2D({
         ly,
         rect.width,
         rect.height,
-        cameraFromTarget(
-          state.targetX,
-          state.targetZ,
-          state.zoom,
-          state.yaw,
-          state.pitch,
-          state.roll,
-        ),
+        cameraFromTarget(state.targetX, state.targetZ, state.zoom, state.yaw, state.pitch),
       );
       const afterPt = screenToWorldGround(
         lx,
         ly,
         rect.width,
         rect.height,
-        cameraFromTarget(
-          state.targetX,
-          state.targetZ,
-          nextZoom,
-          state.yaw,
-          state.pitch,
-          state.roll,
-        ),
+        cameraFromTarget(state.targetX, state.targetZ, nextZoom, state.yaw, state.pitch),
       );
       cameraStore.setState({
         zoom: nextZoom,
@@ -311,16 +300,26 @@ export function CityCanvas2D({
 
   function handlePointerDown(e: React.PointerEvent<HTMLCanvasElement>) {
     const state = cameraStore.getState();
-    const isSweeperPaint = activeTool === "sweeper" && e.button === 0;
-    cameraStore.cancelTween();
+    const isYawRotate = e.altKey && e.button === 0;
+    const isSweeperPaint = !isYawRotate && activeTool === "sweeper" && e.button === 0;
+    const mode = isYawRotate ? "yaw" : isSweeperPaint ? "paint" : "pan";
+    if (isYawRotate) {
+      e.preventDefault();
+      setYawDragging(true);
+      setHoveredHit(null);
+      cameraStore.setState({ followVehicleId: null, cinematicOrbit: false });
+    } else {
+      cameraStore.cancelTween();
+    }
     dragRef.current = {
       active: true,
+      mode,
       moved: false,
       startX: e.clientX,
       startY: e.clientY,
       origTargetX: state.targetX,
       origTargetZ: state.targetZ,
-      paintMode: isSweeperPaint,
+      origYaw: state.yaw,
       paintedFiles: new Set(),
     };
     if (isSweeperPaint && onToolAction) {
@@ -341,7 +340,22 @@ export function CityCanvas2D({
     }
 
     if (dragRef.current.active) {
-      if (dragRef.current.paintMode && onToolAction) {
+      if (dragRef.current.mode === "yaw") {
+        const dx = e.clientX - dragRef.current.startX;
+        const dy = e.clientY - dragRef.current.startY;
+        if (Math.abs(dx) > 4 || Math.abs(dy) > 4) {
+          dragRef.current.moved = true;
+        }
+        const h = canvas?.clientHeight || window.innerHeight || 720;
+        cameraStore.setState({
+          yaw: computeMouseYaw(dragRef.current.origYaw, dx, h),
+          cinematicOrbit: false,
+        });
+        setHoveredHit(null);
+        return;
+      }
+
+      if (dragRef.current.mode === "paint" && onToolAction) {
         dragRef.current.moved = true;
         const hit = findHitAt(e.clientX, e.clientY);
         if (hit && !dragRef.current.paintedFiles.has(hit.file.file_path)) {
@@ -366,7 +380,6 @@ export function CityCanvas2D({
           state.zoom,
           state.yaw,
           state.pitch,
-          state.roll,
         );
         const pStart = screenToWorldGround(w * 0.5, h * 0.52, w, h, baseCam);
         const pDragged = screenToWorldGround(w * 0.5 - dx, h * 0.52 - dy, w, h, baseCam);
@@ -377,6 +390,11 @@ export function CityCanvas2D({
           cinematicOrbit: false,
         });
       }
+      setHoveredHit(null);
+      return;
+    }
+
+    if (e.altKey) {
       setHoveredHit(null);
       return;
     }
@@ -394,13 +412,20 @@ export function CityCanvas2D({
     }
   }
 
+  function finishDrag(e: React.PointerEvent<HTMLCanvasElement>) {
+    dragRef.current.active = false;
+    dragRef.current.mode = "pan";
+    setYawDragging(false);
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    }
+  }
+
   function handlePointerUp(e: React.PointerEvent<HTMLCanvasElement>) {
     const wasMoved = dragRef.current.moved;
-    const wasPaint = dragRef.current.paintMode;
-    dragRef.current.active = false;
-    dragRef.current.paintMode = false;
-    e.currentTarget.releasePointerCapture(e.pointerId);
-    if (!wasMoved && !wasPaint) {
+    const wasMode = dragRef.current.mode;
+    finishDrag(e);
+    if (!wasMoved && wasMode === "pan") {
       const hit = findHitAt(e.clientX, e.clientY);
       if (hit && activeTool !== "inspect" && onToolAction) {
         onToolAction(hit.file);
@@ -415,10 +440,11 @@ export function CityCanvas2D({
       <canvas
         ref={canvasRef}
         data-testid="city-canvas-2d"
-        className={`block h-full w-full ${canvasCursorClass(activeTool, Boolean(hoveredHit))}`}
+        className={`block h-full w-full ${canvasCursorClass(activeTool, Boolean(hoveredHit), altHeld || yawDragging)}`}
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
+        onPointerCancel={finishDrag}
         onPointerLeave={() => {
           setHoveredHit(null);
           edgeMouseRef.current = null;
