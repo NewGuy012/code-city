@@ -10,17 +10,22 @@ import type {
   AuthorSummary,
   BlastRadiusResult,
   BuildingArchetype,
+  BuildingDescription,
+  CityBriefing,
   CochangePair,
   District,
   ExternalDep,
   FileImport,
   FileMetric,
+  FileSourcePayload,
+  HealthStatus,
   LintDiagnostic,
   RepoRef,
   Snapshot,
   StaticManifest,
   ZoneType,
 } from "../types/city";
+import { extractBuildingDescription } from "./buildingDescription";
 
 function parseJsonField<T>(val: unknown, fallback: T): T {
   if (val === null || val === undefined) return fallback;
@@ -141,12 +146,20 @@ export function buildTourLandmarks(bundle: CitySnapshotBundle): TourLandmark[] {
     });
   };
 
+  const withSummary = (f: FileMetric, fallback: string): string => {
+    const summary = extractBuildingDescription(f)?.short_summary;
+    return summary && summary.length >= 20 ? `${summary} (${f.file_path})` : fallback;
+  };
+
   pick(
     "Harbor & City Gate",
     "Where requests and CLI traffic enter the city",
     files.filter((f) => f.building_archetype === "grand_terminal"),
     (f) =>
-      `Start at ${f.file_path} in ${f.district_path}/ — entrypoint handling external traffic (${f.sloc} SLOC).`,
+      withSummary(
+        f,
+        `Start at ${f.file_path} in ${f.district_path}/ — entrypoint handling external traffic (${f.sloc} SLOC).`,
+      ),
   );
   pick(
     "Downtown City Hall",
@@ -155,7 +168,10 @@ export function buildTourLandmarks(bundle: CitySnapshotBundle): TourLandmark[] {
       (f) => f.building_archetype === "city_hall" || f.building_archetype === "office_tower",
     ),
     (f) =>
-      `${f.file_path} anchors core domain logic (${f.sloc} SLOC, max complexity ${f.max_complexity}).`,
+      withSummary(
+        f,
+        `${f.file_path} anchors core domain logic (${f.sloc} SLOC, max complexity ${f.max_complexity}).`,
+      ),
   );
   pick(
     "Vaults & Reservoir",
@@ -163,7 +179,7 @@ export function buildTourLandmarks(bundle: CitySnapshotBundle): TourLandmark[] {
     files.filter(
       (f) => f.building_archetype === "twin_silos" || f.building_archetype === "archive_vault",
     ),
-    (f) => `${f.file_path} safeguards data contracts and storage (${f.sloc} SLOC).`,
+    (f) => withSummary(f, `${f.file_path} safeguards data contracts and storage (${f.sloc} SLOC).`),
   );
   pick(
     "Active Construction Zone",
@@ -176,7 +192,7 @@ export function buildTourLandmarks(bundle: CitySnapshotBundle): TourLandmark[] {
     "Greenbelt Proving Parks",
     "Automated test suites protecting the skyline",
     files.filter((f) => f.building_archetype === "park_stadium"),
-    (f) => `${f.file_path} anchors automated verification (${f.sloc} SLOC).`,
+    (f) => withSummary(f, `${f.file_path} anchors automated verification (${f.sloc} SLOC).`),
   );
   return stops;
 }
@@ -344,6 +360,7 @@ export class CityDataClient {
       health_grade: String(r.health_grade ?? "A"),
       city_archetype_title: String(r.city_archetype_title ?? "Sunlit Civic Metropolis"),
       advisor_alerts: parseJsonField(r.advisor_alerts, []),
+      city_briefing: parseJsonField<CityBriefing | null>(r.city_briefing, null),
     }));
   }
 
@@ -566,8 +583,57 @@ export class CityDataClient {
     return (await resp.json()) as T;
   }
 
+  fetchHealth(): Promise<HealthStatus> {
+    return this.requestJson("/api/health", undefined, "Failed to fetch server health");
+  }
+
   fetchRepos(): Promise<RepoRef[]> {
     return this.requestJson("/api/repos", undefined, "Failed to fetch repos");
+  }
+
+  fetchCityBriefing(owner: string, repo: string, enhanceLlm = false): Promise<CityBriefing> {
+    const q = new URLSearchParams();
+    if (enhanceLlm) q.set("enhance_llm", "true");
+    const suffix = q.toString() ? `?${q.toString()}` : "";
+    return this.requestJson(
+      `${this.repoBase(owner, repo)}/briefing${suffix}`,
+      undefined,
+      "Failed to fetch city briefing",
+    );
+  }
+
+  fetchFileDetails(
+    owner: string,
+    repo: string,
+    filePath: string,
+    commitSha?: string,
+    enhanceLlm = false,
+  ): Promise<BuildingDescription> {
+    const q = new URLSearchParams({ file_path: filePath });
+    if (commitSha) q.set("commit_sha", commitSha);
+    if (enhanceLlm) q.set("enhance_llm", "true");
+    return this.requestJson(
+      `${this.repoBase(owner, repo)}/file-details?${q.toString()}`,
+      undefined,
+      "Failed to fetch building details",
+    );
+  }
+
+  fetchFileSource(
+    owner: string,
+    repo: string,
+    filePath: string,
+    commitSha?: string,
+    full = false,
+  ): Promise<FileSourcePayload> {
+    const q = new URLSearchParams({ file_path: filePath });
+    if (commitSha) q.set("commit_sha", commitSha);
+    if (full) q.set("full", "true");
+    return this.requestJson(
+      `${this.repoBase(owner, repo)}/file-source?${q.toString()}`,
+      undefined,
+      "Failed to fetch source code",
+    );
   }
 
   startAnalyze(

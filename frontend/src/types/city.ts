@@ -23,6 +23,81 @@ export type BuildingArchetype =
 export type DataMapMode =
   "living" | "hotspots" | "pollution" | "bus_factor" | "languages" | "format_drift";
 
+export interface SymbolSummary {
+  name: string;
+  kind: string;
+  exported: boolean;
+  doc: string;
+  complexity: number;
+  start_line: number;
+  end_line: number;
+  methods: string[];
+}
+
+export interface BuildingDescription {
+  short_summary: string;
+  detailed_overview: string;
+  responsibilities: string[];
+  key_symbols: SymbolSummary[];
+  endpoints: string[];
+  endpoints_total: number;
+  external_packages: string[];
+  most_complex_symbol?: { name: string; complexity: number } | null;
+  health_notes: string[];
+  readme_context?: string | null;
+  source: string;
+  model?: string | null;
+}
+
+export interface DistrictGuide {
+  district_path: string;
+  display_name: string;
+  zone_type: ZoneType;
+  plain_label: string;
+  summary: string;
+  file_count: number;
+}
+
+export interface RecommendedStart {
+  file_path: string;
+  title: string;
+  reason: string;
+  archetype: BuildingArchetype;
+}
+
+export interface CityBriefing {
+  repo_name: string;
+  headline: string;
+  mayor_welcome: string;
+  overview: string;
+  architecture_summary: string;
+  district_guides: DistrictGuide[];
+  recommended_starts: RecommendedStart[];
+  readme_excerpt?: string | null;
+  source: string;
+  model?: string | null;
+}
+
+export interface FileSourcePayload {
+  file_path: string;
+  language: string;
+  commit_sha: string;
+  total_lines: number;
+  truncated: boolean;
+  content: string;
+}
+
+export interface HealthStatus {
+  status: string;
+  duckdb_version: string;
+  quack_enabled: boolean;
+  quack_uri: string | null;
+  llm_enabled?: boolean;
+  llm_provider?: string | null;
+  llm_model?: string | null;
+  llm_fallback_provider?: string | null;
+}
+
 export interface AdvisorAlert {
   severity: "info" | "warn" | "critical" | string;
   icon: string;
@@ -44,6 +119,7 @@ export interface Snapshot {
   health_grade: string;
   city_archetype_title: string;
   advisor_alerts: AdvisorAlert[];
+  city_briefing?: CityBriefing | null;
 }
 
 export interface District {
@@ -68,7 +144,11 @@ export interface FileMetric {
   zone_type: ZoneType;
   building_archetype: BuildingArchetype;
   role_confidence: number;
-  role_signals: Record<string, unknown>;
+  role_signals: {
+    reasons?: string[];
+    description?: BuildingDescription;
+    [key: string]: unknown;
+  };
   sloc: number;
   symbol_count: number;
   max_complexity: number;
