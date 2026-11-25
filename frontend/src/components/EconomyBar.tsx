@@ -1,32 +1,13 @@
-import {
-  Award,
-  Compass,
-  Crosshair,
-  EyeOff,
-  Flame,
-  Map,
-  MoreHorizontal,
-  Pause,
-  Play,
-  Smile,
-  Users,
-  Volume2,
-  VolumeX,
-  Zap,
-} from "lucide-react";
+import { Crosshair, Flame, Pause, Play, Smile, Users, Zap } from "lucide-react";
 
 import type { SimSpeed, SimStateSnapshot } from "../game/simEngine";
 import type { AdvisorAlert } from "../types/city";
-import { HUD_SHORTCUTS, type HudPopoverId } from "./hudPopover";
+import type { HudPopoverId } from "./hudPopover";
 
 interface EconomyBarProps {
   simState: SimStateSnapshot;
   alerts: AdvisorAlert[];
   activeQuestCount: number;
-  grade: string;
-  soundEnabled: boolean;
-  tourActive: boolean;
-  radarOpen: boolean;
   openPopover: HudPopoverId;
   onTogglePopover: (id: Exclude<HudPopoverId, null>) => void;
   onClosePopover: () => void;
@@ -34,21 +15,12 @@ interface EconomyBarProps {
   onOpenAdvisors: () => void;
   onOpenDisasters: () => void;
   onFocusFile: (filePath: string) => void;
-  onOpenHealthModal: () => void;
-  onStartTour: () => void;
-  onToggleSound: () => void;
-  onToggleRadar: () => void;
-  onToggleZenMode: () => void;
 }
 
 export function EconomyBar({
   simState,
   alerts,
   activeQuestCount,
-  grade,
-  soundEnabled,
-  tourActive,
-  radarOpen,
   openPopover,
   onTogglePopover,
   onClosePopover,
@@ -56,91 +28,16 @@ export function EconomyBar({
   onOpenAdvisors,
   onOpenDisasters,
   onFocusFile,
-  onOpenHealthModal,
-  onStartTour,
-  onToggleSound,
-  onToggleRadar,
-  onToggleZenMode,
 }: EconomyBarProps) {
   const netPerSprint = simState.incomePerSprint - simState.upkeepPerSprint;
   const hasActiveDisaster = Boolean(simState.activeDisaster && !simState.activeDisaster.resolved);
   const advisorsOpen = openPopover === "advisors";
-  const utilitiesOpen = openPopover === "utilities";
-
-  const utilityItems = [
-    {
-      testId: "open-health-btn",
-      icon: <Award className="h-3.5 w-3.5 text-amber-300" />,
-      label: "City Report & Export",
-      right: (
-        <span className="rounded bg-white/10 px-1.5 py-0.5 font-mono text-[10px] font-bold text-amber-300">
-          {grade}
-        </span>
-      ),
-      onClick: () => {
-        onClosePopover();
-        onOpenHealthModal();
-      },
-    },
-    {
-      testId: "start-tour-btn",
-      icon: <Compass className="h-3.5 w-3.5 text-emerald-300" />,
-      label: "Mayor's Guided Tour",
-      right: tourActive ? (
-        <span className="rounded bg-emerald-500/20 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-300">
-          Active
-        </span>
-      ) : null,
-      onClick: () => {
-        onClosePopover();
-        onStartTour();
-      },
-    },
-    {
-      testId: "toggle-sound-btn",
-      icon: soundEnabled ? (
-        <Volume2 className="h-3.5 w-3.5 text-emerald-300" />
-      ) : (
-        <VolumeX className="h-3.5 w-3.5 text-slate-400" />
-      ),
-      label: "City Audio SFX",
-      right: <span className="text-[11px] text-slate-400">{soundEnabled ? "On" : "Muted"}</span>,
-      onClick: onToggleSound,
-    },
-    {
-      icon: <Map className="h-3.5 w-3.5 text-sky-300" />,
-      label: radarOpen ? "Hide Radar" : "Show Radar",
-      right: (
-        <kbd className="rounded bg-white/[0.07] px-1.5 py-0.5 font-mono text-[10px] text-slate-400">
-          M
-        </kbd>
-      ),
-      onClick: () => {
-        onClosePopover();
-        onToggleRadar();
-      },
-    },
-    {
-      testId: "toggle-zen-btn",
-      icon: <EyeOff className="h-3.5 w-3.5 text-slate-300" />,
-      label: "Zen Mode (Hide UI)",
-      right: (
-        <kbd className="rounded bg-white/[0.07] px-1.5 py-0.5 font-mono text-[10px] text-slate-400">
-          H
-        </kbd>
-      ),
-      onClick: () => {
-        onClosePopover();
-        onToggleZenMode();
-      },
-    },
-  ];
 
   return (
     <div
       data-testid="economy-bar"
       className={`sim-panel pointer-events-auto relative flex h-10 max-w-full min-w-0 items-center gap-2 rounded-xl px-2.5 text-xs ${
-        advisorsOpen || utilitiesOpen ? "z-40" : ""
+        advisorsOpen ? "z-40" : ""
       }`}
     >
       {/* Sprint Progress & Speed Stepper */}
@@ -344,63 +241,6 @@ export function EconomyBar({
       >
         <Flame className="h-3.5 w-3.5" />
       </button>
-
-      {/* Utilities & Overflow Menu */}
-      <div data-popover-id="utilities" className="relative">
-        <button
-          type="button"
-          data-testid="utilities-menu-btn"
-          onClick={() => onTogglePopover("utilities")}
-          title="City Report, Tour, Audio, Shortcuts & Zen Mode"
-          aria-label="More options"
-          className={`flex h-7 w-7 items-center justify-center rounded-lg transition ${
-            utilitiesOpen
-              ? "bg-white/[0.12] text-white ring-1 ring-white/15"
-              : "text-slate-300 hover:bg-white/[0.07] hover:text-white"
-          }`}
-        >
-          <MoreHorizontal className="h-4 w-4" />
-        </button>
-
-        {utilitiesOpen && (
-          <div
-            data-testid="utilities-popover"
-            className="sim-popover sim-scrollbar absolute top-full right-0 z-40 mt-2 max-h-[calc(var(--hud-vh,100vh)-5rem)] w-[min(16rem,calc(var(--hud-vw,100vw)-1.5rem))] overflow-y-auto rounded-2xl p-2 text-xs"
-          >
-            {utilityItems.map((item) => (
-              <button
-                key={item.label}
-                type="button"
-                data-testid={item.testId}
-                onClick={item.onClick}
-                className="flex w-full items-center justify-between rounded-xl px-2.5 py-2 text-left text-slate-200 transition hover:bg-white/[0.07] hover:text-white"
-              >
-                <span className="flex items-center gap-2">
-                  {item.icon}
-                  <span>{item.label}</span>
-                </span>
-                {item.right}
-              </button>
-            ))}
-
-            <div className="mt-1.5 border-t border-white/10 px-2 pt-2 pb-1">
-              <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-slate-500">
-                Shortcuts
-              </div>
-              <div className="space-y-1">
-                {HUD_SHORTCUTS.map((s) => (
-                  <div key={s.keys} className="flex items-center justify-between text-[10px]">
-                    <span className="text-slate-400">{s.label}</span>
-                    <kbd className="rounded bg-white/[0.06] px-1.5 py-0.5 font-mono text-[9px] text-slate-300">
-                      {s.keys}
-                    </kbd>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </div>
-        )}
-      </div>
     </div>
   );
 }

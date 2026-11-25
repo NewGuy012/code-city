@@ -14,6 +14,7 @@ import { HealthCardModal } from "./components/HealthCardModal";
 import { InspectorDrawer } from "./components/InspectorDrawer";
 import { MAYOR_TOOLS, MayorToolbar } from "./components/MayorToolbar";
 import { Minimap2D } from "./components/Minimap2D";
+import { type AppMode, ModeAndUtilitiesBar } from "./components/ModeAndUtilitiesBar";
 import { OnboardingTour } from "./components/OnboardingTour";
 import { RepoAnalyzePopover } from "./components/RepoAnalyzePopover";
 import { TimeScrubber } from "./components/TimeScrubber";
@@ -84,6 +85,7 @@ export function App() {
 
   const [dataMap, setDataMap] = useState<DataMapMode>("living");
   const [viewMode, setViewMode] = useState<"2d" | "3d">("2d");
+  const [appMode, setAppMode] = useState<AppMode>("explore");
   const [showTraffic, setShowTraffic] = useState(true);
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
 
@@ -99,7 +101,7 @@ export function App() {
     () => (bundle ? applySandboxOverlay(bundle, sandboxActions) : null),
     [bundle, sandboxActions],
   );
-  const effectiveBundle = overlayResult?.bundle ?? null;
+  const effectiveBundle = appMode === "play" ? (overlayResult?.bundle ?? null) : bundle;
 
   useUnifiedCameraHotkeys(viewMode);
   const hudMetrics = useViewportHudMetrics();
@@ -159,11 +161,17 @@ export function App() {
     };
   }, [sim]);
 
-  // 10Hz traffic & city-health simulation loop (skips React state updates when paused)
+  // 10Hz traffic & city-health simulation loop (ambient traffic in Explore, full sim in Play)
   useEffect(() => {
     if (!effectiveBundle) return;
-    setSimState(sim.step(effectiveBundle));
+    const ambientOnly = appMode === "explore";
+    setSimState(sim.step(effectiveBundle, { ambientOnly }));
+    if (ambientOnly && !showTraffic) return;
     const timer = setInterval(() => {
+      if (ambientOnly) {
+        setSimState(sim.step(effectiveBundle, { ambientOnly: true }));
+        return;
+      }
       const spd = sim.getSpeed();
       if (spd === 0) return;
       let next = sim.step(effectiveBundle);
@@ -173,7 +181,7 @@ export function App() {
       setSimState(next);
     }, 100);
     return () => clearInterval(timer);
-  }, [effectiveBundle, sim]);
+  }, [appMode, effectiveBundle, showTraffic, sim]);
 
   const [blastRadius, setBlastRadius] = useState<BlastRadiusResult | null>(null);
   const [fileDiagnostics, setFileDiagnostics] = useState<LintDiagnostic[]>([]);
@@ -216,6 +224,25 @@ export function App() {
   const closePopover = useCallback(() => setOpenPopover(null), []);
   usePopoverOutsideDismiss(openPopover, closePopover);
 
+  const handleChangeAppMode = useCallback(
+    (nextMode: AppMode) => {
+      if (nextMode === appMode) return;
+      if (nextMode === "explore") {
+        setActiveTool("inspect");
+        setPendingTransitStart(null);
+        setAdvisorsOpen(false);
+        setDisastersOpen(false);
+        setOpenPopover((cur) => (cur === "advisors" || cur === "mayorMode" ? null : cur));
+        sim.clearDisaster();
+        sim.clearMilestoneEvent();
+        sim.clearFloatingPopups();
+        setSimState(sim.getSnapshot());
+      }
+      setAppMode(nextMode);
+    },
+    [appMode, sim],
+  );
+
   const handleCanvasSelectFile = useCallback((filePath: string | null) => {
     setTourAutoPlay(false);
     setSelectedFile(filePath);
@@ -240,9 +267,9 @@ export function App() {
     [],
   );
 
-  // Re-evaluate SQL-driven Advisor Quests when effectiveBundle changes
+  // Re-evaluate SQL-driven Advisor Quests when effectiveBundle changes in Play mode
   useEffect(() => {
-    if (!effectiveBundle) {
+    if (!effectiveBundle || appMode !== "play") {
       setMissions([]);
       return;
     }
@@ -253,15 +280,15 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [client, effectiveBundle]);
+  }, [appMode, client, effectiveBundle]);
 
   useEffect(() => {
-    if (!simState.milestoneEvent) return;
+    if (appMode !== "play" || !simState.milestoneEvent) return;
     soundEngine.playMilestone();
     setToastMsg(`🎉 Milestone Unlocked: ${simState.milestoneEvent}!`);
     sim.spawnFloatingPopup(70, 52, `★ ${simState.milestoneEvent}!`, "#fde047");
     sim.clearMilestoneEvent();
-  }, [sim, simState.milestoneEvent]);
+  }, [appMode, sim, simState.milestoneEvent]);
 
   useEffect(() => {
     if (!toastMsg) return;
@@ -448,8 +475,10 @@ export function App() {
   }, [bundle, client, selectedFile]);
 
   const { addedFiles, removedLots } = useMemo(() => {
-    const added = new Set<string>(overlayResult?.addedFiles ?? []);
-    const removed: GhostLot[] = [...(overlayResult?.demolishedLots ?? [])];
+    const added = new Set<string>(appMode === "play" ? (overlayResult?.addedFiles ?? []) : []);
+    const removed: GhostLot[] = [
+      ...(appMode === "play" ? (overlayResult?.demolishedLots ?? []) : []),
+    ];
     if (!bundle || !prevBundle) {
       return { addedFiles: added, removedLots: removed };
     }
@@ -470,7 +499,7 @@ export function App() {
       }
     }
     return { addedFiles: added, removedLots: removed };
-  }, [bundle, overlayResult, prevBundle]);
+  }, [appMode, bundle, overlayResult, prevBundle]);
 
   const selectedFileMetric = useMemo(() => {
     if (!effectiveBundle || !selectedFile) return null;
@@ -491,7 +520,7 @@ export function App() {
   );
 
   useEffect(() => {
-    if (!coopSyncEnabled || isStaticMode || !activeRepo) return;
+    if (appMode !== "play" || !coopSyncEnabled || isStaticMode || !activeRepo) return;
     let cancelled = false;
     const syncOnce = async () => {
       const remote = await client.fetchRemoteSandboxActions(activeRepo.owner, activeRepo.repo);
@@ -503,11 +532,11 @@ export function App() {
       cancelled = true;
       clearInterval(timer);
     };
-  }, [activeRepo, client, coopSyncEnabled, isStaticMode]);
+  }, [activeRepo, appMode, client, coopSyncEnabled, isStaticMode]);
 
   const handleToolAction = useCallback(
     async (file: FileMetric) => {
-      if (!effectiveBundle || activeTool === "inspect") return;
+      if (appMode !== "play" || !effectiveBundle || activeTool === "inspect") return;
       const tool = activeTool;
 
       if (tool === "transit_hub" && !pendingTransitStart) {
@@ -608,6 +637,7 @@ export function App() {
     [
       activeRepo,
       activeTool,
+      appMode,
       client,
       coopSyncEnabled,
       effectiveBundle,
@@ -804,15 +834,18 @@ export function App() {
 
   const runDisaster = useCallback(
     (action: () => void) => {
+      if (appMode !== "play") return;
       action();
       soundEngine.playDisaster();
       setSimState(sim.getSnapshot());
     },
-    [sim],
+    [appMode, sim],
   );
 
   const activeToolMeta =
-    activeTool === "inspect" ? null : (MAYOR_TOOLS.find((t) => t.id === activeTool) ?? null);
+    appMode !== "play" || activeTool === "inspect"
+      ? null
+      : (MAYOR_TOOLS.find((t) => t.id === activeTool) ?? null);
   const ActiveToolIcon = activeToolMeta?.icon ?? null;
 
   return (
@@ -930,7 +963,7 @@ export function App() {
                 activeRepo={activeRepo}
                 isStaticMode={isStaticMode}
                 snapshot={effectiveBundle?.snapshot ?? null}
-                simCityLevel={simState.cityLevel}
+                simCityLevel={appMode === "play" ? simState.cityLevel : undefined}
                 repoInput={repoInput}
                 analyzePct={analyzePct}
                 isOpen={openPopover === "repo"}
@@ -958,50 +991,63 @@ export function App() {
               />
 
               {effectiveBundle && (
-                <EconomyBar
-                  simState={simState}
-                  alerts={bundle?.snapshot.advisor_alerts ?? []}
-                  activeQuestCount={missions.filter((m) => !m.completed).length}
-                  grade={effectiveBundle.snapshot.health_grade}
-                  soundEnabled={soundEnabled}
-                  tourActive={tourActive}
-                  radarOpen={radarOpen}
-                  openPopover={openPopover}
-                  onTogglePopover={togglePopover}
-                  onClosePopover={closePopover}
-                  onChangeSpeed={(spd: SimSpeed) => {
-                    sim.setSpeed(spd);
-                    setSimState(sim.getSnapshot());
-                  }}
-                  onOpenAdvisors={() => setAdvisorsOpen(true)}
-                  onOpenDisasters={() => {
-                    if (!isStaticMode && activeRepo) {
-                      void client
-                        .fetchAuthors(activeRepo.owner, activeRepo.repo)
-                        .then(setRepoAuthors);
-                    }
-                    setDisastersOpen(true);
-                  }}
-                  onFocusFile={handleFocusFile}
-                  onOpenHealthModal={handleOpenHealthModal}
-                  onStartTour={handleStartTour}
-                  onToggleSound={() => {
-                    const next = !soundEnabled;
-                    setSoundEnabled(next);
-                    soundEngine.setEnabled(next);
-                  }}
-                  onToggleRadar={() => setRadarOpen((v) => !v)}
-                  onToggleZenMode={() => {
-                    setZenMode(true);
-                    closePopover();
-                  }}
-                />
+                <div className="flex flex-wrap items-center justify-end gap-2">
+                  {appMode === "play" && (
+                    <EconomyBar
+                      simState={simState}
+                      alerts={bundle?.snapshot.advisor_alerts ?? []}
+                      activeQuestCount={missions.filter((m) => !m.completed).length}
+                      openPopover={openPopover}
+                      onTogglePopover={togglePopover}
+                      onClosePopover={closePopover}
+                      onChangeSpeed={(spd: SimSpeed) => {
+                        sim.setSpeed(spd);
+                        setSimState(sim.getSnapshot());
+                      }}
+                      onOpenAdvisors={() => setAdvisorsOpen(true)}
+                      onOpenDisasters={() => {
+                        if (!isStaticMode && activeRepo) {
+                          void client
+                            .fetchAuthors(activeRepo.owner, activeRepo.repo)
+                            .then(setRepoAuthors);
+                        }
+                        setDisastersOpen(true);
+                      }}
+                      onFocusFile={handleFocusFile}
+                    />
+                  )}
+                  <ModeAndUtilitiesBar
+                    appMode={appMode}
+                    onChangeAppMode={handleChangeAppMode}
+                    grade={effectiveBundle.snapshot.health_grade}
+                    soundEnabled={soundEnabled}
+                    tourActive={tourActive}
+                    radarOpen={radarOpen}
+                    openPopover={openPopover}
+                    onTogglePopover={togglePopover}
+                    onClosePopover={closePopover}
+                    onOpenHealthModal={handleOpenHealthModal}
+                    onStartTour={handleStartTour}
+                    onToggleSound={() => {
+                      const next = !soundEnabled;
+                      setSoundEnabled(next);
+                      soundEngine.setEnabled(next);
+                    }}
+                    onToggleRadar={() => setRadarOpen((v) => !v)}
+                    onToggleZenMode={() => {
+                      setZenMode(true);
+                      closePopover();
+                    }}
+                  />
+                </div>
               )}
             </div>
 
             {/* Transient Centered Chips (0px when idle) */}
             {(activeToolMeta ||
-              (simState.activeDisaster && !simState.activeDisaster.resolved) ||
+              (appMode === "play" &&
+                simState.activeDisaster &&
+                !simState.activeDisaster.resolved) ||
               loadingMsg ||
               toastMsg) && (
               <div className="flex flex-col items-center gap-1.5">
@@ -1034,28 +1080,30 @@ export function App() {
                   </div>
                 )}
 
-                {simState.activeDisaster && !simState.activeDisaster.resolved && (
-                  <div
-                    data-testid="active-disaster-banner"
-                    className="sim-panel pointer-events-auto flex items-center justify-between gap-3 rounded-xl border-rose-500/45 bg-rose-950/75 px-3.5 py-1.5 text-xs text-rose-100"
-                  >
-                    <div className="flex items-center gap-2">
-                      <ShieldAlert className="h-4 w-4 animate-pulse text-rose-400" />
-                      <span className="font-bold">{simState.activeDisaster.title}:</span>
-                      <span className="text-rose-200">{simState.activeDisaster.detail}</span>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        sim.clearDisaster();
-                        setSimState(sim.getSnapshot());
-                      }}
-                      className="rounded-lg bg-rose-500/30 px-2.5 py-0.5 text-[11px] font-semibold text-white hover:bg-rose-500/50"
+                {appMode === "play" &&
+                  simState.activeDisaster &&
+                  !simState.activeDisaster.resolved && (
+                    <div
+                      data-testid="active-disaster-banner"
+                      className="sim-panel pointer-events-auto flex items-center justify-between gap-3 rounded-xl border-rose-500/45 bg-rose-950/75 px-3.5 py-1.5 text-xs text-rose-100"
                     >
-                      Resolve
-                    </button>
-                  </div>
-                )}
+                      <div className="flex items-center gap-2">
+                        <ShieldAlert className="h-4 w-4 animate-pulse text-rose-400" />
+                        <span className="font-bold">{simState.activeDisaster.title}:</span>
+                        <span className="text-rose-200">{simState.activeDisaster.detail}</span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          sim.clearDisaster();
+                          setSimState(sim.getSnapshot());
+                        }}
+                        className="rounded-lg bg-rose-500/30 px-2.5 py-0.5 text-[11px] font-semibold text-white hover:bg-rose-500/50"
+                      >
+                        Resolve
+                      </button>
+                    </div>
+                  )}
 
                 {loadingMsg && (
                   <div className="sim-panel pointer-events-auto flex items-center gap-2 rounded-xl px-3 py-1.5 text-xs text-sky-200">
@@ -1082,7 +1130,7 @@ export function App() {
           {/* Row 2: 1fr Middle Zone — 44px Left Rail | Open Canvas | 320px Right Inspector */}
           <div className="relative z-20 flex min-h-0 min-w-0 items-center justify-between gap-3">
             <div className="flex h-full min-h-0 min-w-0 items-center gap-3">
-              {effectiveBundle ? (
+              {effectiveBundle && appMode === "play" && (
                 <MayorToolbar
                   activeTool={activeTool}
                   onSelectTool={(t) => {
@@ -1124,8 +1172,6 @@ export function App() {
                   onToggleCoopSync={() => setCoopSyncEnabled((v) => !v)}
                   className="relative z-30 self-center"
                 />
-              ) : (
-                <span />
               )}
 
               {tourActive && (
@@ -1243,7 +1289,7 @@ export function App() {
         />
 
         <AdvisorCouncilModal
-          open={advisorsOpen}
+          open={appMode === "play" && advisorsOpen}
           missions={missions}
           claimedMissionIds={claimedMissions}
           onClaimReward={(m) => {
@@ -1259,7 +1305,7 @@ export function App() {
         />
 
         <DisastersMenu
-          open={disastersOpen}
+          open={appMode === "play" && disastersOpen}
           bundle={effectiveBundle}
           authors={repoAuthors}
           onTriggerPowerOutage={(targetFile) => {
