@@ -1,10 +1,10 @@
 import tailwindcss from "@tailwindcss/vite";
+import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 
 export default defineConfig({
   base: "./",
-  oxc: { jsx: { runtime: "automatic" } },
-  plugins: [tailwindcss()],
+  plugins: [react(), tailwindcss()],
   optimizeDeps: {
     exclude: ["@duckdb/duckdb-wasm"],
   },
