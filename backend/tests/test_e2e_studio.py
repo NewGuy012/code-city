@@ -209,6 +209,22 @@ def test_live_studio_e2e_2d_datamaps_tour_notes_3d_timescrub_and_quack(tmp_path:
                 page.goto(base_url, wait_until="domcontentloaded")
                 page.wait_for_selector('[data-testid="city-canvas-2d"]', timeout=25000)
                 page.wait_for_selector('[data-testid="city-grade-badge"]', timeout=15000)
+
+                # Mayor's Welcome Briefing auto-opens on initial visit and dismisses cleanly
+                page.wait_for_selector('[data-testid="mayor-welcome-modal"]', timeout=10000)
+                welcome_txt = page.inner_text('[data-testid="mayor-welcome-modal"]')
+                assert "A QUICK HELLO FROM THE MAYOR" in welcome_txt.upper()
+                assert page.locator('[data-testid="welcome-start-card"]').count() >= 1
+                page.click('[data-testid="welcome-explore-btn"]')
+                expect(page.locator('[data-testid="mayor-welcome-modal"]')).to_have_count(0)
+
+                # Dismissal persists across page reload
+                page.reload(wait_until="domcontentloaded")
+                page.wait_for_selector('[data-testid="city-canvas-2d"]', timeout=25000)
+                page.wait_for_selector('[data-testid="city-grade-badge"]', timeout=15000)
+                page.wait_for_timeout(200)
+                expect(page.locator('[data-testid="mayor-welcome-modal"]')).to_have_count(0)
+
                 # Default boot is Explore Mode (economy & mayor tools hidden; utilities accessible)
                 expect(page.locator('[data-testid="mode-toggle-explore"]')).to_have_attribute(
                     "aria-pressed", "true"
@@ -238,11 +254,56 @@ def test_live_studio_e2e_2d_datamaps_tour_notes_3d_timescrub_and_quack(tmp_path:
                     page.click(f'[data-testid="datamap-{mode}"]')
                     page.wait_for_timeout(120)
 
-                # Start Tour via Utilities menu and inspect building tabs + notes
+                # Reopen Mayor's Welcome Briefing from Utilities menu and pick a starting building
+                page.click('[data-testid="utilities-menu-btn"]')
+                page.click('[data-testid="open-welcome-btn"]')
+                page.wait_for_selector('[data-testid="mayor-welcome-modal"]', timeout=5000)
+                page.locator('[data-testid="welcome-start-card"]').nth(1).click()
+                expect(page.locator('[data-testid="mayor-welcome-modal"]')).to_have_count(0)
+                page.wait_for_selector('[data-testid="inspector-drawer"]', timeout=10000)
+
+                # Collapsible Detailed Description & Explore Code both start collapsed by default
+                page.wait_for_selector('[data-testid="building-summary-card"]', timeout=5000)
+                expect(page.locator('[data-testid="building-details-toggle"]')).to_have_attribute(
+                    "aria-expanded", "false"
+                )
+                expect(page.locator('[data-testid="building-code-toggle"]')).to_have_attribute(
+                    "aria-expanded", "false"
+                )
+                page.click('[data-testid="building-details-toggle"]')
+                expect(page.locator('[data-testid="building-details-toggle"]')).to_have_attribute(
+                    "aria-expanded", "true"
+                )
+                page.wait_for_selector('[data-testid="building-details-content"]', timeout=5000)
+
+                sym_btns = page.locator('[data-testid^="symbol-jump-"]')
+                if sym_btns.count() > 0:
+                    sym_btns.first.click()
+                else:
+                    page.click('[data-testid="building-code-toggle"]')
+                expect(page.locator('[data-testid="building-code-toggle"]')).to_have_attribute(
+                    "aria-expanded", "true"
+                )
+                page.wait_for_selector('[data-testid="building-code-content"]', timeout=5000)
+                page.wait_for_selector('[data-testid="code-fullscreen-btn"]', timeout=8000)
+                _assert_no_hud_overlap(page)
+
+                page.click('[data-testid="code-fullscreen-btn"]')
+                page.wait_for_selector('[data-testid="code-fullscreen-modal"]', timeout=5000)
+                page.click('[data-testid="code-fullscreen-modal-close"]')
+                expect(page.locator('[data-testid="code-fullscreen-modal"]')).to_have_count(0)
+
+                # Start Tour via Utilities menu and inspect building tabs + notes (collapses reset)
                 page.click('[data-testid="utilities-menu-btn"]')
                 page.click('[data-testid="start-tour-btn"]')
                 page.wait_for_selector('[data-testid="onboarding-tour"]', timeout=10000)
                 page.wait_for_selector('[data-testid="inspector-drawer"]', timeout=10000)
+                expect(page.locator('[data-testid="building-details-toggle"]')).to_have_attribute(
+                    "aria-expanded", "false"
+                )
+                expect(page.locator('[data-testid="building-code-toggle"]')).to_have_attribute(
+                    "aria-expanded", "false"
+                )
                 _assert_no_hud_overlap(page)
 
                 page.click('[data-testid="inspector-tab-coupling"]')

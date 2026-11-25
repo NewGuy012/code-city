@@ -211,9 +211,44 @@ def extract_repo_docs_context(repo_path: Path) -> RepoDocsContext:
     )
 
 
+_COMMON_DISTRICT_WORDS = frozenset(
+    {
+        "api",
+        "app",
+        "cmd",
+        "common",
+        "core",
+        "data",
+        "lib",
+        "pkg",
+        "shared",
+        "src",
+        "test",
+        "tests",
+        "util",
+        "utils",
+        "web",
+    }
+)
+
+
 def _summarize_doc_for_keyword(doc_text: str, keyword: str) -> str | None:
+    # Prefer explicit code-styled (`keyword` or keyword/) mentions so common words like
+    # "core" don't falsely match generic prose in sentences describing other districts.
+    escaped = re.escape(keyword)
+    for pat_str in (
+        rf"([^\n]*`{escaped}/?`[^\n]*?(?:\.(?=\s|$)|(?=\n|$)))",
+        rf"([^\n]*\b{escaped}/[^\n]*?(?:\.(?=\s|$)|(?=\n|$)))",
+    ):
+        match = re.compile(pat_str, re.I).search(doc_text)
+        if match:
+            cleaned = _clean_markdown_line(match.group(1).strip().strip("|"))
+            return cleaned[:160] if cleaned else None
+
+    if keyword.lower() in _COMMON_DISTRICT_WORDS:
+        return None
     pattern = re.compile(
-        rf"([^\n]*\b{re.escape(keyword)}\b[^\n]*?(?:\.(?=\s|$)|(?=\n|$)))",
+        rf"([^\n]*\b{escaped}\b[^\n]*?(?:\.(?=\s|$)|(?=\n|$)))",
         re.I,
     )
     match = pattern.search(doc_text)

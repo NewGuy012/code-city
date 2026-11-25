@@ -91,8 +91,16 @@ def _first_sentence(text: str, limit: int = 200) -> str:
     return _cap_text(cleaned, limit)
 
 
+def _a_or_an(phrase: str) -> str:
+    low = phrase.lstrip().lower()
+    article = (
+        "an" if low.startswith(("a", "e", "i", "o", "u")) and not low.startswith("user") else "a"
+    )
+    return f"{article} {phrase}"
+
+
 def _join_names(names: list[str], *, limit: int = 3) -> str:
-    picked = [f"`{n}`" for n in names[:limit] if n]
+    picked = [n for n in names[:limit] if n]
     if not picked:
         return ""
     if len(picked) == 1:
@@ -335,15 +343,17 @@ def build_file_description(
         short_summary = mod_first
     elif info.endpoints:
         short_summary = (
-            f"{fname} is an {role_phrase}, exposing {len(info.endpoints)} route/command"
-            f"{'s' if len(info.endpoints) != 1 else ''} including `{info.endpoints[0]}`."
+            f"{fname} is {_a_or_an(role_phrase)}, exposing {len(info.endpoints)} route/command"
+            f"{'s' if len(info.endpoints) != 1 else ''} including {info.endpoints[0]}."
         )
     elif exported_names:
         sym_str = _join_names(exported_names, limit=2)
         pkg_hint = f" using {_join_names(ext_pkgs, limit=2)}" if ext_pkgs else ""
-        short_summary = f"{fname} acts as a {role_phrase}, providing {sym_str}{pkg_hint}."
+        short_summary = f"{fname} acts as {_a_or_an(role_phrase)}, providing {sym_str}{pkg_hint}."
     else:
-        short_summary = f"{fname} is a {info.language} {role_phrase} ({info.sloc} lines of code)."
+        short_summary = (
+            f"{fname} is {_a_or_an(info.language)} {role_phrase} ({info.sloc} lines of code)."
+        )
     short_summary = _cap_text(short_summary, 240)
 
     # 2. Craft detailed_overview (plain English narrative when expanded)
