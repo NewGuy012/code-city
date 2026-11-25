@@ -33,8 +33,7 @@ def test_ducklake_nested_schema_quack_multiwriter_and_parquet_export(tmp_path: P
 
         def worker(idx: int) -> None:
             try:
-                client = qsrv.connect_client(alias="remote")
-                try:
+                with qsrv.client_session(alias="remote") as client:
                     snap = Snapshot(
                         snapshot_idx=idx,
                         commit_sha=f"deadbeef{idx:04d}",
@@ -95,8 +94,6 @@ def test_ducklake_nested_schema_quack_multiwriter_and_parquet_export(tmp_path: P
                         [],
                         catalog_prefix="remote.lake",
                     )
-                finally:
-                    client.close()
             except Exception as exc:  # pragma: no cover
                 errors.append((idx, exc))
 
@@ -108,8 +105,7 @@ def test_ducklake_nested_schema_quack_multiwriter_and_parquet_export(tmp_path: P
 
         assert errors == []
 
-        ann_client = qsrv.connect_client(alias="remote")
-        try:
+        with qsrv.client_session(alias="remote") as ann_client:
             lake.add_annotation(
                 ann_client,
                 "acme-org",
@@ -124,8 +120,6 @@ def test_ducklake_nested_schema_quack_multiwriter_and_parquet_export(tmp_path: P
                 ),
                 catalog_prefix="remote.lake",
             )
-        finally:
-            ann_client.close()
 
     with lake.session(read_only=True) as con:
         pfx = lake.schema_prefix("acme-org", "demo-app")
@@ -155,12 +149,9 @@ def test_ducklake_nested_schema_quack_multiwriter_and_parquet_export(tmp_path: P
             "annotations",
         }
 
-        plain = duckdb.connect()
-        try:
+        with duckdb.connect() as plain:
             cnt = plain.execute(
                 "SELECT COUNT(*), MIN(language_breakdown) "
                 f"FROM read_parquet('{exported['snapshots']}')"
             ).fetchone()
             assert cnt is not None and cnt[0] == 4 and '"python":1' in cnt[1]
-        finally:
-            plain.close()

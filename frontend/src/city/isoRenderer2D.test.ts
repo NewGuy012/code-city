@@ -12,7 +12,6 @@ import {
 import {
   ZONE_PALETTES,
   buildingPalette,
-  buildingVariantIndex,
   canvasCursorClass,
   isAnalyticalDataMap,
   selectFaultLines,
@@ -21,6 +20,7 @@ import {
   computeBlockPartTransform,
   getBlockPartsForFile,
   getPrimitiveGeometry,
+  isSharedPrimitive,
   lotOrientation,
 } from "./geometries3D";
 import {
@@ -32,17 +32,9 @@ import {
 } from "./isoRenderer2D";
 
 describe("isoRenderer2D projection", () => {
-  test("worldToScreen and screenToWorldGround invert cleanly", () => {
-    const cam = { panX: 25, panY: -15, zoom: 1.35 };
-    const screen = worldToScreen(42, 68, 0, 1280, 720, cam);
-    const back = screenToWorldGround(screen.x, screen.y, 1280, 720, cam);
-    expect(Math.abs(back.x - 42)).toBeLessThan(1e-6);
-    expect(Math.abs(back.z - 68)).toBeLessThan(1e-6);
-  });
-
-  test("worldToScreen and screenToWorldGround invert cleanly across all 4 compass rotations and pitches", () => {
+  test("worldToScreen and screenToWorldGround invert cleanly across compass rotations and pitches", () => {
     for (let step = 0; step < 4; step++) {
-      const yaw = DEFAULT_YAW + step * (Math.PI / 2) + 0.22;
+      const yaw = DEFAULT_YAW + step * (Math.PI / 2) + (step === 0 ? 0 : 0.22);
       for (const pitch of [15, 35, 65, 82]) {
         const cam = cameraFromTarget(55, 61, 1.4, yaw, pitch);
         const screen = worldToScreen(93, 27, 0, 1440, 900, cam);
@@ -133,15 +125,10 @@ describe("isoRenderer2D projection", () => {
     expect(style.transform).toContain("scale(");
   });
 
-  test("natural cityTheme variants, analytical datamap detection, and fault lines", () => {
+  test("cityTheme palettes, analytical datamap detection, and fault lines", () => {
     expect(isAnalyticalDataMap("living")).toBe(false);
     expect(isAnalyticalDataMap("hotspots")).toBe(true);
     expect(isAnalyticalDataMap("pollution")).toBe(true);
-
-    const v0 = buildingVariantIndex("src/api/routes.ts", 3);
-    expect(v0).toBe(buildingVariantIndex("src/api/routes.ts", 3));
-    expect(v0).toBeGreaterThanOrEqual(0);
-    expect(v0).toBeLessThan(3);
 
     const dummyFile = {
       file_path: "src/core/engine.py",
@@ -276,6 +263,7 @@ describe("isoRenderer2D projection", () => {
     const box = getPrimitiveGeometry("box");
     expect(box.getAttribute("position").count).toBeGreaterThan(0);
     expect(getPrimitiveGeometry("box")).toBe(box);
+    expect(isSharedPrimitive(box)).toBe(true);
     expect(getPrimitiveGeometry("dome").getAttribute("position").count).toBeGreaterThan(0);
   });
 });

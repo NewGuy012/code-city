@@ -10,8 +10,9 @@ import pytest
 from codecity.analyzer.git_history import resolve_git_repo, select_keyframes
 from codecity.analyzer.layout import CITY_CANVAS_D, CITY_CANVAS_W, compute_stable_city_layout
 from codecity.analyzer.pipeline import analyze_repository
+from codecity.analyzer.plugins.go import GoPlugin
 from codecity.analyzer.plugins.typescript import TypeScriptPlugin
-from codecity.analyzer.treesitter_core import scan_worktree_ast
+from codecity.analyzer.treesitter_core import analyze_file_ast, scan_worktree_ast
 from codecity.models import BuildingArchetype, ZoneType
 from codecity.storage.lakehouse import LakehouseManager
 from tests.conftest import create_polyglot_fixture_repo
@@ -150,9 +151,28 @@ def test_worktree_scanner_skips_symlinks_and_remote_rejects_local_urls(tmp_path:
         "http://169.254.169.254/x",
         "git@localhost:a/b.git",
         "git@127.0.0.1:a/b.git",
+        "https://nonexistent.invalid/repo.git",
+        "git@-oProxyCommand=id:a/b.git",
     ):
         with pytest.raises(ValueError):
             resolve_git_repo(url, tmp_path / "clones")
+
+    # Comment apostrophes must not mask subsequent route/hint detection
+    ast_info = analyze_file_ast(
+        "api/app.py",
+        "# don't ignore\n@app.get('/items')\ndef items():\n    return []\n",
+    )
+    assert ast_info.signals["route_hints"] is True
+
+    # Go import resolution enforces module path segment boundaries
+    go_wt = tmp_path / "go_wt"
+    (go_wt / "pkg").mkdir(parents=True)
+    (go_wt / "go.mod").write_text("module example.com/app\n\ngo 1.24\n")
+    (go_wt / "main.go").write_text(
+        'package main\nimport "example.com/app-extra/pkg"\nfunc main(){}\n'
+    )
+    (go_wt / "pkg" / "p.go").write_text("package pkg\n")
+    assert GoPlugin().analyze(go_wt, 0, scan_worktree_ast(go_wt)).imports == []
 
     commits = [(f"sha{i}", datetime(2026, 1, 1 + i, tzinfo=UTC), None) for i in range(4)]
     assert [k.commit_sha for k in select_keyframes(commits, max_keyframes=1)] == ["sha3"]

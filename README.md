@@ -84,10 +84,10 @@ Catalog data defaults to `.codecity/` (override with `codecity --data-dir <path>
 
 | Layer | Stack | Role |
 | :--- | :--- | :--- |
-| **Analyzer** | `Tree-sitter`, `ruff`, `bun`, `git worktree` | Multi-worker keyframe AST, complexity, lint, churn, and dependency extraction with symlink/SSRF validation, isolated `bun lint`/`bun fmt` execution, and hook-disabled Git execution |
+| **Analyzer** | `Tree-sitter`, `ruff`, `bun`, `git worktree` | Multi-worker keyframe AST, complexity, lint, churn, and dependency extraction with symlink/SSRF validation, sanitized `bun lint`/`bun fmt` config isolation, and hook/SSH-config-disabled Git execution |
 | **Lakehouse** | `DuckDB 2.0`, `DuckLake 1.1`, `Quack` | Concurrent nested schemas (`repos.<owner>.<repo>`), `VARIANT` metrics, Parquet export, and audit feeds |
-| **Control Plane** | `FastAPI`, `uvicorn`, stdlib HTTP, SSE | Thin local server with bounded per-repo jobs, CSRF origin checks, validated payloads, SSE progress, Parquet serving, localhost Quack proxy, sandboxed SVG badges, and Mayor Git actions |
-| **Studio UI** | `React`, `DuckDB-Wasm`, `Canvas 2D`, bare `Three.js` | Client-side Parquet SQL analytics (snapshots, blast radius, city tours, health reports) and instanced 2D/3D rendering across Live and Static modes |
+| **Control Plane** | `FastAPI`, `uvicorn`, stdlib HTTP, SSE | Thin local server with bounded per-repo jobs and Mayor locks, `Host` & CSRF origin checks, validated payloads, SSE progress, atomic exports, localhost Quack proxy, sandboxed SVG badges, and Mayor Git actions |
+| **Studio UI** | `React`, `DuckDB-Wasm`, `Canvas 2D`, bare `Three.js` | Client-side Parquet SQL analytics (snapshots, blast radius, city tours, health reports), in-memory Refactor Sandbox overlays, and instanced 2D/3D rendering across Live and Static modes (built with Vite 8 native Oxc JSX) |
 
 ---
 

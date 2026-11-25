@@ -48,6 +48,7 @@ def test_control_plane_mayor_export_quack_and_security(tmp_path: Path) -> None:
         health = client.get("/api/health").json()
         assert health["quack_enabled"] is True
         assert str(health["quack_uri"]).startswith("quack:")
+        assert client.get("/api/health", headers={"Host": "evil.example:8787"}).status_code == 403
 
         # Quack CORS proxy allows localhost origins, rejects external origins and traversal
         q_local = client.get("/quack", headers={"Origin": "http://127.0.0.1:5173"})
@@ -162,6 +163,13 @@ def test_control_plane_mayor_export_quack_and_security(tmp_path: Path) -> None:
         postcard = client.get(exp_data["postcard_url"])
         assert postcard.status_code == 200 and len(postcard.content) > 15_000
 
+        assert (
+            client.get(
+                "/api/repos/acme/poly_city/quack-snippet",
+                headers={"Host": "rebind.evil"},
+            ).status_code
+            == 403
+        )
         # CSRF guard + Live Mayor branch execution + server-side fan-in guard
         assert (
             client.post(
