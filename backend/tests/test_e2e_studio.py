@@ -23,6 +23,7 @@ def _assert_no_hud_overlap(page: Page) -> None:
         '[data-testid="repo-switcher-btn"]',
         '[data-testid="datamap-bar"], [data-testid="datamap-dropdown-btn"]',
         '[data-testid="economy-bar"]',
+        '[data-testid="mode-utilities-bar"]',
         '[data-testid="mayor-toolbar"]',
         '[data-testid="inspector-drawer"]',
         '[data-testid="onboarding-tour"]',
@@ -148,6 +149,13 @@ def test_live_studio_e2e_2d_datamaps_tour_notes_3d_timescrub_and_quack(tmp_path:
             page.goto(base_url, wait_until="domcontentloaded")
             page.wait_for_selector('[data-testid="city-canvas-2d"]', timeout=25000)
             page.wait_for_selector('[data-testid="city-grade-badge"]', timeout=15000)
+            # Default boot is Explore Mode (economy & mayor tools hidden; utilities accessible)
+            expect(page.locator('[data-testid="mode-toggle-explore"]')).to_have_attribute(
+                "aria-pressed", "true"
+            )
+            expect(page.locator('[data-testid="economy-bar"]')).to_have_count(0)
+            expect(page.locator('[data-testid="mayor-toolbar"]')).to_have_count(0)
+            expect(page.locator('[data-testid="utilities-menu-btn"]')).to_be_visible()
             _assert_no_hud_overlap(page)
 
             # Repo & Analyze popover works cleanly
@@ -250,7 +258,7 @@ def test_live_studio_e2e_2d_datamaps_tour_notes_3d_timescrub_and_quack(tmp_path:
             page.wait_for_timeout(150)
             _assert_no_hud_overlap(page)
 
-            # Verify HUD auto-scales cleanly at zoomed 640x380 viewport without cutting off edges
+            # Verify HUD auto-scales cleanly at zoomed 640x380 viewport in Explore & Play modes
             page.set_viewport_size({"width": 640, "height": 380})
             page.wait_for_timeout(150)
             _assert_no_hud_overlap(page)
@@ -259,20 +267,38 @@ def test_live_studio_e2e_2d_datamaps_tour_notes_3d_timescrub_and_quack(tmp_path:
                 [
                     '[data-testid="repo-switcher-btn"]',
                     '[data-testid="datamap-dropdown-btn"]',
+                    '[data-testid="mode-toggle"]',
                     '[data-testid="utilities-menu-btn"]',
-                    '[data-testid="open-disasters-btn"]',
-                    '[data-testid="mayor-toolbar"]',
-                    '[data-testid="export-blueprint-btn"]',
                     '[data-testid="time-scrubber"]',
                     '[data-testid="camera-controls-hud"]',
                     '[data-testid="camera-view-btn"]',
                     '[data-testid="toggle-radar-btn"]',
                 ],
             )
+            page.click('[data-testid="mode-toggle-play"]')
+            page.wait_for_selector('[data-testid="economy-bar"]', timeout=5000)
+            _assert_no_hud_overlap(page)
+            _assert_hud_within_viewport(
+                page,
+                [
+                    '[data-testid="repo-switcher-btn"]',
+                    '[data-testid="datamap-dropdown-btn"]',
+                    '[data-testid="economy-bar"]',
+                    '[data-testid="mode-toggle"]',
+                    '[data-testid="utilities-menu-btn"]',
+                    '[data-testid="open-disasters-btn"]',
+                    '[data-testid="mayor-toolbar"]',
+                    '[data-testid="export-blueprint-btn"]',
+                    '[data-testid="time-scrubber"]',
+                    '[data-testid="camera-controls-hud"]',
+                ],
+            )
             page.click('[data-testid="camera-view-btn"]')
             page.wait_for_selector('[data-testid="camera-view-popover"]', timeout=5000)
             _assert_hud_within_viewport(page, ['[data-testid="camera-view-popover"]'])
             page.keyboard.press("Escape")
+            page.click('[data-testid="mode-toggle-explore"]')
+            expect(page.locator('[data-testid="economy-bar"]')).to_have_count(0)
 
             page.set_viewport_size({"width": 1360, "height": 840})
 
@@ -333,8 +359,13 @@ def test_live_studio_e2e_2d_datamaps_tour_notes_3d_timescrub_and_quack(tmp_path:
             page.click('[data-testid="cam-preset-4"]')
             page.keyboard.press("Escape")
 
-            # Economy bar, Advisors Quick-Peek popover -> SQL Quests modal, Disasters
+            # Toggle into Game Play Mode and verify Economy bar, Quests, Disasters & Mayor tools
+            page.click('[data-testid="mode-toggle-play"]')
+            expect(page.locator('[data-testid="mode-toggle-play"]')).to_have_attribute(
+                "aria-pressed", "true"
+            )
             page.wait_for_selector('[data-testid="economy-bar"]', timeout=5000)
+            page.wait_for_selector('[data-testid="mayor-toolbar"]', timeout=5000)
             page.click('[data-testid="sim-speed-2"]')
             page.click('[data-testid="advisors-menu-btn"]')
             page.wait_for_selector('[data-testid="advisors-popover"]', timeout=5000)
@@ -367,6 +398,18 @@ def test_live_studio_e2e_2d_datamaps_tour_notes_3d_timescrub_and_quack(tmp_path:
             )
             page.click('[data-testid="blueprint-modal-close"]')
             expect(page.locator('[data-testid="blueprint-modal"]')).to_have_count(0)
+
+            # Toggling back to Explore Mode clears active gameplay overlays and hides gameplay HUD
+            page.click('[data-testid="tool-sweeper"]')
+            page.wait_for_selector('[data-testid="active-tool-chip"]', timeout=5000)
+            page.click('[data-testid="mode-toggle-explore"]')
+            expect(page.locator('[data-testid="mode-toggle-explore"]')).to_have_attribute(
+                "aria-pressed", "true"
+            )
+            expect(page.locator('[data-testid="economy-bar"]')).to_have_count(0)
+            expect(page.locator('[data-testid="mayor-toolbar"]')).to_have_count(0)
+            expect(page.locator('[data-testid="active-tool-chip"]')).to_have_count(0)
+            expect(page.locator('[data-testid="active-disaster-banner"]')).to_have_count(0)
 
             assert page_errors == [], f"Unexpected browser page errors: {page_errors}"
             browser.close()
