@@ -399,6 +399,7 @@ export function computeBlockPartTransform(
 }
 
 const primitiveCache = new Map<PrimitiveShapeKey, THREE.BufferGeometry>();
+const sharedPrimitiveSet = new Set<THREE.BufferGeometry>();
 
 /** Shared normalized primitive geometries spanning y in [0, 1] and x,z in [-0.5, 0.5]. */
 export function getPrimitiveGeometry(shape: PrimitiveShapeKey): THREE.BufferGeometry {
@@ -427,9 +428,10 @@ export function getPrimitiveGeometry(shape: PrimitiveShapeKey): THREE.BufferGeom
   geom.computeBoundingBox();
   geom.computeBoundingSphere();
   primitiveCache.set(shape, geom);
+  sharedPrimitiveSet.add(geom);
   return geom;
 }
 
-export function getSharedPrimitiveSet(): Set<THREE.BufferGeometry> {
-  return new Set(primitiveCache.values());
+export function isSharedPrimitive(geom: THREE.BufferGeometry): boolean {
+  return sharedPrimitiveSet.has(geom);
 }

@@ -40,7 +40,6 @@ export function EconomyBar({
         advisorsOpen ? "z-40" : ""
       }`}
     >
-      {/* Sprint Progress & Speed Stepper */}
       <div className="flex items-center gap-2">
         <div
           className="flex flex-col gap-0.5"
@@ -89,7 +88,6 @@ export function EconomyBar({
         </div>
       </div>
 
-      {/* Velocity Treasury & Happiness */}
       <div className="hidden items-center gap-2.5 sm:flex">
         <div
           className="flex items-center gap-1"
@@ -133,7 +131,6 @@ export function EconomyBar({
 
       <div className="h-4 w-px bg-white/10" />
 
-      {/* Advisors Quick-Peek Popover */}
       <div data-popover-id="advisors" className="relative">
         <button
           type="button"
@@ -226,7 +223,6 @@ export function EconomyBar({
         )}
       </div>
 
-      {/* Disasters Modal Trigger */}
       <button
         type="button"
         data-testid="open-disasters-btn"

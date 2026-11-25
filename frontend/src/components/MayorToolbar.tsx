@@ -147,7 +147,7 @@ export function MayorToolbar({
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `${repoLabel.replace(/\//g, "_")}_refactor_blueprint.md`;
+    a.download = `${repoLabel.replace(/[^a-zA-Z0-9._-]+/g, "_")}_refactor_blueprint.md`;
     a.click();
     URL.revokeObjectURL(url);
   }
@@ -160,7 +160,6 @@ export function MayorToolbar({
           isModePopoverOpen ? "z-40" : ""
         } ${className}`}
       >
-        {/* Sandbox / Live Git Mode & Co-Op Popover */}
         <div data-popover-id="mayorMode" className="relative">
           <button
             type="button"
@@ -258,7 +257,6 @@ export function MayorToolbar({
 
         <div className="my-0.5 h-px w-6 bg-white/10" />
 
-        {/* 7 Mayor Tools (Icon Rail + Rich Side Tooltips) */}
         {MAYOR_TOOLS.map((t) => {
           const Icon = t.icon;
           const active = activeTool === t.id;
@@ -283,7 +281,6 @@ export function MayorToolbar({
                 )}
               </button>
 
-              {/* Floating Side Tooltip */}
               <div className="sim-popover pointer-events-none invisible absolute top-1/2 left-full z-40 ml-2.5 w-52 -translate-y-1/2 rounded-xl px-2.5 py-2 text-left opacity-0 transition-opacity duration-100 group-hover:visible group-hover:opacity-100">
                 <div className="flex items-center justify-between gap-2">
                   <span className="font-semibold text-white">{t.label}</span>
@@ -299,7 +296,6 @@ export function MayorToolbar({
           );
         })}
 
-        {/* Progressive History Controls (only shown once edits exist) */}
         {actions.length > 0 && (
           <>
             <div className="my-0.5 h-px w-6 bg-white/10" />
@@ -337,7 +333,6 @@ export function MayorToolbar({
 
         <div className="my-0.5 h-px w-6 bg-white/10" />
 
-        {/* Export Refactor Blueprint */}
         <button
           type="button"
           data-testid="export-blueprint-btn"
@@ -363,7 +358,7 @@ export function MayorToolbar({
         open={blueprintOpen}
         testId="blueprint-modal"
         title="Mayor's Refactor Blueprint"
-        subtitle="Markdown checklist & GitHub Issues plan from DuckDB-Wasm sandbox_actions"
+        subtitle="Markdown checklist & GitHub Issues plan from Refactor Sandbox"
         icon={<FileText className="h-5 w-5 text-amber-400" />}
         onClose={() => setBlueprintOpen(false)}
         footer={

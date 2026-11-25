@@ -63,6 +63,10 @@ import type {
 
 const CityCanvas3D = lazy(() => import("./city/CityCanvas3D"));
 
+function parquetBaseUrl(owner: string, repo: string): string {
+  return `/api/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/parquet`;
+}
+
 export function App() {
   const clientRef = useRef<CityDataClient | null>(null);
   if (!clientRef.current) {
@@ -97,6 +101,11 @@ export function App() {
   const [snapshotIdx, setSnapshotIdx] = useState(0);
   const [bundle, setBundle] = useState<CitySnapshotBundle | null>(null);
   const [prevBundle, setPrevBundle] = useState<CitySnapshotBundle | null>(null);
+  const bundleCtxRef = useRef<{
+    snapshots: Snapshot[];
+    snapshotIdx: number;
+    bundle: CitySnapshotBundle;
+  } | null>(null);
 
   const [dataMap, setDataMap] = useState<DataMapMode>("living");
   const [viewMode, setViewMode] = useState<"2d" | "3d">("2d");
@@ -416,11 +425,7 @@ export function App() {
         if (list.length > 0) {
           const first = list[0];
           setActiveRepo({ owner: first.owner, repo: first.repo });
-          await loadRepoData(
-            first.owner,
-            first.repo,
-            `/api/repos/${encodeURIComponent(first.owner)}/${encodeURIComponent(first.repo)}/parquet`,
-          );
+          await loadRepoData(first.owner, first.repo, parquetBaseUrl(first.owner, first.repo));
         } else {
           setLoadingMsg(null);
         }
@@ -445,14 +450,23 @@ export function App() {
     let cancelled = false;
     const pos = snapshots.findIndex((s) => s.snapshot_idx === snapshotIdx);
     const prevSnap = pos > 0 ? snapshots[pos - 1] : null;
+    const cachedPrev =
+      prevSnap &&
+      bundleCtxRef.current?.snapshots === snapshots &&
+      bundleCtxRef.current.snapshotIdx === prevSnap.snapshot_idx
+        ? bundleCtxRef.current.bundle
+        : null;
     Promise.all([
       client.querySnapshotBundle(snapshotIdx, snapshots),
-      prevSnap
-        ? client.querySnapshotBundle(prevSnap.snapshot_idx, snapshots)
-        : Promise.resolve(null),
+      cachedPrev
+        ? Promise.resolve(cachedPrev)
+        : prevSnap
+          ? client.querySnapshotBundle(prevSnap.snapshot_idx, snapshots)
+          : Promise.resolve(null),
     ])
       .then(([cur, prev]) => {
         if (!cancelled) {
+          bundleCtxRef.current = { snapshots, snapshotIdx, bundle: cur };
           setBundle(cur);
           setPrevBundle(prev);
         }
@@ -549,9 +563,16 @@ export function App() {
   useEffect(() => {
     if (appMode !== "play" || !coopSyncEnabled || isStaticMode || !activeRepo) return;
     let cancelled = false;
+    let inFlight = false;
     const syncOnce = async () => {
-      const remote = await client.fetchRemoteSandboxActions(activeRepo.owner, activeRepo.repo);
-      if (!cancelled) setSandboxActions(remote);
+      if (inFlight || (typeof document !== "undefined" && document.hidden)) return;
+      inFlight = true;
+      try {
+        const remote = await client.fetchRemoteSandboxActions(activeRepo.owner, activeRepo.repo);
+        if (!cancelled) setSandboxActions(remote);
+      } finally {
+        inFlight = false;
+      }
     };
     void syncOnce();
     const timer = setInterval(() => void syncOnce(), 2500);
@@ -809,12 +830,7 @@ export function App() {
           const o = payload.owner ?? owner;
           const r = payload.repo ?? repo;
           setActiveRepo({ owner: o, repo: r });
-          void loadRepoData(
-            o,
-            r,
-            `/api/repos/${encodeURIComponent(o)}/${encodeURIComponent(r)}/parquet`,
-            true,
-          );
+          void loadRepoData(o, r, parquetBaseUrl(o, r), true);
         } else if (payload.stage === "error") {
           es.close();
           if (analyzeEsRef.current === es) analyzeEsRef.current = null;
@@ -875,31 +891,34 @@ export function App() {
       ? null
       : (MAYOR_TOOLS.find((t) => t.id === activeTool) ?? null);
   const ActiveToolIcon = activeToolMeta?.icon ?? null;
+  const sharedCanvasProps = effectiveBundle
+    ? {
+        districts: effectiveBundle.districts,
+        files: effectiveBundle.files,
+        cochanges: effectiveBundle.cochanges,
+        deps: effectiveBundle.deps,
+        dataMap,
+        selectedFile,
+        blastRadius,
+        showTraffic,
+        sim,
+        plazas: streetGrid.plazas,
+        streetLines: streetGrid,
+        activeTool,
+        onSelectFile: handleCanvasSelectFile,
+        onToolAction: onCanvasToolAction,
+      }
+    : null;
 
   return (
     <div className="relative h-screen w-screen overflow-hidden bg-slate-950 text-slate-100">
-      {effectiveBundle ? (
+      {effectiveBundle && sharedCanvasProps ? (
         viewMode === "2d" ? (
           <CityCanvas2D
-            districts={effectiveBundle.districts}
-            files={effectiveBundle.files}
+            {...sharedCanvasProps}
             imports={effectiveBundle.imports}
-            cochanges={effectiveBundle.cochanges}
-            deps={effectiveBundle.deps}
-            dataMap={dataMap}
-            selectedFile={selectedFile}
-            blastRadius={blastRadius}
             addedFiles={addedFiles}
             removedLots={removedLots}
-            showTraffic={showTraffic}
-            sim={sim}
-            fireFiles={simState.fireFiles}
-            blackoutFiles={simState.blackoutFiles}
-            plazas={streetGrid.plazas}
-            streetLines={streetGrid}
-            activeTool={activeTool}
-            onSelectFile={handleCanvasSelectFile}
-            onToolAction={onCanvasToolAction}
           />
         ) : (
           <Suspense
@@ -910,24 +929,7 @@ export function App() {
               </div>
             }
           >
-            <CityCanvas3D
-              districts={effectiveBundle.districts}
-              files={effectiveBundle.files}
-              cochanges={effectiveBundle.cochanges}
-              deps={effectiveBundle.deps}
-              dataMap={dataMap}
-              selectedFile={selectedFile}
-              blastRadius={blastRadius}
-              showTraffic={showTraffic}
-              sim={sim}
-              fireFiles={simState.fireFiles}
-              blackoutFiles={simState.blackoutFiles}
-              plazas={streetGrid.plazas}
-              streetLines={streetGrid}
-              activeTool={activeTool}
-              onSelectFile={handleCanvasSelectFile}
-              onToolAction={onCanvasToolAction}
-            />
+            <CityCanvas3D {...sharedCanvasProps} />
           </Suspense>
         )
       ) : (
@@ -976,14 +978,12 @@ export function App() {
         </button>
       )}
 
-      {/* Zero-Overlap 3-Row Grid HUD Shell */}
       {!zenMode && (
         <div
           data-testid="hud-shell"
           style={hudShellStyle}
           className="pointer-events-none fixed top-0 left-0 z-20 grid h-full w-full grid-cols-[minmax(0,1fr)] grid-rows-[auto_1fr_auto] gap-2.5 p-3"
         >
-          {/* Row 1: Unified Top Bar + Optional Transient Centered Chips */}
           <header className="relative z-30 flex min-w-0 flex-col gap-2">
             <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
               <RepoAnalyzePopover
@@ -999,11 +999,7 @@ export function App() {
                 onClose={closePopover}
                 onSelectRepo={(o, r) => {
                   setActiveRepo({ owner: o, repo: r });
-                  void loadRepoData(
-                    o,
-                    r,
-                    `/api/repos/${encodeURIComponent(o)}/${encodeURIComponent(r)}/parquet`,
-                  );
+                  void loadRepoData(o, r, parquetBaseUrl(o, r));
                 }}
                 onChangeRepoInput={setRepoInput}
                 onAnalyzeSubmit={(e) => void handleAnalyzeSubmit(e)}
@@ -1071,7 +1067,6 @@ export function App() {
               )}
             </div>
 
-            {/* Transient Centered Chips (0px when idle) */}
             {(activeToolMeta ||
               (appMode === "play" &&
                 simState.activeDisaster &&
@@ -1155,7 +1150,6 @@ export function App() {
             )}
           </header>
 
-          {/* Row 2: 1fr Middle Zone — 44px Left Rail | Open Canvas | 320px Right Inspector */}
           <div className="relative z-20 flex min-h-0 min-w-0 items-center justify-between gap-3">
             <div className="flex h-full min-h-0 min-w-0 items-center gap-3">
               {effectiveBundle && appMode === "play" && (
@@ -1252,7 +1246,6 @@ export function App() {
             />
           </div>
 
-          {/* Row 3: Compact Bottom Dock */}
           {bundle && snapshots.length > 0 ? (
             <footer className="relative z-30 flex min-w-0 flex-wrap items-end justify-between gap-2 sm:gap-3">
               <TimeScrubber
@@ -1275,8 +1268,6 @@ export function App() {
                     files={effectiveBundle?.files ?? bundle.files}
                     sim={sim}
                     showTraffic={showTraffic}
-                    fireFiles={simState.fireFiles}
-                    blackoutFiles={simState.blackoutFiles}
                     onClose={() => setRadarOpen(false)}
                   />
                 )}

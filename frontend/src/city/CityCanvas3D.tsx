@@ -26,10 +26,10 @@ import {
   ZONE_PALETTES,
   buildImpactedHopMap,
   canvasCursorClass,
-  commuterCarColor,
+  isAmbientVehicle,
   isAnalyticalDataMap,
+  resolveVehicleColor,
   selectFaultLines,
-  vehicleColor,
 } from "./cityTheme";
 import {
   type BuildingBlockPart,
@@ -39,10 +39,9 @@ import {
   computeBlockPartTransform,
   getBlockPartsForFile,
   getPrimitiveGeometry,
-  getSharedPrimitiveSet,
+  isSharedPrimitive,
   lotOrientation,
 } from "./geometries3D";
-import type { SimVehicleRender } from "./isoRenderer2D";
 
 interface CityCanvas3DProps {
   districts: District[];
@@ -54,10 +53,7 @@ interface CityCanvas3DProps {
   blastRadius: BlastRadiusResult | null;
   activeTool?: string;
   showTraffic?: boolean;
-  sim?: CitySimulationEngine;
-  vehicles?: readonly SimVehicleRender[];
-  fireFiles?: ReadonlySet<string>;
-  blackoutFiles?: ReadonlySet<string>;
+  sim: CitySimulationEngine;
   plazas?: Array<{ x: number; z: number; w: number; d: number; kind: string }>;
   streetLines?: { xLines: number[]; zLines: number[] };
   onSelectFile: (filePath: string | null) => void;
@@ -84,7 +80,10 @@ const BASE_ORBIT_DISTANCE = 92;
 const MAX_VEHICLES = 120;
 const MAX_FIRES = 64;
 
-function clearGroup(group: THREE.Group, keepGeometries?: Set<THREE.BufferGeometry>): void {
+function clearGroup(
+  group: THREE.Group,
+  keepPredicate?: (geom: THREE.BufferGeometry) => boolean,
+): void {
   const geoms = new Set<THREE.BufferGeometry>();
   const mats = new Set<THREE.Material>();
   while (group.children.length > 0) {
@@ -92,7 +91,7 @@ function clearGroup(group: THREE.Group, keepGeometries?: Set<THREE.BufferGeometr
     group.remove(child);
     child.traverse((obj) => {
       if (obj instanceof THREE.Mesh || obj instanceof THREE.Line) {
-        if (!keepGeometries?.has(obj.geometry)) geoms.add(obj.geometry);
+        if (!keepPredicate?.(obj.geometry)) geoms.add(obj.geometry);
         for (const m of Array.isArray(obj.material) ? obj.material : [obj.material]) mats.add(m);
       }
     });
@@ -155,7 +154,6 @@ interface SceneHandle {
   hoveredBox: HighlightBox;
   unitPlane: THREE.PlaneGeometry;
   batches: BuildingBatch[];
-  sharedGeoms: Set<THREE.BufferGeometry>;
   districtPlates: { mesh: THREE.InstancedMesh; zones: ZoneType[] } | null;
   applyAtmosphere: (tod: TimeOfDay) => void;
   updateBuildingColors: () => void;
@@ -174,9 +172,6 @@ const CityCanvas3D = memo(function CityCanvas3D({
   activeTool = "inspect",
   showTraffic = false,
   sim,
-  vehicles = [],
-  fireFiles,
-  blackoutFiles,
   plazas = [],
   streetLines,
   onSelectFile,
@@ -199,9 +194,6 @@ const CityCanvas3D = memo(function CityCanvas3D({
     blastRadius,
     showTraffic,
     sim,
-    vehicles,
-    fireFiles,
-    blackoutFiles,
     activeTool,
     onSelectFile,
     onToolAction,
@@ -213,9 +205,6 @@ const CityCanvas3D = memo(function CityCanvas3D({
     blastRadius,
     showTraffic,
     sim,
-    vehicles,
-    fireFiles,
-    blackoutFiles,
     activeTool,
     onSelectFile,
     onToolAction,
@@ -322,6 +311,10 @@ const CityCanvas3D = memo(function CityCanvas3D({
     let raf = 0;
     let lastAtmosphereTod: TimeOfDay | null = null;
     let lastAppliedBlackouts: ReadonlySet<string> | undefined;
+    const actorDummy = new THREE.Object3D();
+    const actorColor = new THREE.Color();
+    let cachedActorFiles: FileMetric[] | null = null;
+    let cachedActorFileMap = new Map<string, FileMetric>();
 
     let syncingFromStore = false;
     let userInteracting = false;
@@ -370,7 +363,6 @@ const CityCanvas3D = memo(function CityCanvas3D({
       hoveredBox,
       unitPlane,
       batches: [],
-      sharedGeoms: getSharedPrimitiveSet(),
       districtPlates: null,
       requestRender,
       applyAtmosphere(tod: TimeOfDay) {
@@ -397,7 +389,7 @@ const CityCanvas3D = memo(function CityCanvas3D({
       },
       updateBuildingColors() {
         const cur = latestRef.current;
-        const simBlackouts = cur.sim?.getRenderFrame().blackoutFiles ?? cur.blackoutFiles;
+        const simBlackouts = cur.sim.getRenderFrame().blackoutFiles;
         lastAppliedBlackouts = simBlackouts;
         const impactedHop = buildImpactedHopMap(cur.blastRadius);
         const analytical = isAnalyticalDataMap(cur.dataMap);
@@ -406,7 +398,7 @@ const CityCanvas3D = memo(function CityCanvas3D({
 
         for (const batch of handle.batches) {
           batch.entries.forEach(({ file: f, part }, idx) => {
-            if (simBlackouts?.has(f.file_path)) {
+            if (simBlackouts.has(f.file_path)) {
               color.set("#1e293b");
             } else if (part.role === "main" || part.role === "turf") {
               color.set(buildingColor3D(f, cur.dataMap, cur.selectedFile, impactedHop));
@@ -430,37 +422,28 @@ const CityCanvas3D = memo(function CityCanvas3D({
       },
       updateDynamicActors() {
         const cur = latestRef.current;
-        const frame = cur.sim?.getRenderFrame();
-        const activeVehicles = frame ? frame.vehicles : cur.vehicles;
-        const activeFires = frame ? frame.fireFiles : cur.fireFiles;
-        const activeBlackouts = frame ? frame.blackoutFiles : cur.blackoutFiles;
-        if (activeBlackouts !== lastAppliedBlackouts) {
+        const frame = cur.sim.getRenderFrame();
+        if (frame.blackoutFiles !== lastAppliedBlackouts) {
           handle.updateBuildingColors();
         }
 
-        const dummy = new THREE.Object3D();
-        const color = new THREE.Color();
-
         let vCount = 0;
-        for (let i = 0; i < activeVehicles.length && vCount < MAX_VEHICLES; i++) {
-          const v = activeVehicles[i];
-          if (
-            !cur.showTraffic &&
-            (v.type === "request_car" || v.type === "cycle_car" || v.type === "cargo_ship")
-          ) {
+        for (let i = 0; i < frame.vehicles.length && vCount < MAX_VEHICLES; i++) {
+          const v = frame.vehicles[i];
+          if (!cur.showTraffic && isAmbientVehicle(v.type)) {
             continue;
           }
           const isShip = v.type === "cargo_ship";
-          dummy.position.set(v.x - WORLD_CENTER_X, isShip ? -0.15 : 0.14, v.z - WORLD_CENTER_Z);
-          dummy.rotation.set(0, -v.heading, 0);
-          dummy.scale.set(isShip ? 2.4 : 0.85, isShip ? 0.85 : 0.6, isShip ? 1.3 : 1.0);
-          dummy.updateMatrix();
-          vehiclesMesh.setMatrixAt(vCount, dummy.matrix);
-          const colHex =
-            v.type === "request_car" && !v.jammed
-              ? commuterCarColor(v.id)
-              : vehicleColor(v.type, v.jammed);
-          vehiclesMesh.setColorAt(vCount, color.set(colHex));
+          actorDummy.position.set(
+            v.x - WORLD_CENTER_X,
+            isShip ? -0.15 : 0.14,
+            v.z - WORLD_CENTER_Z,
+          );
+          actorDummy.rotation.set(0, -v.heading, 0);
+          actorDummy.scale.set(isShip ? 2.4 : 0.85, isShip ? 0.85 : 0.6, isShip ? 1.3 : 1.0);
+          actorDummy.updateMatrix();
+          vehiclesMesh.setMatrixAt(vCount, actorDummy.matrix);
+          vehiclesMesh.setColorAt(vCount, actorColor.set(resolveVehicleColor(v)));
           vCount++;
         }
         vehiclesMesh.count = vCount;
@@ -468,21 +451,24 @@ const CityCanvas3D = memo(function CityCanvas3D({
         if (vehiclesMesh.instanceColor) vehiclesMesh.instanceColor.needsUpdate = true;
 
         let fCount = 0;
-        if (activeFires && activeFires.size > 0) {
-          const byPath = new Map(cur.files.map((f) => [f.file_path, f]));
-          for (const fp of activeFires) {
+        if (frame.fireFiles.size > 0) {
+          if (cachedActorFiles !== cur.files) {
+            cachedActorFiles = cur.files;
+            cachedActorFileMap = new Map(cur.files.map((f) => [f.file_path, f]));
+          }
+          for (const fp of frame.fireFiles) {
             if (fCount >= MAX_FIRES) break;
-            const f = byPath.get(fp);
+            const f = cachedActorFileMap.get(fp);
             if (!f) continue;
-            dummy.position.set(
+            actorDummy.position.set(
               f.layout_x + f.layout_w * 0.5 - WORLD_CENTER_X,
               buildingHeight3D(f) + 1.0,
               f.layout_z + f.layout_d * 0.5 - WORLD_CENTER_Z,
             );
-            dummy.rotation.set(0, 0, 0);
-            dummy.scale.set(1, 1, 1);
-            dummy.updateMatrix();
-            firesMesh.setMatrixAt(fCount++, dummy.matrix);
+            actorDummy.rotation.set(0, 0, 0);
+            actorDummy.scale.set(1, 1, 1);
+            actorDummy.updateMatrix();
+            firesMesh.setMatrixAt(fCount++, actorDummy.matrix);
           }
         }
         firesMesh.count = fCount;
@@ -753,7 +739,7 @@ const CityCanvas3D = memo(function CityCanvas3D({
       controls.dispose();
       clearGroup(districtsGroup);
       clearGroup(docksGroup);
-      clearGroup(buildingsGroup, new Set([...handle.sharedGeoms, unitPlane]));
+      clearGroup(buildingsGroup, (g) => g === unitPlane || isSharedPrimitive(g));
       clearGroup(faultsGroup);
       oceanMesh.geometry.dispose();
       oceanMat.dispose();
@@ -955,15 +941,26 @@ const CityCanvas3D = memo(function CityCanvas3D({
   useEffect(() => {
     const h = handleRef.current;
     if (!h) return;
-    clearGroup(h.buildingsGroup, h.sharedGeoms);
+    clearGroup(h.buildingsGroup, isSharedPrimitive);
     h.batches = [];
 
     const grouped = new Map<
       string,
-      { shape: BuildingBlockPart["shape"]; isBeacon: boolean; entries: BatchEntry[] }
+      {
+        shape: BuildingBlockPart["shape"];
+        isBeacon: boolean;
+        entries: Array<{
+          file: FileMetric;
+          part: BuildingBlockPart;
+          fp: ReturnType<typeof buildingFootprint3D>;
+          ori: ReturnType<typeof lotOrientation>;
+        }>;
+      }
     >();
 
     for (const f of files) {
+      const fp = buildingFootprint3D(f);
+      const ori = lotOrientation(f, fp.bw, fp.bd);
       for (const part of getBlockPartsForFile(f)) {
         const isBeacon = part.role === "beacon";
         const key = `${part.shape}|${isBeacon ? "beacon" : "lit"}`;
@@ -972,7 +969,7 @@ const CityCanvas3D = memo(function CityCanvas3D({
           group = { shape: part.shape, isBeacon, entries: [] };
           grouped.set(key, group);
         }
-        group.entries.push({ file: f, part });
+        group.entries.push({ file: f, part, fp, ori });
       }
     }
 
@@ -984,12 +981,19 @@ const CityCanvas3D = memo(function CityCanvas3D({
         : new THREE.MeshLambertMaterial({ color: "#ffffff" });
       const mesh = new THREE.InstancedMesh(geom, material, entries.length);
 
-      entries.forEach(({ file: f, part }, idx) => {
-        const fp = buildingFootprint3D(f);
-        const { rotY, localW, localD } = lotOrientation(f, fp.bw, fp.bd);
-        const t = computeBlockPartTransform(part, localW, localD, fp.h, 0.12, fp.cx, fp.cz, rotY);
+      entries.forEach(({ part, fp, ori }, idx) => {
+        const t = computeBlockPartTransform(
+          part,
+          ori.localW,
+          ori.localD,
+          fp.h,
+          0.12,
+          fp.cx,
+          fp.cz,
+          ori.rotY,
+        );
         dummy.position.set(t.x, t.y, t.z);
-        dummy.rotation.set(0, rotY, 0);
+        dummy.rotation.set(0, ori.rotY, 0);
         dummy.scale.set(t.sx, t.sy, t.sz);
         dummy.updateMatrix();
         mesh.setMatrixAt(idx, dummy.matrix);
@@ -1000,25 +1004,26 @@ const CityCanvas3D = memo(function CityCanvas3D({
       mesh.computeBoundingBox();
 
       h.buildingsGroup.add(mesh);
-      h.batches.push({ mesh, entries });
+      h.batches.push({
+        mesh,
+        entries: entries.map(({ file, part }) => ({ file, part })),
+      });
     }
 
-    h.sharedGeoms = getSharedPrimitiveSet();
     h.updateBuildingColors();
   }, [files]);
 
   // Building tint & selection highlight updates (no geometry rebuild)
   useEffect(() => {
     handleRef.current?.updateBuildingColors();
-  }, [blackoutFiles, blastRadius, dataMap, selectedFile]);
+  }, [blastRadius, dataMap, selectedFile]);
 
   // Live simulation vehicles & fire markers (subscribed directly without App re-renders)
   useEffect(() => {
     handleRef.current?.updateDynamicActors();
-  }, [files, fireFiles, showTraffic, vehicles]);
+  }, [files, showTraffic]);
 
   useEffect(() => {
-    if (!sim) return;
     handleRef.current?.updateDynamicActors();
     return sim.subscribeRender(() => {
       handleRef.current?.updateDynamicActors();

@@ -156,7 +156,6 @@ export function CameraControlsHUD({
         isViewPopoverOpen ? "z-40" : ""
       }`}
     >
-      {/* 2D | 3D Segmented Switch */}
       <button
         type="button"
         data-testid="toggle-2d-3d"
@@ -182,7 +181,6 @@ export function CameraControlsHUD({
 
       <div className="mx-0.5 h-4 w-px bg-white/10" />
 
-      {/* Zoom Controls & Fit Island */}
       <button
         type="button"
         onClick={() =>
@@ -215,7 +213,6 @@ export function CameraControlsHUD({
         <Plus className="h-3.5 w-3.5" />
       </button>
 
-      {/* Compass North Button */}
       <button
         type="button"
         data-testid="compass-rose-btn"
@@ -232,7 +229,6 @@ export function CameraControlsHUD({
 
       <div className="mx-0.5 h-4 w-px bg-white/10" />
 
-      {/* View & Camera Popover */}
       <div data-popover-id="view" className="relative">
         <button
           type="button"
@@ -257,7 +253,6 @@ export function CameraControlsHUD({
             data-testid="camera-view-popover"
             className="sim-popover sim-scrollbar absolute right-0 bottom-11 z-40 max-h-[calc(var(--hud-vh,100vh)-5rem)] w-[min(20rem,calc(var(--hud-vw,100vw)-1.5rem))] space-y-3 overflow-y-auto rounded-2xl p-3 text-xs"
           >
-            {/* Camera Presets */}
             <div>
               <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-slate-400">
                 Camera Presets
@@ -288,7 +283,6 @@ export function CameraControlsHUD({
               </div>
             </div>
 
-            {/* Rotation Axes & Orientation */}
             <div className="space-y-2 border-t border-white/10 pt-2.5">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-1.5">
@@ -379,7 +373,6 @@ export function CameraControlsHUD({
                 <YawShortcutHint />
               </div>
 
-              {/* Compass Heading & Pitch Quick Options */}
               <div className="grid grid-cols-4 gap-1 pt-0.5">
                 {(
                   [
@@ -454,7 +447,6 @@ export function CameraControlsHUD({
               </div>
             </div>
 
-            {/* Atmosphere & Scene */}
             <div className="space-y-2 border-t border-white/10 pt-2.5">
               <div className="grid grid-cols-3 gap-1 rounded-xl bg-slate-950/60 p-0.5 ring-1 ring-white/10">
                 {LIGHTING_MODES.map((m) => {
@@ -526,7 +518,6 @@ export function CameraControlsHUD({
               </div>
             </div>
 
-            {/* Saved Viewpoints */}
             <div className="border-t border-white/10 pt-2.5">
               <div className="mb-1.5 flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wider text-slate-400">
                 <Bookmark className="h-3 w-3 text-amber-300" />
@@ -595,7 +586,6 @@ export function CameraControlsHUD({
         )}
       </div>
 
-      {/* Radar Minimap Toggle */}
       <button
         type="button"
         data-testid="toggle-radar-btn"

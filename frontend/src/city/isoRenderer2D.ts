@@ -14,18 +14,18 @@ import {
   type TimeOfDay,
   WORLD_CENTER_X,
   WORLD_CENTER_Z,
-  compassStepFromYaw,
 } from "./cameraStore";
 import {
   type ShadePalette,
+  type VehicleKind,
   ZONE_PALETTES,
   buildImpactedHopMap,
   buildingPalette,
-  commuterCarColor,
   computeBuildingHeight,
+  isAmbientVehicle,
   isAnalyticalDataMap,
+  resolveVehicleColor,
   selectFaultLines,
-  vehicleColor,
 } from "./cityTheme";
 
 export interface Camera2D {
@@ -46,7 +46,7 @@ export interface GhostLot {
 
 export interface SimVehicleRender {
   id: string;
-  type: "request_car" | "cycle_car" | "sweeper" | "fire_truck" | "crew" | "cargo_ship";
+  type: VehicleKind;
   x: number;
   z: number;
   heading: number;
@@ -97,15 +97,6 @@ export interface RenderDynamicOverlayArgs {
   floatingPopups?: readonly FloatingStatPopup[];
 }
 
-export interface RenderCitySceneArgs extends RenderStaticCityArgs {
-  timeSec: number;
-  imports: FileImport[];
-  showTraffic: boolean;
-  vehicles?: readonly SimVehicleRender[];
-  fireFiles?: ReadonlySet<string>;
-  floatingPopups?: readonly FloatingStatPopup[];
-}
-
 export interface HitBuilding {
   file: FileMetric;
   minX: number;
@@ -121,7 +112,6 @@ interface IsoProjector {
   viewX: number;
   viewZ: number;
   heightScale: number;
-  compassStep: 0 | 1 | 2 | 3;
   project(wx: number, wz: number, wy: number): { x: number; y: number };
 }
 
@@ -175,7 +165,6 @@ function makeProjector(width: number, height: number, camera: Camera2D): IsoProj
     viewX: Math.sin(yaw),
     viewZ: Math.cos(yaw),
     heightScale,
-    compassStep: compassStepFromYaw(yaw),
     project(wx: number, wz: number, wy: number) {
       const p = projectIsoCore(wx, wz, wy, cosT, sinT, isoYEff, heightScale);
       return { x: ox + p.x * zoom, y: oy + p.y * zoom };
@@ -1178,10 +1167,7 @@ export function renderDynamicCityOverlay(args: RenderDynamicOverlayArgs): void {
     ctx.save();
     const flash = timeSec % 0.4 >= 0.2;
     for (const v of vehicles) {
-      if (
-        !showTraffic &&
-        (v.type === "request_car" || v.type === "cycle_car" || v.type === "cargo_ship")
-      ) {
+      if (!showTraffic && isAmbientVehicle(v.type)) {
         continue;
       }
       const p = proj.project(v.x, v.z, 0.35);
@@ -1192,10 +1178,7 @@ export function renderDynamicCityOverlay(args: RenderDynamicOverlayArgs): void {
       } else {
         ctx.arc(p.x, p.y, size, 0, Math.PI * 2);
       }
-      ctx.fillStyle =
-        v.type === "request_car" && !v.jammed
-          ? commuterCarColor(v.id)
-          : vehicleColor(v.type, v.jammed, flash);
+      ctx.fillStyle = resolveVehicleColor(v, flash);
       ctx.fill();
     }
     ctx.restore();
@@ -1239,10 +1222,4 @@ export function renderDynamicCityOverlay(args: RenderDynamicOverlayArgs): void {
     }
     ctx.restore();
   }
-}
-
-export function renderCityScene(args: RenderCitySceneArgs): HitBuilding[] {
-  const hits = renderStaticCityLayer(args);
-  renderDynamicCityOverlay(args);
-  return hits;
 }

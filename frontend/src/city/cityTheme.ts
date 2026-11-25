@@ -15,13 +15,12 @@ export interface ShadePalette {
 }
 
 export interface ZoneStyle {
-  fill: string;
   border: string;
   ground: string;
-  sidewalk: string;
-  plaza: string;
-  label: string;
 }
+
+export type VehicleKind =
+  "request_car" | "cycle_car" | "sweeper" | "fire_truck" | "crew" | "cargo_ship";
 
 export function hashFilePath(path: string): number {
   let h = 2166136261;
@@ -41,70 +40,14 @@ export function isAnalyticalDataMap(dataMap: DataMapMode): boolean {
 }
 
 export const ZONE_PALETTES: Record<ZoneType, ZoneStyle> = {
-  harbor_gates: {
-    fill: "#dce3ea",
-    border: "#3b82f6",
-    ground: "#6d9a5b",
-    sidewalk: "#cbd3db",
-    plaza: "#d8d4ca",
-    label: "Harbor & Gates",
-  },
-  downtown_core: {
-    fill: "#d6dce4",
-    border: "#d97706",
-    ground: "#689557",
-    sidewalk: "#d2d7de",
-    plaza: "#c9cfd8",
-    label: "Downtown Core",
-  },
-  vaults_reservoir: {
-    fill: "#d9d6df",
-    border: "#7c3aed",
-    ground: "#6a9559",
-    sidewalk: "#ced3db",
-    plaza: "#d5d1c8",
-    label: "Vaults & Reservoir",
-  },
-  industrial_quarter: {
-    fill: "#c9c4ba",
-    border: "#ea580c",
-    ground: "#7c8860",
-    sidewalk: "#b8b3aa",
-    plaza: "#a29b90",
-    label: "Industrial Quarter",
-  },
-  gallery_storefront: {
-    fill: "#dee3e8",
-    border: "#db2777",
-    ground: "#72a05e",
-    sidewalk: "#d6dbe1",
-    plaza: "#e2dcd2",
-    label: "Gallery District",
-  },
-  civic_utilities: {
-    fill: "#d4ddd9",
-    border: "#0d9488",
-    ground: "#6c9b5c",
-    sidewalk: "#cbd3cf",
-    plaza: "#ccd4ce",
-    label: "Civic & Utilities",
-  },
-  greenbelt_parks: {
-    fill: "#5b9a4f",
-    border: "#16a34a",
-    ground: "#528f47",
-    sidewalk: "#bac4b1",
-    plaza: "#7db068",
-    label: "Greenbelt Parks",
-  },
-  supply_docks: {
-    fill: "#cbd2db",
-    border: "#2563eb",
-    ground: "#788d6e",
-    sidewalk: "#c3c8ce",
-    plaza: "#b7b0a4",
-    label: "Supply Docks",
-  },
+  harbor_gates: { border: "#3b82f6", ground: "#6d9a5b" },
+  downtown_core: { border: "#d97706", ground: "#689557" },
+  vaults_reservoir: { border: "#7c3aed", ground: "#6a9559" },
+  industrial_quarter: { border: "#ea580c", ground: "#7c8860" },
+  gallery_storefront: { border: "#db2777", ground: "#72a05e" },
+  civic_utilities: { border: "#0d9488", ground: "#6c9b5c" },
+  greenbelt_parks: { border: "#16a34a", ground: "#528f47" },
+  supply_docks: { border: "#2563eb", ground: "#788d6e" },
 };
 
 const LIVING_ARCHETYPE_VARIANTS: Record<BuildingArchetype, ShadePalette[]> = {
@@ -169,10 +112,7 @@ const LANGUAGE_PALETTES: Record<string, ShadePalette> = {
   other: { roof: "#cbd5e1", left: "#64748b", right: "#334155", accent: "#f1f5f9" },
 };
 
-export function buildingPaletteForVariant(
-  archetype: BuildingArchetype,
-  variantIdx: number,
-): ShadePalette {
+function buildingPaletteForVariant(archetype: BuildingArchetype, variantIdx: number): ShadePalette {
   const variants = LIVING_ARCHETYPE_VARIANTS[archetype] ?? LIVING_ARCHETYPE_VARIANTS.office_tower;
   return variants[((variantIdx % variants.length) + variants.length) % variants.length];
 }
@@ -241,15 +181,11 @@ export function computeBuildingHeight(file: FileMetric): number {
 
 const COMMUTER_CAR_SWATCHES = ["#e2e8f0", "#cbd5e1", "#dc2626", "#2563eb", "#f59e0b", "#475569"];
 
-export function commuterCarColor(id: string): string {
+function commuterCarColor(id: string): string {
   return COMMUTER_CAR_SWATCHES[hashFilePath(id) % COMMUTER_CAR_SWATCHES.length];
 }
 
-export function vehicleColor(
-  type: "request_car" | "cycle_car" | "sweeper" | "fire_truck" | "crew" | "cargo_ship",
-  jammed = false,
-  flashPhase = false,
-): string {
+function vehicleColor(type: VehicleKind, jammed = false, flashPhase = false): string {
   if (jammed) return "#ef4444";
   if (type === "fire_truck") return flashPhase ? "#fef08a" : "#f43f5e";
   if (type === "sweeper") return "#22c55e";
@@ -257,6 +193,18 @@ export function vehicleColor(
   if (type === "cycle_car") return "#e879f9";
   if (type === "cargo_ship") return "#d97706";
   return "#e2e8f0";
+}
+
+export function isAmbientVehicle(type: VehicleKind): boolean {
+  return type === "request_car" || type === "cycle_car" || type === "cargo_ship";
+}
+
+export function resolveVehicleColor(
+  v: { id: string; type: VehicleKind; jammed?: boolean },
+  flashPhase = false,
+): string {
+  if (v.type === "request_car" && !v.jammed) return commuterCarColor(v.id);
+  return vehicleColor(v.type, v.jammed, flashPhase);
 }
 
 export function buildImpactedHopMap(blastRadius: BlastRadiusResult | null): Map<string, number> {

@@ -195,7 +195,6 @@ export function HealthCardModal({
               ))}
             </div>
 
-            {/* Language Zoning Breakdown */}
             <div className="rounded-2xl bg-slate-900/80 p-3.5">
               <div className="font-semibold text-slate-200">Polyglot Language Zoning</div>
               <div className="mt-2 flex flex-wrap gap-2">
@@ -210,7 +209,6 @@ export function HealthCardModal({
               </div>
             </div>
 
-            {/* Top Hotspots */}
             <div className="rounded-2xl bg-slate-900/80 p-3.5">
               <div className="font-semibold text-slate-200">Top Refactor Hotspots</div>
               <div className="mt-2 space-y-1.5">
@@ -235,7 +233,6 @@ export function HealthCardModal({
               </div>
             </div>
 
-            {/* Static Export + Postcard + Badge */}
             {!isStaticMode && (
               <div className="rounded-2xl border border-amber-500/35 bg-slate-900/85 p-3.5">
                 <div className="flex flex-wrap items-center justify-between gap-2">
