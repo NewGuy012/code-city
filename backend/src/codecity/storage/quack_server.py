@@ -68,7 +68,8 @@ class QuackServerManager:
             con = self.lakehouse.connect()
             try:
                 tok = escape_sql_literal(self.token)
-                con.execute(f"CALL quack_serve('{quack_uri}', disable_ssl=true, token='{tok}');")
+                uri_esc = escape_sql_literal(quack_uri)
+                con.execute(f"CALL quack_serve('{uri_esc}', disable_ssl=true, token='{tok}');")
             except Exception:
                 con.close()
                 raise
@@ -85,7 +86,8 @@ class QuackServerManager:
         with self._lock:
             if self._con is not None and self._endpoint is not None:
                 try:
-                    self._con.execute(f"CALL quack_stop('{self._endpoint.quack_uri}');")
+                    uri_esc = escape_sql_literal(self._endpoint.quack_uri)
+                    self._con.execute(f"CALL quack_stop('{uri_esc}');")
                 finally:
                     self._con.close()
                     self._con = None
@@ -95,12 +97,17 @@ class QuackServerManager:
         """Open a remote DuckDB connection attached to this Quack server."""
         ep = self.start()
         client = duckdb.connect()
-        load_duckdb_extensions(client, ("quack", "ducklake"))
-        tok = escape_sql_literal(ep.token)
-        client.execute(
-            f"CREATE SECRET IF NOT EXISTS (TYPE quack, TOKEN '{tok}', SCOPE '{ep.quack_uri}');"
-        )
-        client.execute(f"ATTACH '{ep.quack_uri}' AS {quote_ident(alias)} (DISABLE_SSL true);")
+        try:
+            load_duckdb_extensions(client, ("quack", "ducklake"))
+            tok = escape_sql_literal(ep.token)
+            uri_esc = escape_sql_literal(ep.quack_uri)
+            client.execute(
+                f"CREATE SECRET IF NOT EXISTS (TYPE quack, TOKEN '{tok}', SCOPE '{uri_esc}');"
+            )
+            client.execute(f"ATTACH '{uri_esc}' AS {quote_ident(alias)} (DISABLE_SSL true);")
+        except Exception:
+            client.close()
+            raise
         return client
 
     @contextmanager

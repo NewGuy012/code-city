@@ -4,10 +4,21 @@ from __future__ import annotations
 
 import argparse
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 from codecity.analyzer.pipeline import analyze_repository
 from codecity.storage.lakehouse import LakehouseManager
+
+
+def _bounded_int(lo: int, hi: int) -> Callable[[str], int]:
+    def _parse(raw: str) -> int:
+        val = int(raw)
+        if not (lo <= val <= hi):
+            raise argparse.ArgumentTypeError(f"must be between {lo} and {hi}")
+        return val
+
+    return _parse
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -27,8 +38,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p_analyze.add_argument("source", help="Local directory path or Git repository URL")
     p_analyze.add_argument("--owner", default=None, help="Override repository owner slug")
     p_analyze.add_argument("--repo", default=None, help="Override repository name slug")
-    p_analyze.add_argument("--max-keyframes", type=int, default=16, help="Max historical snapshots")
-    p_analyze.add_argument("--workers", type=int, default=4, help="Parallel worktree workers")
+    p_analyze.add_argument(
+        "--max-keyframes", type=_bounded_int(1, 120), default=16, help="Max historical snapshots"
+    )
+    p_analyze.add_argument(
+        "--workers", type=_bounded_int(1, 16), default=4, help="Parallel worktree workers"
+    )
     p_analyze.add_argument(
         "--semantic", action="store_true", help="Enable optional README/doc enrichment"
     )

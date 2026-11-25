@@ -49,7 +49,9 @@ from codecity.storage.lakehouse import (
 from codecity.storage.quack_server import QuackServerManager
 
 _LOCAL_ORIGIN_RE = re.compile(r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$")
+_LOCAL_HOST_RE = re.compile(r"^(localhost|127\.0\.0\.1|\[::1\]|testserver)(:\d+)?$", re.I)
 _MUTATING_METHODS = frozenset({"POST", "PUT", "DELETE", "PATCH"})
+_MAX_QUACK_BODY_BYTES = 16 * 1024 * 1024
 _HOP_BY_HOP_REQ_HEADERS = frozenset(
     {"host", "content-length", "connection", "transfer-encoding", "keep-alive", "cookie"}
 )
@@ -142,18 +144,19 @@ def create_app(
     job_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="codecity-job")
 
     @contextmanager
-    def open_con(*, read_only: bool = True) -> Iterator[duckdb.DuckDBPyConnection]:
-        if quack_mgr is not None:
-            with quack_mgr.host_cursor() as cur:
-                yield cur
-        else:
-            with lake.session(read_only=read_only) as con:
-                yield con
-
-    @contextmanager
     def locked_read_con(*, read_only: bool = True) -> Iterator[duckdb.DuckDBPyConnection]:
-        with db_lock, open_con(read_only=read_only) as con:
-            yield con
+        with db_lock:
+            if quack_mgr is not None:
+                with quack_mgr.host_cursor() as cur:
+                    yield cur
+            else:
+                with lake.session(read_only=read_only) as con:
+                    yield con
+
+    def _get_repo_lock(owner: str, repo: str) -> threading.Lock:
+        key = (sanitize_identifier(owner), sanitize_identifier(repo))
+        with jobs_lock:
+            return repo_locks.setdefault(key, threading.Lock())
 
     @contextmanager
     def write_con() -> Iterator[tuple[duckdb.DuckDBPyConnection, str | None]]:
@@ -186,6 +189,9 @@ def create_app(
 
     @app.middleware("http")
     async def _security_and_csrf_guard(request: Request, call_next: Any) -> Response:
+        host_hdr = request.headers.get("host", "").strip()
+        if not host_hdr or not _LOCAL_HOST_RE.fullmatch(host_hdr):
+            return JSONResponse(status_code=403, content={"detail": "Untrusted Host header"})
         if request.method in _MUTATING_METHODS and request.url.path.startswith(("/api/", "/quack")):
             origin = request.headers.get("origin", "")
             sec_site = request.headers.get("sec-fetch-site", "").lower()
@@ -299,6 +305,7 @@ def create_app(
         owner, repo = infer_owner_repo(req.source, owner=req.owner, repo=req.repo)
         job_id = uuid.uuid4().hex[:12]
         job = AnalyzeJob(job_id=job_id, owner=owner, repo=repo)
+        repo_lock = _get_repo_lock(owner, repo)
         with jobs_lock:
             if len(jobs) >= _MAX_JOBS_RETAINED:
                 for old_id in list(jobs):
@@ -307,7 +314,6 @@ def create_app(
                         if len(jobs) < _MAX_JOBS_RETAINED:
                             break
             jobs[job_id] = job
-            repo_lock = repo_locks.setdefault((owner, repo), threading.Lock())
         job_pool.submit(_run_job, job, req, repo_lock)
         return {"job_id": job_id, "owner": owner, "repo": repo}
 
@@ -340,10 +346,10 @@ def create_app(
                 with job.lock:
                     batch = job.events[cursor:]
                     cursor = len(job.events)
-                    status = job.status
+                    done = job.status in {"completed", "failed"}
                 for evt in batch:
                     yield f"event: progress\ndata: {json.dumps(evt)}\n\n".encode()
-                if status in {"completed", "failed"} and cursor >= len(job.events):
+                if done:
                     break
                 await asyncio.sleep(0.15)
 
@@ -389,27 +395,29 @@ def create_app(
     @app.post("/api/repos/{owner}/{repo}/mayor/session")
     def api_mayor_session(owner: str, repo: str) -> dict[str, Any]:
         repo_path = _resolve_repo_path(owner, repo)
-        try:
-            return ensure_mayor_branch(repo_path)
-        except ValueError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        with _get_repo_lock(owner, repo):
+            try:
+                return ensure_mayor_branch(repo_path)
+            except ValueError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.post("/api/repos/{owner}/{repo}/mayor/execute")
     def api_mayor_execute(owner: str, repo: str, body: MayorExecuteRequest) -> dict[str, Any]:
         repo_path = _resolve_repo_path(owner, repo)
         fan_in = _compute_fan_in(owner, repo, body.target_path) if body.tool == "bulldozer" else 0
-        try:
-            return execute_live_mayor_tool(
-                repo_path,
-                tool=body.tool,
-                target_path=body.target_path,
-                secondary_path=body.secondary_path,
-                district_path=body.district_path,
-                fan_in=fan_in,
-                confirm=body.confirm,
-            )
-        except (ValueError, FileNotFoundError) as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        with _get_repo_lock(owner, repo):
+            try:
+                return execute_live_mayor_tool(
+                    repo_path,
+                    tool=body.tool,
+                    target_path=body.target_path,
+                    secondary_path=body.secondary_path,
+                    district_path=body.district_path,
+                    fan_in=fan_in,
+                    confirm=body.confirm,
+                )
+            except (ValueError, FileNotFoundError) as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.get("/api/repos/{owner}/{repo}/quack-snippet")
     def api_quack_snippet(owner: str, repo: str, request: Request) -> dict[str, Any]:
@@ -536,6 +544,8 @@ def create_app(
             )
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="Repository not found") from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=501, detail=str(exc)) from exc
         o_q = quote(owner, safe="")
         r_q = quote(repo, safe="")
         return {
@@ -577,7 +587,12 @@ def create_app(
         if request.url.query:
             req_path = f"{req_path}?{request.url.query}"
 
+        content_len = request.headers.get("content-length")
+        if content_len and content_len.isdigit() and int(content_len) > _MAX_QUACK_BODY_BYTES:
+            raise HTTPException(status_code=413, detail="Request payload too large")
         raw_body = await request.body()
+        if len(raw_body) > _MAX_QUACK_BODY_BYTES:
+            raise HTTPException(status_code=413, detail="Request payload too large")
         fwd_headers = {
             k: v for k, v in request.headers.items() if k.lower() not in _HOP_BY_HOP_REQ_HEADERS
         }
@@ -590,7 +605,12 @@ def create_app(
         except (OSError, http.client.HTTPException) as exc:
             raise HTTPException(status_code=502, detail="Quack upstream unavailable") from exc
 
-        resp_headers = {k: v for k, v in raw_headers if k.lower() not in _HOP_BY_HOP_RESP_HEADERS}
+        resp_headers = {
+            k: v
+            for k, v in raw_headers
+            if k.lower() not in _HOP_BY_HOP_RESP_HEADERS
+            and not k.lower().startswith("access-control-")
+        }
         return Response(content=payload, status_code=status, headers=resp_headers)
 
     dist_dir = frontend_dist or default_frontend_dist()

@@ -90,12 +90,7 @@ def analyze_repository(
                 resolved_repo,
                 str(source),
             )
-            lake.clear_repo_analysis_data(
-                con,
-                resolved_owner,
-                resolved_repo,
-                preserve_annotations=True,
-            )
+            lake.clear_repo_analysis_data(con, resolved_owner, resolved_repo)
 
         def process_keyframe(kf: KeyframeSpec) -> tuple[int, int]:
             with wt_mgr.checkout(kf.commit_sha) as wt_dir:

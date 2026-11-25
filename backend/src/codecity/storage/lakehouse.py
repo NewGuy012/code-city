@@ -346,13 +346,11 @@ class LakehouseManager:
         owner: str,
         repo: str,
         *,
-        preserve_annotations: bool = True,
         catalog_prefix: str | None = None,
     ) -> None:
-        """Clear prior snapshots/metrics before re-indexing while keeping Mayor notes if set."""
+        """Clear prior snapshots/metrics before re-indexing while preserving Mayor notes."""
         pfx = self.schema_prefix(owner, repo, catalog_prefix=catalog_prefix)
-        tables = ANALYSIS_TABLES if preserve_annotations else EXPORT_TABLES
-        for tbl in tables:
+        for tbl in ANALYSIS_TABLES:
             con.execute(f"DELETE FROM {pfx}.{tbl};")
 
     def _insert_rows(
@@ -503,13 +501,19 @@ class LakehouseManager:
     ) -> SandboxAction:
         """Insert a collaborative Mayor sandbox action into DuckLake via Data Inlining."""
         pfx = self.schema_prefix(owner, repo, catalog_prefix=catalog_prefix)
-        con.execute(f"DELETE FROM {pfx}.sandbox_actions WHERE active = false;")
-        rows = con.execute(
-            f"SELECT COALESCE(MAX(action_seq), 0) FROM {pfx}.sandbox_actions;"
-        ).fetchall()
-        next_seq = int(rows[0][0]) + 1 if rows else 1
-        persisted = action.model_copy(update={"action_seq": next_seq})
-        self._insert_models(con, pfx, "sandbox_actions", [persisted])
+        con.execute("BEGIN TRANSACTION;")
+        try:
+            con.execute(f"DELETE FROM {pfx}.sandbox_actions WHERE active = false;")
+            rows = con.execute(
+                f"SELECT COALESCE(MAX(action_seq), 0) FROM {pfx}.sandbox_actions;"
+            ).fetchall()
+            next_seq = int(rows[0][0]) + 1 if rows else 1
+            persisted = action.model_copy(update={"action_seq": next_seq})
+            self._insert_models(con, pfx, "sandbox_actions", [persisted])
+            con.execute("COMMIT;")
+        except Exception:
+            con.execute("ROLLBACK;")
+            raise
         return persisted
 
     def query_sandbox_actions(

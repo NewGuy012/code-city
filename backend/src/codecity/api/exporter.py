@@ -9,9 +9,10 @@ import json
 import shutil
 import socketserver
 import subprocess
+import tempfile
 import threading
 from collections.abc import Callable
-from contextlib import AbstractContextManager, nullcontext
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -52,10 +53,12 @@ def render_grade_badge_svg(grade: str, title: str, owner: str, repo: str) -> str
     grade_color = (
         "#10b981" if grade.startswith("A") else "#f59e0b" if grade.startswith("B") else "#ef4444"
     )
-    left_txt = html.escape(f"CodeCity · {owner}/{repo}")
-    right_txt = html.escape(f"{grade} · {title}")
-    left_w = max(110, len(left_txt) * 7 + 18)
-    right_w = max(140, len(right_txt) * 7 + 18)
+    left_raw = f"CodeCity · {owner}/{repo}"
+    right_raw = f"{grade} · {title}"
+    left_txt = html.escape(left_raw)
+    right_txt = html.escape(right_raw)
+    left_w = max(110, len(left_raw) * 7 + 18)
+    right_w = max(140, len(right_raw) * 7 + 18)
     total_w = left_w + right_w
     return (
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{total_w}" height="24" role="img">\n'
@@ -84,7 +87,10 @@ class _QuietHandler(http.server.SimpleHTTPRequestHandler):
 
 def capture_postcard_png(static_dir: Path, dest_png: Path) -> Path:
     """Serve `static_dir` briefly and capture a Playwright PNG City Postcard."""
-    from playwright.sync_api import sync_playwright
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError as exc:
+        raise RuntimeError("Playwright is required to capture City Postcard PNGs.") from exc
 
     handler = functools.partial(_QuietHandler, directory=str(static_dir))
     with socketserver.TCPServer(("127.0.0.1", 0), handler) as httpd:
@@ -95,14 +101,17 @@ def capture_postcard_png(static_dir: Path, dest_png: Path) -> Path:
             url = f"http://127.0.0.1:{port}/index.html"
             with sync_playwright() as pw:
                 browser = pw.chromium.launch()
-                page = browser.new_page(viewport={"width": 1280, "height": 760})
-                page.goto(url, wait_until="domcontentloaded")
-                page.wait_for_selector('[data-testid="city-canvas-2d"]', timeout=25000)
-                page.wait_for_timeout(1200)
-                page.screenshot(path=str(dest_png))
-                browser.close()
+                try:
+                    page = browser.new_page(viewport={"width": 1280, "height": 760})
+                    page.goto(url, wait_until="domcontentloaded")
+                    page.wait_for_selector('[data-testid="city-canvas-2d"]', timeout=25000)
+                    page.wait_for_timeout(1200)
+                    page.screenshot(path=str(dest_png))
+                finally:
+                    browser.close()
         finally:
             httpd.shutdown()
+            thread.join(timeout=5)
     return dest_png
 
 
@@ -112,7 +121,6 @@ def export_static_site(
     repo: str,
     output_dir: Path,
     *,
-    con: duckdb.DuckDBPyConnection | None = None,
     open_con: Callable[[], AbstractContextManager[duckdb.DuckDBPyConnection]] | None = None,
     with_postcard: bool = False,
     frontend_dist: Path | None = None,
@@ -124,44 +132,46 @@ def export_static_site(
         raise ValueError(f"Refusing to overwrite protected directory: {out}")
 
     dist_dir = _ensure_frontend_dist(frontend_dist)
-    data_dir = out / "data"
+    con_ctx = open_con() if open_con is not None else lake.session(read_only=True)
+    out.parent.mkdir(parents=True, exist_ok=True)
 
-    con_ctx = (
-        nullcontext(con)
-        if con is not None
-        else open_con()
-        if open_con is not None
-        else lake.session(read_only=True)
-    )
-    with con_ctx as db_con:
-        matched = lake.get_repo(db_con, owner, repo)
-        if matched is None:
-            raise KeyError(f"Repository not found: {owner}/{repo}")
+    with tempfile.TemporaryDirectory(prefix=".codecity_stage_", dir=out.parent) as td:
+        stage_root = Path(td)
+        pq_dir = stage_root / "parquet"
+        with con_ctx as db_con:
+            matched = lake.get_repo(db_con, owner, repo)
+            if matched is None:
+                raise KeyError(f"Repository not found: {owner}/{repo}")
+            lake.export_repo_parquet(db_con, owner, repo, pq_dir)
+
+        bundle_dir = stage_root / "bundle"
+        shutil.copytree(dist_dir, bundle_dir)
+        data_dir = bundle_dir / "data"
+        shutil.rmtree(data_dir, ignore_errors=True)
+        shutil.move(str(pq_dir), str(data_dir))
+
+        manifest = {
+            "mode": "static",
+            "owner": owner,
+            "repo": repo,
+            "source": matched.repo_url_or_path,
+            "generated_at": datetime.now(UTC).isoformat(),
+        }
+        (data_dir / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        (bundle_dir / "badge.svg").write_text(
+            render_grade_badge_svg(matched.latest_grade, matched.latest_title, owner, repo),
+            encoding="utf-8",
+        )
+        if with_postcard:
+            capture_postcard_png(bundle_dir, bundle_dir / "city-postcard.png")
+
         if out.exists():
             shutil.rmtree(out)
-        shutil.copytree(dist_dir, out)
-        data_dir.mkdir(parents=True, exist_ok=True)
-        lake.export_repo_parquet(db_con, owner, repo, data_dir)
+        shutil.move(str(bundle_dir), str(out))
 
-    grade, title, source = matched.latest_grade, matched.latest_title, matched.repo_url_or_path
-
-    manifest = {
-        "mode": "static",
-        "owner": owner,
-        "repo": repo,
-        "source": source,
-        "generated_at": datetime.now(UTC).isoformat(),
-    }
-    manifest_path = data_dir / "manifest.json"
-    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-
-    badge_path = out / "badge.svg"
-    badge_path.write_text(render_grade_badge_svg(grade, title, owner, repo), encoding="utf-8")
-
-    postcard_path = capture_postcard_png(out, out / "city-postcard.png") if with_postcard else None
     return ExportResult(
         output_dir=out,
-        manifest_path=manifest_path,
-        badge_path=badge_path,
-        postcard_path=postcard_path,
+        manifest_path=out / "data" / "manifest.json",
+        badge_path=out / "badge.svg",
+        postcard_path=(out / "city-postcard.png") if with_postcard else None,
     )
