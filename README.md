@@ -37,14 +37,16 @@ uv sync --extra dev
 # 2. Analyze a local repository or public Git URL
 uv run codecity analyze . --max-keyframes 16 --workers 4
 
-# 3. Launch the Studio UI locally at http://127.0.0.1:8787
-uv run codecity serve
+# 3. Launch the Studio UI locally (starts backend + HMR frontend, opens browser, auto-exits when tabs close)
+bun dev
+# Or serve the built UI directly on http://127.0.0.1:8787 (single process, no Vite):
+# uv run codecity serve
 ```
 
 ### Previewing on Localhost
 
-- **Full Local App (`http://127.0.0.1:8787`)**: Run `uv run codecity serve` after building `frontend/dist` and open `http://127.0.0.1:8787` (or `http://localhost:8787`). Once dependencies are installed and a repository has been analyzed into `.codecity/`, you only need `uv run codecity serve` on subsequent runs.
-- **Frontend Hot-Reload Dev Mode (`http://localhost:5173`)**: Run `uv run codecity serve` in one terminal and `cd frontend && bun run dev` in a second terminal. Vite proxies `/api` and `/quack` requests to `http://127.0.0.1:8787`.
+- **Single-Command Dev Mode (`http://127.0.0.1:5173`)**: Run `bun dev` (or `uv run codecity dev`) from the repo root. It automatically stops any older local CodeCity instance (`--no-replace` to keep running instances), starts both FastAPI (`:8787`) and Vite HMR (`:5173`), opens the Studio UI in your browser (`--no-open` to skip), and **auto-exits both servers** 15 seconds after you close the last browser tab (`--no-auto-exit` to keep running). Press `Ctrl+C`, click **Utilities → Stop Local Server**, or run `bun run stop` (`uv run codecity stop`) from any terminal to stop immediately.
+- **Built Local App (`http://127.0.0.1:8787`)**: Run `uv run codecity serve` (or `bun run serve`) after building `frontend/dist` and open `http://127.0.0.1:8787`. Once dependencies are installed and a repository has been analyzed into `.codecity/`, you only need `uv run codecity serve` when you aren't editing frontend code (pass `--open` / `--auto-exit` if desired).
 - **Read-Only Static Export Preview**: Export a static bundle and serve it over local HTTP (required for DuckDB-Wasm workers and Parquet fetches; `file://` will not work):
 
 ```bash
@@ -75,7 +77,9 @@ Catalog data defaults to `.codecity/` (override with `codecity --data-dir <path>
 | :--- | :--- |
 | `codecity analyze <source>` | Analyze a local repo or Git URL (`--max-keyframes`, `--workers`, `--semantic`, `--owner`, `--repo`) |
 | `codecity list` | List analyzed repositories, snapshot counts, file counts, and health grades |
-| `codecity serve` | Start the FastAPI control plane, Quack CORS proxy, and Studio UI (`--host`, `--port`) |
+| `codecity serve` | Start the FastAPI control plane, Quack CORS proxy, and built Studio UI (`--host`, `--port`, `--open`, `--auto-exit`, `--no-replace`) |
+| `codecity dev` | Start FastAPI + Vite HMR together (`bun dev` alias; auto-replaces older instances, opens browser, auto-exits on tab close) |
+| `codecity stop` | Cleanly stop a running local `codecity dev` or `codecity serve` instance (`bun run stop` alias; `--force`) |
 | `codecity export <owner/repo>` | Export a static DuckDB-Wasm bundle (`--out <dir>`, `--postcard`) |
 
 ---

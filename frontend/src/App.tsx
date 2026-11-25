@@ -1,4 +1,4 @@
-import { Building2, Eye, FolderGit2, Loader2, ShieldAlert, X } from "lucide-react";
+import { Building2, Eye, FolderGit2, Loader2, Power, ShieldAlert, X } from "lucide-react";
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { CityCanvas2D } from "./city/CityCanvas2D";
@@ -97,9 +97,12 @@ export function App() {
     [sim],
   );
   const analyzeEsRef = useRef<EventSource | null>(null);
+  const presenceEsRef = useRef<EventSource | null>(null);
   const loadSeqRef = useRef(0);
 
   const [isStaticMode, setIsStaticMode] = useState(false);
+  const [liveSessionReady, setLiveSessionReady] = useState(false);
+  const [serverStopped, setServerStopped] = useState(false);
   const [repos, setRepos] = useState<RepoRef[]>([]);
   const [activeRepo, setActiveRepo] = useState<{ owner: string; repo: string } | null>(null);
   const [snapshots, setSnapshots] = useState<Snapshot[]>([]);
@@ -144,8 +147,46 @@ export function App() {
   useEffect(() => {
     return () => {
       analyzeEsRef.current?.close();
+      presenceEsRef.current?.close();
       void client.close();
     };
+  }, [client]);
+
+  // Keep a lightweight presence SSE open in Live Mode so the local server can auto-exit on tab close
+  useEffect(() => {
+    if (!liveSessionReady || isStaticMode || serverStopped || typeof EventSource === "undefined") {
+      return;
+    }
+    const es = new EventSource("/api/client/session");
+    presenceEsRef.current = es;
+    const closePresence = () => {
+      es.close();
+      if (presenceEsRef.current === es) {
+        presenceEsRef.current = null;
+      }
+    };
+    window.addEventListener("pagehide", closePresence);
+    return () => {
+      window.removeEventListener("pagehide", closePresence);
+      closePresence();
+    };
+  }, [isStaticMode, liveSessionReady, serverStopped]);
+
+  const handleShutdownServer = useCallback(() => {
+    presenceEsRef.current?.close();
+    presenceEsRef.current = null;
+    analyzeEsRef.current?.close();
+    analyzeEsRef.current = null;
+    void client
+      .shutdownServer()
+      .then(() => {
+        setServerStopped(true);
+        setLoadingMsg(null);
+        setErrorMsg(null);
+      })
+      .catch((err) => {
+        setToastMsg(err instanceof Error ? err.message : "Failed to stop local server");
+      });
   }, [client]);
 
   // Demand-driven RAF for Cinematic Turntable Orbit (Preset 5) & Follow Vehicle Cam (Preset 4)
@@ -450,6 +491,7 @@ export function App() {
         await loadRepoData(manifest.owner, manifest.repo, "./data");
         return;
       }
+      setLiveSessionReady(true);
       try {
         void client
           .fetchHealth()
@@ -1262,6 +1304,7 @@ export function App() {
                       setZenMode(true);
                       closePopover();
                     }}
+                    onShutdownServer={!isStaticMode ? handleShutdownServer : undefined}
                   />
                 </div>
               )}
@@ -1590,6 +1633,26 @@ export function App() {
           }}
           onClose={closeDisastersModal}
         />
+        {serverStopped && (
+          <div
+            data-testid="server-stopped-banner"
+            className="pointer-events-auto fixed inset-0 z-50 flex items-center justify-center bg-slate-950/75 p-4 backdrop-blur-sm"
+          >
+            <div className="sim-popover flex max-w-sm flex-col items-center gap-2.5 rounded-2xl border border-rose-500/30 px-6 py-5 text-center">
+              <div className="flex h-10 w-10 items-center justify-center rounded-full bg-rose-500/15 text-rose-300 ring-1 ring-rose-400/30">
+                <Power className="h-5 w-5" />
+              </div>
+              <h2 className="text-sm font-semibold text-white">Local CodeCity Server Stopped</h2>
+              <p className="text-xs text-slate-300">
+                Both local servers have shut down cleanly. You can close this tab or run{" "}
+                <code className="rounded bg-white/10 px-1.5 py-0.5 font-mono text-[11px] text-amber-200">
+                  bun dev
+                </code>{" "}
+                to start again.
+              </p>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

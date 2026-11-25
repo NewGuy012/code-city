@@ -6,6 +6,7 @@ import {
   Gamepad2,
   Map,
   MoreHorizontal,
+  Power,
   Volume2,
   VolumeX,
 } from "lucide-react";
@@ -30,6 +31,7 @@ interface ModeAndUtilitiesBarProps {
   onToggleSound: () => void;
   onToggleRadar: () => void;
   onToggleZenMode: () => void;
+  onShutdownServer?: () => void;
 }
 
 const MODE_OPTIONS: Array<{
@@ -71,6 +73,7 @@ export function ModeAndUtilitiesBar({
   onToggleSound,
   onToggleRadar,
   onToggleZenMode,
+  onShutdownServer,
 }: ModeAndUtilitiesBarProps) {
   const utilitiesOpen = openPopover === "utilities";
 
@@ -242,6 +245,23 @@ export function ModeAndUtilitiesBar({
                 ))}
               </div>
             </div>
+
+            {onShutdownServer && (
+              <div className="mt-1.5 border-t border-white/10 pt-1.5">
+                <button
+                  type="button"
+                  data-testid="stop-server-btn"
+                  onClick={() => {
+                    onClosePopover();
+                    onShutdownServer();
+                  }}
+                  className="flex w-full items-center gap-2 rounded-xl px-2.5 py-2 text-left text-rose-300 transition hover:bg-rose-500/15 hover:text-rose-200"
+                >
+                  <Power className="h-3.5 w-3.5 text-rose-400" />
+                  <span>Stop Local Server</span>
+                </button>
+              </div>
+            )}
           </div>
         )}
       </div>

@@ -788,6 +788,10 @@ export class CityDataClient {
     );
   }
 
+  shutdownServer(): Promise<{ status: string }> {
+    return this.requestJson("/api/shutdown", { method: "POST" }, "Failed to stop local server");
+  }
+
   async close(): Promise<void> {
     this.initGen += 1;
     this.initPromise = null;

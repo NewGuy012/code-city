@@ -1,0 +1,9 @@
+{
+  "name": "codecity",
+  "private": true,
+  "scripts": {
+    "dev": "uv run codecity dev",
+    "serve": "uv run codecity serve",
+    "stop": "uv run codecity stop"
+  }
+}
