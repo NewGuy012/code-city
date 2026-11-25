@@ -42,7 +42,7 @@ def create_polyglot_fixture_repo(repo_dir: Path) -> Path:
     )
     (repo_dir / "package.json").write_text(
         '{"name": "poly-ui", "dependencies": {"react": "19.3.1"}, '
-        '"devDependencies": {"oxlint": "^1.0.0"}}\n'
+        '"devDependencies": {"vite": "^8.0.0"}}\n'
     )
     (repo_dir / "bun.lock").write_text(
         '{\n  "lockfileVersion": 2,\n  "packages": {\n'

@@ -20,7 +20,7 @@ from codecity.analyzer.plugins.base import (
     resolve_rel_path,
     run_batched_tool,
     run_tool,
-    safe_js_lint_prefix,
+    safe_bun_lint_prefix,
     safe_read_text,
     safe_repo_target,
     structural_diagnostics_to_lint,
@@ -48,18 +48,10 @@ def _find_nearest_bun_cfg_dir(root: Path, target: Path) -> Path:
 
 
 def _run_ts_fixes(target: Path, cwd: Path, bun_bin: str) -> str:
-    linter_label = "bun fmt"
-    with safe_js_lint_prefix(bun_bin) as lint_spec:
-        if lint_spec is not None:
-            linter_name, prefix = lint_spec
-            linter_label = (
-                "bun lint --fix + bun fmt"
-                if linter_name == "bun-lint"
-                else "oxlint --fix + bun fmt"
-            )
-            run_tool([*prefix, "--fix", "--", str(target)], cwd, timeout=15)
+    with safe_bun_lint_prefix(bun_bin) as prefix:
+        run_tool([*prefix, "--fix", "--", str(target)], cwd, timeout=15)
     run_tool([bun_bin, "fmt", "--no-script", "--", str(target)], cwd, timeout=15)
-    return linter_label
+    return "bun lint --fix + bun fmt"
 
 
 def _parse_npm_deps(worktree_root: Path, snapshot_idx: int) -> list[ExternalDep]:
@@ -211,7 +203,15 @@ def _parse_lint_json(
     if isinstance(parsed, dict) and isinstance(parsed.get("diagnostics"), list):
         items = parsed["diagnostics"]
     elif isinstance(parsed, list):
-        items = parsed
+        items = []
+        for entry in parsed:
+            if isinstance(entry, dict) and isinstance(entry.get("messages"), list):
+                fp = str(entry.get("filePath") or entry.get("filename") or "")
+                items.extend(
+                    {"filename": fp, **m} for m in entry["messages"] if isinstance(m, dict)
+                )
+            elif isinstance(entry, dict):
+                items.append(entry)
     else:
         return diagnostics
 
@@ -234,7 +234,8 @@ def _parse_lint_json(
             col = int(item.get("column") or item.get("col") or 1)
 
         code = str(item.get("code") or item.get("ruleId") or "TS")
-        severity = str(item.get("severity") or "warning").lower()
+        raw_sev = item.get("severity")
+        severity = "error" if raw_sev == 2 else str(raw_sev or "warning").lower()
         cat = "correctness" if severity == "error" else "style"
         if "typescript" in code:
             cat = "types"
@@ -258,7 +259,7 @@ def _parse_lint_json(
 
 
 class TypeScriptPlugin:
-    """Analyzes TypeScript / JS repos with the Bun toolchain (`bun lint`/`oxlint`, `bun fmt`)."""
+    """Analyzes TypeScript / JS repos with native Bun tools (`bun lint`, `bun fmt`)."""
 
     name = "typescript"
     languages = frozenset({"typescript", "javascript"})
@@ -284,22 +285,20 @@ class TypeScriptPlugin:
         ran_external_linter = False
         if bun_bin:
             try:
-                with safe_js_lint_prefix(bun_bin) as lint_spec:
-                    if lint_spec is not None:
-                        linter_name, prefix = lint_spec
-                        procs = run_batched_tool(
-                            [*prefix, "--format", "json", "--"],
-                            ts_paths,
-                            worktree_root,
-                            timeout=30,
+                with safe_bun_lint_prefix(bun_bin) as prefix:
+                    procs = run_batched_tool(
+                        [*prefix, "--format", "json", "--"],
+                        ts_paths,
+                        worktree_root,
+                        timeout=30,
+                    )
+                for proc in procs:
+                    diagnostics.extend(
+                        _parse_lint_json(
+                            proc.stdout, worktree_root, snapshot_idx, ast_files, "bun-lint"
                         )
-                        for proc in procs:
-                            diagnostics.extend(
-                                _parse_lint_json(
-                                    proc.stdout, worktree_root, snapshot_idx, ast_files, linter_name
-                                )
-                            )
-                        ran_external_linter = True
+                    )
+                ran_external_linter = True
             except Exception:
                 pass
 

@@ -10,7 +10,7 @@
     "check": "bun check",
     "fmt": "bun fmt --no-script",
     "fmt:check": "bun fmt --no-script --check",
-    "lint": "oxlint src",
+    "lint": "bun lint --no-script src",
     "test": "bun test"
   },
   "dependencies": {
@@ -27,7 +27,6 @@
     "@types/react-dom": "^19.1.2",
     "@types/three": "^0.187.0",
     "@vitejs/plugin-react": "^6.0.1",
-    "oxlint": "^1.94.0",
     "vite": "^8.3.8"
   }
 }

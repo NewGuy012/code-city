@@ -24,7 +24,7 @@
 
 ## Quickstart
 
-Requires [`uv`](https://docs.astral.sh/uv/) (`>= 0.5`, Python `3.12+`) and [`bun`](https://bun.sh/) (`>= 1.4`).
+Requires [`uv`](https://docs.astral.sh/uv/) (`>= 0.5`, Python `3.12+`) and [`bun`](https://bun.sh/) (`>= 1.4.6` / native `bun lint` + `bun fmt`).
 
 ```bash
 # 1. Install backend dependencies & build the studio UI
@@ -49,7 +49,7 @@ uv run codecity export <owner>/<repo> --out ./export-dist --postcard
 
 ## Features
 
-- **Polyglot AST & Toolchain Analysis** — Parses Python (`Tree-sitter` + `ruff`), TypeScript/JS (`Tree-sitter` + `bun` / `oxlint`), Go (`go.mod`), and Rust (`Cargo.toml` / `Cargo.lock`) across parallel `git worktree` historical keyframes.
+- **Polyglot AST & Toolchain Analysis** — Parses Python (`Tree-sitter` + `ruff`), TypeScript/JS (`Tree-sitter` + `bun lint` / `bun fmt`), Go (`go.mod`), and Rust (`Cargo.toml` / `Cargo.lock`) across parallel `git worktree` historical keyframes.
 - **2D Isometric Canvas & Lazy 3D City** — Toggle smoothly between a crisp SimCity-style 2D isometric view and a hardware-accelerated Three.js 3D skyline with zoned districts, Waterfront Supply Docks for external packages, building archetypes, and live traffic pulses.
 - **Six Live Data Maps** — Switch perspectives between `Living City`, `Construction`, `Smog & Lint`, `Bus Factor`, `Languages`, and `Format Drift`.
 - **Time Travel & Blast Radius** — Scrub historical keyframes, inspect transitive import cascades directly in-browser via recursive SQL, preview `--fix` diffs, and run chaos disaster simulations (Cascading Power Outage, Bus Factor Vacation, Release Crunch Storm, Supply Dock Storm).
@@ -75,7 +75,7 @@ Catalog data defaults to `.codecity/` (override with `codecity --data-dir <path>
 
 | Layer | Stack | Role |
 | :--- | :--- | :--- |
-| **Analyzer** | `Tree-sitter`, `ruff`, `bun` / `oxlint`, `git worktree` | Multi-worker keyframe AST, complexity, lint, churn, and dependency extraction with symlink/SSRF validation, isolated `bun lint`/`oxlint` execution, and hook-disabled Git execution |
+| **Analyzer** | `Tree-sitter`, `ruff`, `bun`, `git worktree` | Multi-worker keyframe AST, complexity, lint, churn, and dependency extraction with symlink/SSRF validation, isolated `bun lint`/`bun fmt` execution, and hook-disabled Git execution |
 | **Lakehouse** | `DuckDB 2.0`, `DuckLake 1.1`, `Quack` | Concurrent nested schemas (`repos.<owner>.<repo>`), `VARIANT` metrics, Parquet export, and audit feeds |
 | **Control Plane** | `FastAPI`, `uvicorn`, stdlib HTTP, SSE | Thin local server with bounded per-repo jobs, CSRF origin checks, validated payloads, SSE progress, Parquet serving, localhost Quack proxy, sandboxed SVG badges, and Mayor Git actions |
 | **Studio UI** | `React`, `DuckDB-Wasm`, `Canvas 2D`, bare `Three.js` | Client-side Parquet SQL analytics (snapshots, blast radius, city tours, health reports) and instanced 2D/3D rendering across Live and Static modes |

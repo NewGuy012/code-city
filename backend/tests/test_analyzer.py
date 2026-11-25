@@ -10,7 +10,6 @@ import pytest
 from codecity.analyzer.git_history import resolve_git_repo, select_keyframes
 from codecity.analyzer.layout import CITY_CANVAS_D, CITY_CANVAS_W, compute_stable_city_layout
 from codecity.analyzer.pipeline import analyze_repository
-from codecity.analyzer.plugins.base import bun_supports_native_lint, safe_js_lint_prefix
 from codecity.analyzer.plugins.typescript import TypeScriptPlugin
 from codecity.analyzer.treesitter_core import scan_worktree_ast
 from codecity.models import BuildingArchetype, ZoneType
@@ -171,18 +170,15 @@ def test_worktree_scanner_skips_symlinks_and_remote_rejects_local_urls(tmp_path:
     (ts_wt / "oxlint.config.ts").write_text(
         'import fs from "node:fs"; fs.writeFileSync("pwn_oxlint.txt", "1"); export default {};\n'
     )
-    (ts_wt / "index.ts").write_text("export const answer = 42;\n")
+    (ts_wt / "eslint.config.js").write_text(
+        'require("node:fs").writeFileSync("pwn_eslint.txt", "1"); module.exports = [];\n'
+    )
+    (ts_wt / "index.ts").write_text("debugger;\nexport const answer = 42;\n")
 
     ts_ast = scan_worktree_ast(ts_wt)
-    TypeScriptPlugin().analyze(ts_wt, 0, ts_ast)
+    ts_res = TypeScriptPlugin().analyze(ts_wt, 0, ts_ast)
+    assert any(d.linter == "bun-lint" and "no-debugger" in d.rule_code for d in ts_res.diagnostics)
     assert not any(
-        (ts_wt / pwn).exists() for pwn in ("pwn_pkg.txt", "pwn_preload.txt", "pwn_oxlint.txt")
+        (ts_wt / pwn).exists()
+        for pwn in ("pwn_pkg.txt", "pwn_preload.txt", "pwn_oxlint.txt", "pwn_eslint.txt")
     )
-
-    fake_bun = tmp_path / "fake-bun"
-    fake_bun.write_text("#!/usr/bin/env python3\nprint('--no-script --no-config')\n")
-    fake_bun.chmod(0o755)
-    assert bun_supports_native_lint(str(fake_bun)) is True
-    with safe_js_lint_prefix(str(fake_bun)) as lint_spec:
-        assert lint_spec is not None and lint_spec[0] == "bun-lint"
-        assert "--no-script" in lint_spec[1] and "--no-config" in lint_spec[1]
