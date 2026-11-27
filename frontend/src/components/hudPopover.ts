@@ -73,8 +73,8 @@ export type HudPopoverId =
   "repo" | "datamap" | "advisors" | "utilities" | "mayorMode" | "view" | null;
 
 export const HUD_SHORTCUTS: Array<{ keys: string; label: string }> = [
-  { keys: "Left Drag", label: "Rotate / Orbit city" },
-  { keys: "Right / Shift+Drag", label: "Pan city (mouse)" },
+  { keys: "Space + Drag", label: "Pan city (mouse)" },
+  { keys: "Ctrl + Drag", label: "Rotate / Orbit city" },
   { keys: "WASD / Arrows", label: "Pan city (keys)" },
   { keys: "Q / E", label: "Yaw (Y-axis)" },
   { keys: "Alt / Opt + Drag", label: "Mouse yaw rotate" },

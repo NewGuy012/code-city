@@ -11,6 +11,9 @@ import {
   cameraStore,
   computeMousePitch,
   computeMouseYaw,
+  computeRelativePanTarget,
+  resolveCanvasDragMode,
+  resolveCursorIntent,
 } from "./cameraStore";
 import {
   ZONE_PALETTES,
@@ -117,6 +120,82 @@ describe("isoRenderer2D projection", () => {
     expect(canvasCursorClass("inspect", false, true)).toBe("cursor-ew-resize");
     expect(canvasCursorClass("sweeper", true, true)).toBe("cursor-ew-resize");
     expect(canvasCursorClass("inspect", true, false)).toBe("cursor-pointer");
+    expect(canvasCursorClass("inspect", false, false)).toBe("cursor-default");
+    expect(canvasCursorClass("inspect", true, false, "pan")).toBe(
+      "cursor-grab active:cursor-grabbing",
+    );
+    expect(canvasCursorClass("sweeper", false, false, "panning")).toBe("cursor-grabbing");
+    expect(canvasCursorClass("inspect", true, false, "orbit")).toBe(
+      "cursor-grab active:cursor-grabbing",
+    );
+    expect(canvasCursorClass("inspect", false, false, "orbiting")).toBe("cursor-grabbing");
+  });
+
+  test("resolveCanvasDragMode and resolveCursorIntent map Space=pan, Ctrl=rotate, plain drag=idle", () => {
+    const base = {
+      button: 0,
+      spaceHeld: false,
+      ctrlKey: false,
+      altKey: false,
+      shiftKey: false,
+      metaKey: false,
+      activeTool: "inspect",
+      allowSweeperPaint: true,
+    };
+
+    // Plain left-drag does NOT rotate or pan
+    expect(resolveCanvasDragMode(base)).toBe("idle");
+    // Sweeper paints only on plain left-drag
+    expect(resolveCanvasDragMode({ ...base, activeTool: "sweeper" })).toBe("paint");
+    expect(
+      resolveCanvasDragMode({ ...base, activeTool: "sweeper", allowSweeperPaint: false }),
+    ).toBe("idle");
+
+    // Space + drag pans (and overrides sweeper/ctrl)
+    expect(resolveCanvasDragMode({ ...base, spaceHeld: true })).toBe("pan");
+    expect(resolveCanvasDragMode({ ...base, spaceHeld: true, activeTool: "sweeper" })).toBe("pan");
+    expect(resolveCanvasDragMode({ ...base, spaceHeld: true, ctrlKey: true })).toBe("pan");
+
+    // Control + drag rotates (orbit yaw + pitch)
+    expect(resolveCanvasDragMode({ ...base, ctrlKey: true })).toBe("orbit");
+    expect(resolveCanvasDragMode({ ...base, ctrlKey: true, activeTool: "sweeper" })).toBe("orbit");
+
+    // Alt + drag rotates yaw only
+    expect(resolveCanvasDragMode({ ...base, altKey: true })).toBe("yaw");
+
+    // Right-drag / Shift+drag pan
+    expect(resolveCanvasDragMode({ ...base, button: 2 })).toBe("pan");
+    expect(resolveCanvasDragMode({ ...base, shiftKey: true })).toBe("pan");
+
+    // Cursor intents and relative pan math
+    expect(resolveCursorIntent(null, { alt: false, ctrl: false, space: false })).toEqual({
+      yawMode: false,
+      dragIntent: null,
+    });
+    expect(resolveCursorIntent(null, { alt: false, ctrl: false, space: true })).toEqual({
+      yawMode: false,
+      dragIntent: "pan",
+    });
+    expect(resolveCursorIntent("pan", { alt: false, ctrl: false, space: false })).toEqual({
+      yawMode: false,
+      dragIntent: "panning",
+    });
+    expect(resolveCursorIntent(null, { alt: false, ctrl: true, space: false })).toEqual({
+      yawMode: false,
+      dragIntent: "orbit",
+    });
+    expect(resolveCursorIntent("orbit", { alt: false, ctrl: false, space: false })).toEqual({
+      yawMode: false,
+      dragIntent: "orbiting",
+    });
+    expect(resolveCursorIntent("idle", { alt: false, ctrl: false, space: false })).toEqual({
+      yawMode: false,
+      dragIntent: null,
+    });
+
+    const panned = computeRelativePanTarget(WORLD_CENTER_X, WORLD_CENTER_Z, 0, -10, 5);
+    expect(panned.targetX).toBeCloseTo(WORLD_CENTER_X - 10, 6);
+    expect(panned.targetZ).toBeCloseTo(WORLD_CENTER_Z - 5, 6);
   });
 
   test("computeHudMetrics and getHudShellStyle auto-scale compact and zoomed viewports", () => {

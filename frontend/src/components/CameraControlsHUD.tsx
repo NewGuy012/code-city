@@ -32,8 +32,8 @@ import {
   deleteRepoBookmark,
   loadRepoBookmarks,
   saveRepoBookmark,
-  useAltKeyHeld,
   useCameraStore,
+  useModifierKeysHeld,
 } from "../city/cameraStore";
 
 interface CameraControlsHUDProps {
@@ -63,22 +63,50 @@ const LIGHTING_MODES: Array<{ id: TimeOfDay; label: string; icon: typeof Sun }> 
   { id: "night", label: "Night", icon: Moon },
 ];
 
-function YawShortcutHint() {
-  const altHeld = useAltKeyHeld();
+function MouseShortcutHints() {
+  const mods = useModifierKeysHeld();
+  const hints = [
+    {
+      label: "Mouse pan",
+      keys: "Space + Drag",
+      testId: "pan-drag-hint",
+      active: mods.space,
+      title: "Hold Space and drag to pan the city",
+    },
+    {
+      label: "Mouse rotate",
+      keys: "Ctrl + Drag",
+      testId: "orbit-drag-hint",
+      active: mods.ctrl,
+      title: "Hold Control and drag to rotate yaw & pitch",
+    },
+    {
+      label: "Mouse yaw",
+      keys: "Alt / Opt + Drag",
+      testId: "yaw-drag-hint",
+      active: mods.alt,
+      title:
+        "Hold Alt (or Option on Mac) and drag horizontally with the left mouse button to rotate yaw",
+    },
+  ];
   return (
-    <div className="flex items-center justify-between pt-0.5 text-[10px] text-slate-400">
-      <span>Mouse yaw</span>
-      <kbd
-        data-testid="yaw-drag-hint"
-        title="Hold Alt (or Option on Mac) and drag horizontally with the left mouse button to rotate yaw"
-        className={`rounded px-1.5 py-0.5 font-mono text-[9px] transition ${
-          altHeld
-            ? "bg-sky-500/25 text-sky-300 ring-1 ring-sky-400/35"
-            : "bg-white/[0.06] text-slate-300"
-        }`}
-      >
-        Alt / Opt + Drag
-      </kbd>
+    <div className="space-y-1 pt-0.5 text-[10px] text-slate-400">
+      {hints.map((h) => (
+        <div key={h.testId} className="flex items-center justify-between">
+          <span>{h.label}</span>
+          <kbd
+            data-testid={h.testId}
+            title={h.title}
+            className={`rounded px-1.5 py-0.5 font-mono text-[9px] transition ${
+              h.active
+                ? "bg-sky-500/25 text-sky-300 ring-1 ring-sky-400/35"
+                : "bg-white/[0.06] text-slate-300"
+            }`}
+          >
+            {h.keys}
+          </kbd>
+        </div>
+      ))}
     </div>
   );
 }
@@ -120,7 +148,7 @@ export function CameraControlsHUD({
       id: "yaw",
       label: "Yaw",
       keys: "Q/E",
-      hint: "Yaw around Y-axis: Q / E or hold Alt/Option + Left-drag (Shift+Q/E toggles 90° snap vs smooth · N for North)",
+      hint: "Yaw around Y-axis: Q / E, Ctrl + Drag, or Alt/Option + Drag for yaw-only (Shift+Q/E toggles 90° snap vs smooth · N for North)",
       testId: "yaw-slider",
       resetTestId: "yaw-reset-btn",
       resetTitle: `Reset Yaw to ${defaultYawDeg}° North (N)`,
@@ -136,7 +164,7 @@ export function CameraControlsHUD({
       id: "pitch",
       label: "Pitch",
       keys: "R/F",
-      hint: "Pitch tilt around X-axis: R / F (T toggles Top-Down)",
+      hint: "Pitch tilt around X-axis: R / F or Ctrl + Drag (T toggles Top-Down)",
       testId: "pitch-slider",
       resetTestId: "pitch-reset-btn",
       resetTitle: `Reset Pitch to ${DEFAULT_PITCH}°`,
@@ -152,6 +180,7 @@ export function CameraControlsHUD({
   return (
     <div
       data-testid="camera-controls-hud"
+      data-cam-target={`${cam.targetX.toFixed(1)},${cam.targetZ.toFixed(1)}`}
       className={`sim-panel pointer-events-auto relative flex h-9 max-w-full shrink-0 items-center gap-1 rounded-xl px-1.5 text-[11px] ${
         isViewPopoverOpen ? "z-40" : ""
       }`}
@@ -370,7 +399,7 @@ export function CameraControlsHUD({
                     </button>
                   </div>
                 ))}
-                <YawShortcutHint />
+                <MouseShortcutHints />
               </div>
 
               <div className="grid grid-cols-4 gap-1 pt-0.5">

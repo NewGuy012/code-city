@@ -116,6 +116,60 @@ def _assert_zero_idle_raf(page: Page, mode_label: str) -> None:
     assert idle_raf == 0, f"Expected 0 idle RAF calls in {mode_label}, got {idle_raf}"
 
 
+def _perform_drag(
+    page: Page,
+    x0: int,
+    y0: int,
+    x1: int,
+    y1: int,
+    modifier_key: str | None = None,
+) -> None:
+    """Move, optional-hold modifier key, drag, and release."""
+    if modifier_key:
+        page.keyboard.down(modifier_key)
+    try:
+        page.mouse.move(x0, y0)
+        page.mouse.down()
+        page.mouse.move(x1, y1, steps=6)
+        page.mouse.up()
+    finally:
+        if modifier_key:
+            page.keyboard.up(modifier_key)
+
+
+def _assert_drag_no_camera_change(page: Page, x0: int, y0: int, x1: int, y1: int) -> None:
+    """Plain left-drag without a shortcut must neither rotate nor pan."""
+    hud = page.locator('[data-testid="camera-controls-hud"]')
+    before_target = hud.get_attribute("data-cam-target")
+    _perform_drag(page, x0, y0, x1, y1)
+    assert hud.get_attribute("data-cam-target") == before_target
+
+    page.click('[data-testid="camera-view-btn"]')
+    page.wait_for_selector('[data-testid="camera-view-popover"]', timeout=5000)
+    expect(page.locator('[data-testid="yaw-reset-btn"]')).to_have_text("45°", timeout=3000)
+    expect(page.locator('[data-testid="pitch-reset-btn"]')).to_have_text("35°", timeout=3000)
+    page.keyboard.press("Escape")
+    page.wait_for_timeout(120)
+
+
+def _assert_drag_pan(page: Page, x0: int, y0: int, x1: int, y1: int) -> None:
+    """Space + left-drag must pan without rotating, then reset via preset 2."""
+    hud = page.locator('[data-testid="camera-controls-hud"]')
+    before_target = hud.get_attribute("data-cam-target")
+    _perform_drag(page, x0, y0, x1, y1, modifier_key="Space")
+    after_target = hud.get_attribute("data-cam-target")
+    assert after_target != before_target, "Expected Space + drag to pan camera target"
+
+    page.click('[data-testid="camera-view-btn"]')
+    page.wait_for_selector('[data-testid="camera-view-popover"]', timeout=5000)
+    expect(page.locator('[data-testid="yaw-reset-btn"]')).to_have_text("45°", timeout=3000)
+    expect(page.locator('[data-testid="pitch-reset-btn"]')).to_have_text("35°", timeout=3000)
+    page.keyboard.press("2")
+    page.wait_for_timeout(600)
+    page.keyboard.press("Escape")
+    page.wait_for_timeout(120)
+
+
 def _assert_drag_rotation(
     page: Page,
     x0: int,
@@ -124,24 +178,15 @@ def _assert_drag_rotation(
     y1: int,
     reset_key: str,
     *,
-    alt: bool = False,
+    modifier_key: str = "Control",
 ) -> None:
-    """Drag to rotate (yaw+pitch on left-drag, yaw-only with Alt held), then reset."""
-    if alt:
-        page.keyboard.down("Alt")
-    try:
-        page.mouse.move(x0, y0)
-        page.mouse.down()
-        page.mouse.move(x1, y1, steps=6)
-        page.mouse.up()
-    finally:
-        if alt:
-            page.keyboard.up("Alt")
+    """Drag with Control (yaw+pitch) or Alt (yaw-only) to rotate, then reset."""
+    _perform_drag(page, x0, y0, x1, y1, modifier_key=modifier_key)
 
     page.click('[data-testid="camera-view-btn"]')
     page.wait_for_selector('[data-testid="camera-view-popover"]', timeout=5000)
     expect(page.locator('[data-testid="yaw-reset-btn"]')).not_to_have_text("45°", timeout=3000)
-    if alt:
+    if modifier_key == "Alt":
         expect(page.locator('[data-testid="pitch-reset-btn"]')).to_have_text("35°", timeout=3000)
     else:
         expect(page.locator('[data-testid="pitch-reset-btn"]')).not_to_have_text(
@@ -425,6 +470,8 @@ def test_live_studio_e2e_2d_datamaps_tour_notes_3d_timescrub_and_quack(tmp_path:
                 expect(page.locator('[data-testid="roll-slider"]')).to_have_count(0)
                 expect(page.locator('[data-testid="roll-reset-btn"]')).to_have_count(0)
                 expect(page.locator('[data-testid="orient-opt-level"]')).to_have_count(0)
+                expect(page.locator('[data-testid="pan-drag-hint"]')).to_have_text("Space + Drag")
+                expect(page.locator('[data-testid="orbit-drag-hint"]')).to_have_text("Ctrl + Drag")
                 expect(page.locator('[data-testid="yaw-drag-hint"]')).to_have_text(
                     "Alt / Opt + Drag"
                 )
@@ -463,16 +510,20 @@ def test_live_studio_e2e_2d_datamaps_tour_notes_3d_timescrub_and_quack(tmp_path:
                     "35°", timeout=3000
                 )
 
-                # Left-drag rotates yaw+pitch and Alt + Left-drag rotates yaw only in both 2D and 3D
+                # Plain left-drag is a no-op; Space+drag pans; Ctrl+drag rotates; Alt+drag is yaw
                 page.keyboard.press("Escape")
                 page.wait_for_timeout(120)
-                _assert_drag_rotation(page, 680, 420, 840, 500, "x", alt=False)
-                _assert_drag_rotation(page, 680, 420, 840, 460, "x", alt=True)
+                _assert_drag_no_camera_change(page, 680, 420, 840, 500)
+                _assert_drag_pan(page, 680, 420, 840, 500)
+                _assert_drag_rotation(page, 680, 420, 840, 500, "x", modifier_key="Control")
+                _assert_drag_rotation(page, 680, 420, 840, 460, "x", modifier_key="Alt")
 
                 page.click('[data-testid="toggle-2d-3d"]')
                 page.wait_for_selector('[data-testid="city-canvas-3d"]', timeout=10000)
-                _assert_drag_rotation(page, 680, 420, 520, 500, "Shift+X", alt=False)
-                _assert_drag_rotation(page, 680, 420, 520, 500, "Shift+X", alt=True)
+                _assert_drag_no_camera_change(page, 680, 420, 520, 500)
+                _assert_drag_pan(page, 680, 420, 520, 500)
+                _assert_drag_rotation(page, 680, 420, 520, 500, "x", modifier_key="Control")
+                _assert_drag_rotation(page, 680, 420, 520, 500, "x", modifier_key="Alt")
 
                 page.click('[data-testid="toggle-2d-3d"]')
                 page.wait_for_selector('[data-testid="city-canvas-2d"]', timeout=5000)

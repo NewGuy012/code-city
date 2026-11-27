@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 import { isTypingTarget } from "../components/hudPopover";
+import type { CanvasCursorDragIntent } from "./cityTheme";
 
 export type CameraProjection = "perspective" | "orthographic";
 export type TimeOfDay = "day" | "golden" | "night";
@@ -64,6 +65,49 @@ export function computeMousePitch(
   viewportHeight: number,
 ): number {
   return clamp(origPitch + (deltaY * 360) / Math.max(320, viewportHeight), MIN_PITCH, MAX_PITCH);
+}
+
+/** Compute next camera ground target when panning in camera-aligned right/forward axes. */
+export function computeRelativePanTarget(
+  origTargetX: number,
+  origTargetZ: number,
+  yaw: number,
+  rightAmount: number,
+  forwardAmount: number,
+): { targetX: number; targetZ: number } {
+  const rightX = Math.cos(yaw);
+  const rightZ = -Math.sin(yaw);
+  const fwdX = -Math.sin(yaw);
+  const fwdZ = -Math.cos(yaw);
+  return {
+    targetX: origTargetX + rightX * rightAmount + fwdX * forwardAmount,
+    targetZ: origTargetZ + rightZ * rightAmount + fwdZ * forwardAmount,
+  };
+}
+
+export type CanvasDragMode = "pan" | "orbit" | "yaw" | "paint" | "idle";
+
+/** Resolve canvas pointerdown drag behavior: Space+drag pans, Ctrl+drag rotates, plain drag does not rotate. */
+export function resolveCanvasDragMode(opts: {
+  button: number;
+  spaceHeld: boolean;
+  ctrlKey: boolean;
+  altKey: boolean;
+  shiftKey: boolean;
+  metaKey: boolean;
+  activeTool?: string;
+  allowSweeperPaint?: boolean;
+}): CanvasDragMode {
+  const { button, spaceHeld, ctrlKey, altKey, shiftKey, metaKey, activeTool, allowSweeperPaint } =
+    opts;
+  if (button !== 0 && button !== 1 && button !== 2) return "idle";
+  if (spaceHeld) return "pan";
+  if (ctrlKey && (button === 0 || button === 2)) return "orbit";
+  if (button === 2 || button === 1) return "pan";
+  if (altKey && button === 0) return "yaw";
+  if (button === 0 && (shiftKey || metaKey)) return "pan";
+  if (allowSweeperPaint && activeTool === "sweeper" && button === 0) return "paint";
+  return "idle";
 }
 
 function clamp(v: number, lo: number, hi: number): number {
@@ -170,15 +214,18 @@ class CameraStore {
 
   /** Pan in camera-aligned screen/ground axes: forward (+1 = up/away), right (+1 = right). */
   panRelative(rightAmount: number, forwardAmount: number): void {
-    const { yaw } = this.state;
-    const rightX = Math.cos(yaw);
-    const rightZ = -Math.sin(yaw);
-    const fwdX = -Math.sin(yaw);
-    const fwdZ = -Math.cos(yaw);
-    this.panWorld(
-      rightX * rightAmount + fwdX * forwardAmount,
-      rightZ * rightAmount + fwdZ * forwardAmount,
+    const next = computeRelativePanTarget(
+      this.state.targetX,
+      this.state.targetZ,
+      this.state.yaw,
+      rightAmount,
+      forwardAmount,
     );
+    this.setState({
+      ...next,
+      followVehicleId: null,
+      cinematicOrbit: false,
+    });
   }
 
   rotateCompass(stepDelta: -1 | 1): void {
@@ -317,38 +364,168 @@ export function useCameraStore(): UnifiedCameraState {
   return snap;
 }
 
-export function useAltKeyHeld(): boolean {
-  const [held, setHeld] = useState(false);
+export interface ModifierKeysState {
+  alt: boolean;
+  ctrl: boolean;
+  space: boolean;
+}
+
+export function resolveCursorIntent(
+  activeDragMode: CanvasDragMode | null,
+  mods: ModifierKeysState,
+): { yawMode: boolean; dragIntent: CanvasCursorDragIntent } {
+  const activeCameraMode =
+    activeDragMode === "pan" || activeDragMode === "orbit" || activeDragMode === "yaw"
+      ? activeDragMode
+      : null;
+  if (activeCameraMode === "yaw" || (!activeCameraMode && mods.alt && !mods.space && !mods.ctrl)) {
+    return { yawMode: true, dragIntent: null };
+  }
+  if (activeCameraMode === "pan") return { yawMode: false, dragIntent: "panning" };
+  if (activeCameraMode === "orbit") return { yawMode: false, dragIntent: "orbiting" };
+  if (mods.space) return { yawMode: false, dragIntent: "pan" };
+  if (mods.ctrl) return { yawMode: false, dragIntent: "orbit" };
+  return { yawMode: false, dragIntent: null };
+}
+
+let modifierState: ModifierKeysState = { alt: false, ctrl: false, space: false };
+const modifierListeners = new Set<(next: ModifierKeysState) => void>();
+let modifierCleanup: (() => void) | null = null;
+
+function isSpaceKeyEvent(e: KeyboardEvent): boolean {
+  return e.code === "Space" || e.key === " " || e.key === "Spacebar";
+}
+
+function isModalOpen(): boolean {
+  if (typeof document === "undefined") return false;
+  const root = document.getElementById("codecity-modal-root");
+  return Boolean(root && root.childElementCount > 0);
+}
+
+function setModifierState(patch: Partial<ModifierKeysState>): void {
+  const next: ModifierKeysState = {
+    alt: patch.alt ?? modifierState.alt,
+    ctrl: patch.ctrl ?? modifierState.ctrl,
+    space: patch.space ?? modifierState.space,
+  };
+  if (
+    next.alt === modifierState.alt &&
+    next.ctrl === modifierState.ctrl &&
+    next.space === modifierState.space
+  ) {
+    return;
+  }
+  modifierState = next;
+  for (const fn of modifierListeners) {
+    fn(next);
+  }
+}
+
+function resetModifiers(): void {
+  setModifierState({ alt: false, ctrl: false, space: false });
+}
+
+function ensureModifierListeners(): void {
+  if (modifierCleanup !== null || typeof window === "undefined") return;
+
+  const onKey = (e: KeyboardEvent) => {
+    const typing = isTypingTarget(e.target);
+    const patch: Partial<ModifierKeysState> = {
+      alt: e.key === "Alt" ? e.type === "keydown" && !typing : e.altKey && !typing,
+      ctrl: e.key === "Control" ? e.type === "keydown" && !typing : e.ctrlKey && !typing,
+    };
+    if (isSpaceKeyEvent(e)) {
+      if (e.type === "keydown") {
+        if (!typing && !isModalOpen() && !e.metaKey && !e.ctrlKey && !e.altKey) {
+          e.preventDefault();
+          patch.space = true;
+        } else if (typing || isModalOpen()) {
+          patch.space = false;
+        }
+      } else {
+        if (modifierState.space && !typing && !isModalOpen()) {
+          e.preventDefault();
+        }
+        patch.space = false;
+      }
+    }
+    setModifierState(patch);
+  };
+
+  const onPointer = (e: PointerEvent) => {
+    const typing = isTypingTarget(e.target);
+    setModifierState({
+      alt: e.altKey && !typing,
+      ctrl: e.ctrlKey && !typing,
+      ...(isModalOpen() ? { space: false } : {}),
+    });
+  };
+
+  const onFocusIn = (e: FocusEvent) => {
+    if (isTypingTarget(e.target) || isModalOpen()) {
+      resetModifiers();
+    }
+  };
+
+  const onVisibility = () => {
+    if (typeof document !== "undefined" && document.hidden) {
+      resetModifiers();
+    }
+  };
+
+  window.addEventListener("keydown", onKey, true);
+  window.addEventListener("keyup", onKey, true);
+  window.addEventListener("pointermove", onPointer, true);
+  window.addEventListener("pointerdown", onPointer, true);
+  window.addEventListener("focusin", onFocusIn, true);
+  window.addEventListener("blur", resetModifiers);
+  document.addEventListener("visibilitychange", onVisibility);
+
+  modifierCleanup = () => {
+    window.removeEventListener("keydown", onKey, true);
+    window.removeEventListener("keyup", onKey, true);
+    window.removeEventListener("pointermove", onPointer, true);
+    window.removeEventListener("pointerdown", onPointer, true);
+    window.removeEventListener("focusin", onFocusIn, true);
+    window.removeEventListener("blur", resetModifiers);
+    document.removeEventListener("visibilitychange", onVisibility);
+    modifierCleanup = null;
+    resetModifiers();
+  };
+}
+
+export function isSpaceKeyHeld(): boolean {
+  return modifierState.space;
+}
+
+export function useModifierKeysHeld(): ModifierKeysState {
+  const [mods, setMods] = useState<ModifierKeysState>(() => modifierState);
 
   useEffect(() => {
-    const update = (next: boolean) => setHeld((prev) => (prev === next ? prev : next));
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Alt") {
-        update(e.type === "keydown" && !isTypingTarget(e.target));
-      } else {
-        update(e.altKey && !isTypingTarget(e.target));
-      }
-    };
-    const onPointer = (e: PointerEvent) => {
-      update(e.altKey && !isTypingTarget(e.target));
-    };
-    const onBlur = () => update(false);
-
-    window.addEventListener("keydown", onKey, true);
-    window.addEventListener("keyup", onKey, true);
-    window.addEventListener("pointermove", onPointer, true);
-    window.addEventListener("pointerdown", onPointer, true);
-    window.addEventListener("blur", onBlur);
+    ensureModifierListeners();
+    setMods(modifierState);
+    modifierListeners.add(setMods);
     return () => {
-      window.removeEventListener("keydown", onKey, true);
-      window.removeEventListener("keyup", onKey, true);
-      window.removeEventListener("pointermove", onPointer, true);
-      window.removeEventListener("pointerdown", onPointer, true);
-      window.removeEventListener("blur", onBlur);
+      modifierListeners.delete(setMods);
+      if (modifierListeners.size === 0 && modifierCleanup) {
+        modifierCleanup();
+      }
     };
   }, []);
 
-  return held;
+  return mods;
+}
+
+export function useAltKeyHeld(): boolean {
+  return useModifierKeysHeld().alt;
+}
+
+export function useCtrlKeyHeld(): boolean {
+  return useModifierKeysHeld().ctrl;
+}
+
+export function useSpaceKeyHeld(): boolean {
+  return useModifierKeysHeld().space;
 }
 
 const MOVEMENT_KEYS = new Set([

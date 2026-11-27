@@ -12,13 +12,17 @@ import type {
 } from "../types/city";
 import { BuildingTooltip } from "./BuildingTooltip";
 import {
+  type CanvasDragMode,
   MAX_ZOOM,
   MIN_ZOOM,
   type UnifiedCameraState,
   cameraStore,
   computeMousePitch,
   computeMouseYaw,
-  useAltKeyHeld,
+  isSpaceKeyHeld,
+  resolveCanvasDragMode,
+  resolveCursorIntent,
+  useModifierKeysHeld,
 } from "./cameraStore";
 import { canvasCursorClass } from "./cityTheme";
 import {
@@ -76,12 +80,12 @@ export const CityCanvas2D = memo(function CityCanvas2D({
   const hitsRef = useRef<HitBuilding[]>([]);
   const hasAutoFitRef = useRef(false);
   const requestRenderRef = useRef<() => void>(() => {});
-  const altHeld = useAltKeyHeld();
-  const [yawDragging, setYawDragging] = useState(false);
+  const mods = useModifierKeysHeld();
+  const [activeDragMode, setActiveDragMode] = useState<CanvasDragMode | null>(null);
 
   const dragRef = useRef<{
     active: boolean;
-    mode: "pan" | "paint" | "yaw" | "orbit";
+    mode: CanvasDragMode;
     moved: boolean;
     startX: number;
     startY: number;
@@ -92,7 +96,7 @@ export const CityCanvas2D = memo(function CityCanvas2D({
     paintedFiles: Set<string>;
   }>({
     active: false,
-    mode: "orbit",
+    mode: "idle",
     moved: false,
     startX: 0,
     startY: 0,
@@ -413,6 +417,13 @@ export const CityCanvas2D = memo(function CityCanvas2D({
   }, []);
 
   useEffect(() => {
+    if (mods.alt || mods.ctrl || mods.space) {
+      hoverPendingRef.current = null;
+      setHoveredHit((prev) => (prev === null ? prev : null));
+    }
+  }, [mods.alt, mods.ctrl, mods.space]);
+
+  useEffect(() => {
     return () => {
       if (hoverRafRef.current !== 0) cancelAnimationFrame(hoverRafRef.current);
     };
@@ -437,23 +448,19 @@ export const CityCanvas2D = memo(function CityCanvas2D({
   function handlePointerDown(e: React.PointerEvent<HTMLCanvasElement>) {
     if (e.button !== 0 && e.button !== 1 && e.button !== 2) return;
     const state = cameraStore.getState();
-    const isPanGesture =
-      e.button === 2 ||
-      e.button === 1 ||
-      (e.button === 0 && (e.shiftKey || e.ctrlKey || e.metaKey) && !e.altKey);
-    const isYawRotate = !isPanGesture && e.altKey && e.button === 0;
-    const isSweeperPaint =
-      !isPanGesture && !isYawRotate && activeTool === "sweeper" && e.button === 0;
-    const mode: "pan" | "paint" | "yaw" | "orbit" = isPanGesture
-      ? "pan"
-      : isYawRotate
-        ? "yaw"
-        : isSweeperPaint
-          ? "paint"
-          : "orbit";
-    if (isYawRotate) {
+    const mode = resolveCanvasDragMode({
+      button: e.button,
+      spaceHeld: isSpaceKeyHeld(),
+      ctrlKey: e.ctrlKey,
+      altKey: e.altKey,
+      shiftKey: e.shiftKey,
+      metaKey: e.metaKey,
+      activeTool,
+      allowSweeperPaint: true,
+    });
+    if (mode === "yaw" || mode === "orbit" || mode === "pan") {
       e.preventDefault();
-      setYawDragging(true);
+      setActiveDragMode(mode);
       setHoveredHit(null);
       cameraStore.setState({ followVehicleId: null, cinematicOrbit: false });
     } else {
@@ -471,7 +478,7 @@ export const CityCanvas2D = memo(function CityCanvas2D({
       origPitch: state.pitch,
       paintedFiles: new Set(),
     };
-    if (isSweeperPaint && onToolAction) {
+    if (mode === "paint" && onToolAction) {
       const hit = findHitAt(e.clientX, e.clientY);
       if (hit) {
         dragRef.current.paintedFiles.add(hit.file.file_path);
@@ -508,6 +515,10 @@ export const CityCanvas2D = memo(function CityCanvas2D({
         return;
       }
       dragRef.current.moved = true;
+
+      if (dragRef.current.mode === "idle") {
+        return;
+      }
 
       if (dragRef.current.mode === "yaw" || dragRef.current.mode === "orbit") {
         const h = canvas?.clientHeight || window.innerHeight || 720;
@@ -547,7 +558,7 @@ export const CityCanvas2D = memo(function CityCanvas2D({
       return;
     }
 
-    if (e.altKey) {
+    if (e.altKey || e.ctrlKey || isSpaceKeyHeld()) {
       setHoveredHit(null);
       return;
     }
@@ -558,7 +569,7 @@ export const CityCanvas2D = memo(function CityCanvas2D({
         hoverRafRef.current = 0;
         const pt = hoverPendingRef.current;
         const c = canvasRef.current;
-        if (!pt || !c || dragRef.current.active) return;
+        if (!pt || !c || dragRef.current.active || isSpaceKeyHeld()) return;
         const hit = findHitAt(pt.clientX, pt.clientY);
         if (hit) {
           const rect = c.getBoundingClientRect();
@@ -578,8 +589,8 @@ export const CityCanvas2D = memo(function CityCanvas2D({
 
   function finishDrag(e: React.PointerEvent<HTMLCanvasElement>) {
     dragRef.current.active = false;
-    dragRef.current.mode = "orbit";
-    setYawDragging(false);
+    dragRef.current.mode = "idle";
+    setActiveDragMode(null);
     if (e.currentTarget.hasPointerCapture(e.pointerId)) {
       e.currentTarget.releasePointerCapture(e.pointerId);
     }
@@ -589,7 +600,7 @@ export const CityCanvas2D = memo(function CityCanvas2D({
     const wasMoved = dragRef.current.moved;
     const wasMode = dragRef.current.mode;
     finishDrag(e);
-    if (!wasMoved && e.button === 0 && (wasMode === "orbit" || wasMode === "pan")) {
+    if (!wasMoved && e.button === 0 && wasMode === "idle") {
       const hit = findHitAt(e.clientX, e.clientY);
       if (hit && activeTool !== "inspect" && onToolAction) {
         onToolAction(hit.file);
@@ -599,12 +610,14 @@ export const CityCanvas2D = memo(function CityCanvas2D({
     }
   }
 
+  const cursorIntent = resolveCursorIntent(activeDragMode, mods);
+
   return (
     <div ref={containerRef} className="relative h-full w-full overflow-hidden">
       <canvas
         ref={canvasRef}
         data-testid="city-canvas-2d"
-        className={`block h-full w-full touch-none select-none ${canvasCursorClass(activeTool, Boolean(hoveredHit), altHeld || yawDragging)}`}
+        className={`block h-full w-full touch-none select-none ${canvasCursorClass(activeTool, Boolean(hoveredHit), cursorIntent.yawMode, cursorIntent.dragIntent)}`}
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
@@ -617,7 +630,7 @@ export const CityCanvas2D = memo(function CityCanvas2D({
         }}
       />
 
-      {hoveredHit && (
+      {hoveredHit && !mods.alt && !mods.ctrl && !mods.space && (
         <BuildingTooltip
           file={hoveredHit.file}
           x={hoveredHit.x}

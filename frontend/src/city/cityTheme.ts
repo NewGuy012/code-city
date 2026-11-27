@@ -229,12 +229,21 @@ export function selectFaultLines(
   return [];
 }
 
+export type CanvasCursorDragIntent = "pan" | "panning" | "orbit" | "orbiting" | null;
+
 export function canvasCursorClass(
   activeTool: string,
   hasHover: boolean,
   yawRotateMode = false,
+  cameraDragIntent: CanvasCursorDragIntent = null,
 ): string {
   if (yawRotateMode) return "cursor-ew-resize";
+  if (cameraDragIntent === "panning" || cameraDragIntent === "orbiting") {
+    return "cursor-grabbing";
+  }
+  if (cameraDragIntent === "pan" || cameraDragIntent === "orbit") {
+    return "cursor-grab active:cursor-grabbing";
+  }
   if (activeTool !== "inspect") return "cursor-crosshair";
-  return hasHover ? "cursor-pointer" : "cursor-grab active:cursor-grabbing";
+  return hasHover ? "cursor-pointer" : "cursor-default";
 }

@@ -15,12 +15,18 @@ import type {
 import { BuildingTooltip } from "./BuildingTooltip";
 import {
   type CameraProjection,
+  type CanvasDragMode,
   type TimeOfDay,
   WORLD_CENTER_X,
   WORLD_CENTER_Z,
   cameraStore,
+  computeMousePitch,
   computeMouseYaw,
-  useAltKeyHeld,
+  computeRelativePanTarget,
+  isSpaceKeyHeld,
+  resolveCanvasDragMode,
+  resolveCursorIntent,
+  useModifierKeysHeld,
 } from "./cameraStore";
 import {
   ZONE_PALETTES,
@@ -179,8 +185,8 @@ const CityCanvas3D = memo(function CityCanvas3D({
 }: CityCanvas3DProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const handleRef = useRef<SceneHandle | null>(null);
-  const altHeld = useAltKeyHeld();
-  const [yawDragging, setYawDragging] = useState(false);
+  const mods = useModifierKeysHeld();
+  const [activeDragMode, setActiveDragMode] = useState<CanvasDragMode | null>(null);
   const [hoveredHit, setHoveredHit] = useState<{
     file: FileMetric;
     x: number;
@@ -328,14 +334,29 @@ const CityCanvas3D = memo(function CityCanvas3D({
     controls.maxDistance = 280;
     controls.minPolarAngle = (5 * Math.PI) / 180;
     controls.maxPolarAngle = (78 * Math.PI) / 180;
+    controls.screenSpacePanning = false;
+    controls.mouseButtons = {
+      LEFT: null,
+      MIDDLE: THREE.MOUSE.DOLLY,
+      RIGHT: THREE.MOUSE.PAN,
+    };
 
-    let yawDrag: { active: boolean; pointerId: number; startX: number; origYaw: number } | null =
-      null;
+    let activeDrag: {
+      mode: "pan" | "orbit" | "yaw";
+      pointerId: number;
+      startX: number;
+      startY: number;
+      origTargetX: number;
+      origTargetZ: number;
+      origYaw: number;
+      origPitch: number;
+      moved: boolean;
+    } | null = null;
 
     const renderFrame = () => {
       raf = 0;
       if (typeof document !== "undefined" && document.hidden) return;
-      const moved = !yawDrag?.active && controls.update();
+      const moved = !activeDrag && controls.update();
       if (activeCamera.position.y < 1.8) activeCamera.position.y = 1.8;
       renderer.render(scene, activeCamera);
       if (moved) {
@@ -587,17 +608,35 @@ const CityCanvas3D = memo(function CityCanvas3D({
     const dom = renderer.domElement;
 
     const onPointerDown = (e: PointerEvent) => {
-      if (e.altKey && e.button === 0) {
+      if (e.pointerType === "touch") {
+        downPt = { x: e.clientX, y: e.clientY };
+        return;
+      }
+      const mode = resolveCanvasDragMode({
+        button: e.button,
+        spaceHeld: isSpaceKeyHeld(),
+        ctrlKey: e.ctrlKey,
+        altKey: e.altKey,
+        shiftKey: e.shiftKey,
+        metaKey: e.metaKey,
+      });
+      if (mode === "pan" || mode === "orbit" || mode === "yaw") {
         e.preventDefault();
         e.stopImmediatePropagation();
         controls.enabled = false;
-        yawDrag = {
-          active: true,
+        const st = cameraStore.getState();
+        activeDrag = {
+          mode,
           pointerId: e.pointerId,
           startX: e.clientX,
-          origYaw: cameraStore.getState().yaw,
+          startY: e.clientY,
+          origTargetX: st.targetX,
+          origTargetZ: st.targetZ,
+          origYaw: st.yaw,
+          origPitch: st.pitch,
+          moved: false,
         };
-        setYawDragging(true);
+        setActiveDragMode(mode);
         downPt = null;
         positionHighlightBox(hoveredBox, null);
         setHoveredHit(null);
@@ -605,21 +644,57 @@ const CityCanvas3D = memo(function CityCanvas3D({
         dom.setPointerCapture(e.pointerId);
         return;
       }
-      downPt = { x: e.clientX, y: e.clientY };
+      downPt = e.button === 0 ? { x: e.clientX, y: e.clientY } : null;
     };
 
     const onPointerMove = (e: PointerEvent) => {
-      if (yawDrag?.active) {
+      if (activeDrag) {
         e.preventDefault();
         e.stopImmediatePropagation();
-        cameraStore.setState({
-          yaw: computeMouseYaw(yawDrag.origYaw, e.clientX - yawDrag.startX, viewportH),
-          cinematicOrbit: false,
-        });
+        const dx = e.clientX - activeDrag.startX;
+        const dy = e.clientY - activeDrag.startY;
+        if (!activeDrag.moved && Math.abs(dx) <= 4 && Math.abs(dy) <= 4) {
+          return;
+        }
+        activeDrag.moved = true;
+        if (activeDrag.mode === "yaw") {
+          cameraStore.setState({
+            yaw: computeMouseYaw(activeDrag.origYaw, dx, viewportH),
+            cinematicOrbit: false,
+          });
+        } else if (activeDrag.mode === "orbit") {
+          cameraStore.setState({
+            yaw: computeMouseYaw(activeDrag.origYaw, dx, viewportH),
+            pitch: computeMousePitch(activeDrag.origPitch, dy, viewportH),
+            cinematicOrbit: false,
+          });
+        } else {
+          const st = cameraStore.getState();
+          const pitchRad = (st.pitch * Math.PI) / 180;
+          const worldSpanY =
+            activeCamera instanceof THREE.OrthographicCamera
+              ? 130 / Math.max(0.35, st.zoom)
+              : 2 *
+                (BASE_ORBIT_DISTANCE / Math.max(0.35, st.zoom)) *
+                Math.tan((perspCam.fov * 0.5 * Math.PI) / 180);
+          const worldPerPx = worldSpanY / Math.max(1, viewportH);
+          const nextTarget = computeRelativePanTarget(
+            activeDrag.origTargetX,
+            activeDrag.origTargetZ,
+            st.yaw,
+            -dx * worldPerPx,
+            (dy * worldPerPx) / Math.max(0.35, Math.sin(pitchRad)),
+          );
+          cameraStore.setState({
+            ...nextTarget,
+            followVehicleId: null,
+            cinematicOrbit: false,
+          });
+        }
         return;
       }
       if (userInteracting) return;
-      if (e.altKey) {
+      if (e.altKey || e.ctrlKey || isSpaceKeyHeld()) {
         if (hoveredBox.group.visible) {
           positionHighlightBox(hoveredBox, null);
           requestRender();
@@ -633,7 +708,7 @@ const CityCanvas3D = memo(function CityCanvas3D({
         hoverRaf = requestAnimationFrame(() => {
           hoverRaf = 0;
           const pt = hoverPending;
-          if (!pt || userInteracting) return;
+          if (!pt || userInteracting || activeDrag || isSpaceKeyHeld()) return;
           const file = pickBuilding(pt.x, pt.y);
           if (file) {
             const rect = dom.getBoundingClientRect();
@@ -658,11 +733,11 @@ const CityCanvas3D = memo(function CityCanvas3D({
       }
     };
 
-    const endYawDrag = (e: PointerEvent): boolean => {
-      if (!yawDrag?.active || e.pointerId !== yawDrag.pointerId) return false;
-      yawDrag = null;
+    const endActiveDrag = (e: PointerEvent): boolean => {
+      if (!activeDrag || e.pointerId !== activeDrag.pointerId) return false;
+      activeDrag = null;
       controls.enabled = true;
-      setYawDragging(false);
+      setActiveDragMode(null);
       downPt = null;
       if (dom.hasPointerCapture(e.pointerId)) {
         dom.releasePointerCapture(e.pointerId);
@@ -672,7 +747,7 @@ const CityCanvas3D = memo(function CityCanvas3D({
     };
 
     const onPointerUp = (e: PointerEvent) => {
-      if (endYawDrag(e)) return;
+      if (endActiveDrag(e)) return;
       if (!downPt) return;
       const moved = Math.hypot(e.clientX - downPt.x, e.clientY - downPt.y);
       downPt = null;
@@ -688,7 +763,7 @@ const CityCanvas3D = memo(function CityCanvas3D({
     };
 
     const onPointerCancel = (e: PointerEvent) => {
-      endYawDrag(e);
+      endActiveDrag(e);
     };
 
     const onPointerLeave = () => {
@@ -1066,13 +1141,27 @@ const CityCanvas3D = memo(function CityCanvas3D({
     h.requestRender();
   }, [blastRadius, cochanges, files, selectedFile]);
 
+  useEffect(() => {
+    if (mods.alt || mods.ctrl || mods.space) {
+      setHoveredHit((prev) => (prev === null ? prev : null));
+      const h = handleRef.current;
+      if (h && h.hoveredBox.group.visible) {
+        positionHighlightBox(h.hoveredBox, null);
+        h.requestRender();
+      }
+    }
+  }, [mods.alt, mods.ctrl, mods.space]);
+
+  const cursorIntent = resolveCursorIntent(activeDragMode, mods);
+
   return (
     <div
       ref={containerRef}
       data-testid="city-canvas-3d"
-      className={`relative h-full w-full overflow-hidden bg-sky-950 ${canvasCursorClass(activeTool, Boolean(hoveredHit), altHeld || yawDragging)}`}
+      onContextMenu={(e) => e.preventDefault()}
+      className={`relative h-full w-full overflow-hidden bg-sky-950 ${canvasCursorClass(activeTool, Boolean(hoveredHit), cursorIntent.yawMode, cursorIntent.dragIntent)}`}
     >
-      {hoveredHit && (
+      {hoveredHit && !mods.alt && !mods.ctrl && !mods.space && (
         <BuildingTooltip
           file={hoveredHit.file}
           x={hoveredHit.x}
